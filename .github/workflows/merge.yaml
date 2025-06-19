@@ -1,0 +1,65 @@
+name: Merge Workflow
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'helper/**'
+      - 'internal/**'
+      - 'krun-config.json'
+      - 'main.go'
+      - '**/*.mod'
+      - '**/*.sum'
+
+jobs:
+  build:
+    runs-on: [self-hosted, linux]
+    container:
+      image: mcr.microsoft.com/dotnet/sdk:8.0
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetch all history for accurate versioning
+
+      - name: Install Dependencies
+        run: apt-get update && apt-get install -y zip mingw-w64
+
+      - name: Install golang
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Install GitVersion
+        uses: gittools/actions/gitversion/setup@v0.11.0
+        with:
+          versionSpec: '5.x'
+
+      - name: Run GitVersion
+        id: gitversion
+        uses: gittools/actions/gitversion/execute@v0.11.0
+
+      - name: Run Go Build
+        env:
+          GIT_VERSION: ${{ steps.gitversion.outputs.semVer }}
+          GOARCH: amd64
+          GOOS: windows
+        run: |
+          x86_64-w64-mingw32-windres helper/helper.rc -O coff -o helper/resource.syso
+
+          go build -ldflags "-X main.version=$GIT_VERSION" -buildvcs=false -o krun.exe main.go
+          go build -C helper -ldflags "-X main.version=$GIT_VERSION" -buildvcs=false -o ../krunhelper.exe helper.go
+
+          zip -r krun_windows_$GOARCH.zip krun.exe krunhelper.exe
+
+      - name: Create Release
+        id: create_release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ steps.gitversion.outputs.semVer }}
+          name: Release ${{ steps.gitversion.outputs.semVer }}
+          generateReleaseNotes: true
+          artifacts: krun_*.zip
