@@ -1,0 +1,10 @@
+{
+  "source": {
+    "path": "c:/git/ftechmax/",
+    "search_depth": 1
+  },
+  "hostname": "kube.local",
+  "local_registry": "registry:5000",
+  "remote_registry": "ftechmax",
+  "use_hosts_file": false
+}
