@@ -10,5 +10,5 @@
   "hostname": "",
   "local_registry": "registry:5000",
   "remote_registry": "",
-  "use_hosts_file": true
+  "use_hosts_file": false
 }

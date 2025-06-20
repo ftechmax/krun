@@ -14,21 +14,21 @@ import (
 )
 
 var (
-	cacheFile 		= "krun.cache"
-	cacheTtl		= 24 * time.Hour
-	config      	= cfg.Config{}
-	version         = "" // will be set by the build system
-	services        = []cfg.Service{} // map of service name to service struct
+	cacheFile = "krun.cache"
+	cacheTtl  = 24 * time.Hour
+	config    = cfg.Config{}
+	version   = ""              // will be set by the build system
+	services  = []cfg.Service{} // map of service name to service struct
 
-	colorReset = "\033[0m"
-	colorRed = "\033[31m"
-	colorGreen = "\033[32m"
-	colorYellow = "\033[33m"
-	colorBlue = "\033[34m"
+	colorReset   = "\033[0m"
+	colorRed     = "\033[31m"
+	colorGreen   = "\033[32m"
+	colorYellow  = "\033[33m"
+	colorBlue    = "\033[34m"
 	colorMagenta = "\033[35m"
-	colorCyan = "\033[36m"
-	colorGray = "\033[37m"
-	colorWhite = "\033[97m"
+	colorCyan    = "\033[36m"
+	colorGray    = "\033[37m"
+	colorWhite   = "\033[97m"
 )
 
 func printHelp() {
@@ -168,12 +168,12 @@ func main() {
 			fmt.Printf("Disabling debug mode for service %s\n", argServiceName)
 			debug.Disable(service, config)
 		} else {
-			fmt.Printf(colorRed + "Unknown debug action: %s\n" + colorReset, action)
+			fmt.Printf(colorRed+"Unknown debug action: %s\n"+colorReset, action)
 		}
 		return
 
 	default:
-		fmt.Printf(colorRed + "Unknown command: %s\n" + colorReset, args[0])
+		fmt.Printf(colorRed+"Unknown command: %s\n"+colorReset, args[0])
 		printHelp()
 	}
 }
@@ -185,8 +185,8 @@ func printServices() {
 	}
 
 	ts := table.NewWriter()
-    ts.SetOutputMirror(os.Stdout)
-    ts.AppendHeader(table.Row{"Available services"})
+	ts.SetOutputMirror(os.Stdout)
+	ts.AppendHeader(table.Row{"Available services"})
 	for _, service := range services {
 		ts.AppendRow(table.Row{service.Name})
 	}
@@ -223,7 +223,7 @@ func getServiceNameAndProject(name string) (string, string, error) {
 			break
 		}
 	}
-	
+
 	if serviceName == "" && projectName == "" {
 		return "", "", fmt.Errorf("Service or project '%s' not found\n", name)
 	}
@@ -251,9 +251,9 @@ func parseGlobalOptions(args []string) ([]string, string) {
 func initialize(optKubeConfig string) {
 	krunConfig, err := cfg.ParseKrunConfig()
 	if err != nil {
-        fmt.Printf(colorRed + "Error parsing krun-config.json: %s\n" + colorReset, err)
+		fmt.Printf(colorRed+"Error parsing krun-config.json: %s\n"+colorReset, err)
 		os.Exit(0)
-    }
+	}
 
 	// Check if User section is present
 	if krunConfig.Username == "" || krunConfig.PrivateKey == "" {
@@ -270,23 +270,23 @@ func initialize(optKubeConfig string) {
 	} else {
 		dirname, err := os.UserHomeDir()
 		if err != nil {
-			fmt.Printf(colorRed + "Error getting user home directory: %s\n" + colorReset, err)
+			fmt.Printf(colorRed+"Error getting user home directory: %s\n"+colorReset, err)
 			os.Exit(0)
 		}
 		// set default kubeconfig path
 		config.KubeConfig = filepath.ToSlash(dirname + "/.kube/config")
 	}
-	
+
 	if krunConfig.Hostname == "kube.voortman.net" {
 		// Set the registry suffix to the username.
 		// This is used to create a unique local registry for the user in hosted environments.
 		config.LocalRegistry = fmt.Sprintf("%s/%s", config.LocalRegistry, krunConfig.Username)
-	} 
+	}
 	config.Registry = config.LocalRegistry
 
 	services, err = cfg.DiscoverServices(krunConfig.KrunSourceConfig.Path, krunConfig.KrunSourceConfig.SearchDepth, cacheFile, cacheTtl)
 	if err != nil {
-		fmt.Printf(colorRed + "Error discovering services: %s\n" + colorReset, err)
+		fmt.Printf(colorRed+"Error discovering services: %s\n"+colorReset, err)
 		os.Exit(0)
 	}
 }

@@ -32,11 +32,12 @@ const windowsHostsFile = `C:\Windows\System32\drivers\etc\hosts`
 const windowsHostsTempFile = windowsHostsFile + ".krun.tmp"
 
 type PipeCommand struct {
-	Command     string `json:"command"`
-	KubeConfig  string `json:"kubeconfig"`
-	ServiceName string `json:"service_name,omitempty"`
-	ServicePath string `json:"service_path,omitempty"`
-	ServicePort int    `json:"service_port,omitempty"`
+	Command      string `json:"command"`
+	KubeConfig   string `json:"kubeconfig"`
+	ServiceName  string `json:"service_name,omitempty"`
+	ServicePath  string `json:"service_path,omitempty"`
+	ServicePort  int    `json:"service_port,omitempty"`
+	UseHostsFile bool   `json:"use_hosts_file,omitempty"`
 }
 
 type PipeResponse struct {
@@ -53,77 +54,79 @@ type TelepresenceStatus struct {
 }
 
 type TelepresenceList struct {
-    Cmd    string                   `json:"cmd"`
-    Stdout []TelepresenceListStdout `json:"stdout"`
+	Cmd    string                   `json:"cmd"`
+	Stdout []TelepresenceListStdout `json:"stdout"`
 }
 
 type TelepresenceListStdout struct {
-    Name                 string                          `json:"name"`
-    Namespace            string                          `json:"namespace"`
-    InterceptInfo        []TelepresenceListInterceptInfo `json:"intercept_info,omitempty"`
-    WorkloadResourceType string                          `json:"workload_resource_type"`
-    UID                  string                          `json:"uid"`
-    AgentVersion         string                          `json:"agent_version,omitempty"`
+	Name                 string                          `json:"name"`
+	Namespace            string                          `json:"namespace"`
+	InterceptInfo        []TelepresenceListInterceptInfo `json:"intercept_info,omitempty"`
+	WorkloadResourceType string                          `json:"workload_resource_type"`
+	UID                  string                          `json:"uid"`
+	AgentVersion         string                          `json:"agent_version,omitempty"`
 }
 
 type TelepresenceListInterceptInfo struct {
-    Spec             TelepresenceListSpec `json:"spec"`
-    ID               string               `json:"id"`
-    Disposition      int                  `json:"disposition"`
-    PodName          string               `json:"pod_name"`
-    APIPort          int                  `json:"api_port"`
-    PodIP            string               `json:"pod_ip"`
-    SFTPPort         int                  `json:"sftp_port"`
-    FTPPort          int                  `json:"ftp_port"`
-    ClientMountPoint string               `json:"client_mount_point"`
-    MountPoint       string               `json:"mount_point"`
-    MechanismArgsDesc string              `json:"mechanism_args_desc"`
-    Environment      map[string]string    `json:"environment"`
+	Spec              TelepresenceListSpec `json:"spec"`
+	ID                string               `json:"id"`
+	Disposition       int                  `json:"disposition"`
+	PodName           string               `json:"pod_name"`
+	APIPort           int                  `json:"api_port"`
+	PodIP             string               `json:"pod_ip"`
+	SFTPPort          int                  `json:"sftp_port"`
+	FTPPort           int                  `json:"ftp_port"`
+	ClientMountPoint  string               `json:"client_mount_point"`
+	MountPoint        string               `json:"mount_point"`
+	MechanismArgsDesc string               `json:"mechanism_args_desc"`
+	Environment       map[string]string    `json:"environment"`
 }
 
 type TelepresenceListSpec struct {
-    Name            string `json:"name"`
-    Client          string `json:"client"`
-    Agent           string `json:"agent"`
-    WorkloadKind    string `json:"workload_kind"`
-    Namespace       string `json:"namespace"`
-    Mechanism       string `json:"mechanism"`
-    TargetHost      string `json:"target_host"`
-    PortIdentifier  string `json:"port_identifier"`
-    ServicePortName string `json:"service_port_name"`
-    ServicePort     int    `json:"service_port"`
-    ServiceUID      string `json:"service_uid"`
-    Protocol        string `json:"protocol"`
-    ContainerName   string `json:"container_name"`
-    ContainerPort   int    `json:"container_port"`
-    TargetPort      int    `json:"target_port"`
-    RoundtripLatency int64 `json:"roundtrip_latency"`
-    DialTimeout     int64  `json:"dial_timeout"`
-    Replace         bool   `json:"replace"`
-    NoDefaultPort   bool   `json:"no_default_port"`
+	Name             string `json:"name"`
+	Client           string `json:"client"`
+	Agent            string `json:"agent"`
+	WorkloadKind     string `json:"workload_kind"`
+	Namespace        string `json:"namespace"`
+	Mechanism        string `json:"mechanism"`
+	TargetHost       string `json:"target_host"`
+	PortIdentifier   string `json:"port_identifier"`
+	ServicePortName  string `json:"service_port_name"`
+	ServicePort      int    `json:"service_port"`
+	ServiceUID       string `json:"service_uid"`
+	Protocol         string `json:"protocol"`
+	ContainerName    string `json:"container_name"`
+	ContainerPort    int    `json:"container_port"`
+	TargetPort       int    `json:"target_port"`
+	RoundtripLatency int64  `json:"roundtrip_latency"`
+	DialTimeout      int64  `json:"dial_timeout"`
+	Replace          bool   `json:"replace"`
+	NoDefaultPort    bool   `json:"no_default_port"`
 }
 
 var (
-	infoLog = log.New(os.Stdout, "INFO: ", log.Ldate|log.Ltime)
-    warningLog = log.New(os.Stdout, "WARNING: ", log.Ldate|log.Ltime)
-    errorLog = log.New(os.Stderr, "ERROR: ", log.Ldate|log.Ltime)
+	infoLog        = log.New(os.Stdout, "INFO: ", log.Ldate|log.Ltime)
+	warningLog     = log.New(os.Stdout, "WARNING: ", log.Ldate|log.Ltime)
+	errorLog       = log.New(os.Stderr, "ERROR: ", log.Ldate|log.Ltime)
+	usingHostsFile = false
 )
 
 func main() {
+
 	// Create a channel to receive OS signals
-    sigs := make(chan os.Signal, 1)
-    signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 
-    // Channel to notify main loop to exit
-    done := make(chan bool, 1)
+	// Channel to notify main loop to exit
+	done := make(chan bool, 1)
 
-    // Start a goroutine to listen for signals
-    go func() {
-        <-sigs
-        fmt.Println("\nSignal received! Running shutdown code...")
-        runCleanup()
-        done <- true
-    }()
+	// Start a goroutine to listen for signals
+	go func() {
+		<-sigs
+		fmt.Println("\nSignal received! Running shutdown code...")
+		runCleanup()
+		done <- true
+	}()
 
 	infoLog.Println("Helper started and running persistently")
 
@@ -176,7 +179,7 @@ func main() {
 				continue
 			}
 
-			startTelepresence(cmd.KubeConfig)
+			startTelepresence(cmd.KubeConfig, cmd.UseHostsFile)
 
 			switch cmd.Command {
 			case "debug_enable":
@@ -201,14 +204,14 @@ func main() {
 }
 
 func runCleanup() {
-    infoLog.Println("Cleaning up resources...")
+	infoLog.Println("Cleaning up resources...")
 	stopTelepresence()
 	os.Exit(0)
 }
 
 func debugEnable(cmd PipeCommand) {
 	infoLog.Printf("Enabling debug mode with kubeconfig: %s\n", cmd.KubeConfig)
-	
+
 	port, _ := getFreePort()
 	execCmd := exec.Command("telepresence", "replace", cmd.ServiceName, "--port", fmt.Sprintf("%d:%d", port, cmd.ServicePort), "--env-file", filepath.Join(cmd.ServicePath, "appsettings-debug.env"))
 	execCmd.Stdout = os.Stdout
@@ -249,13 +252,13 @@ func debugList(cmd PipeCommand) string {
 	}
 
 	t := table.NewWriter()
-    t.AppendHeader(table.Row{"Service", "Replaced", "Forward"})
+	t.AppendHeader(table.Row{"Service", "Replaced", "Forward"})
 
 	for _, service := range list.Stdout {
 		forwards := "-"
 		replaced := "No"
 
-		if  service.InterceptInfo != nil && len(service.InterceptInfo) > 0 {
+		if service.InterceptInfo != nil && len(service.InterceptInfo) > 0 {
 			replaced = "Yes"
 			for _, intercept := range service.InterceptInfo {
 				forwards = fmt.Sprintf("%s:%d->%s:%d", intercept.PodIP, intercept.Spec.ContainerPort, intercept.Spec.TargetHost, intercept.Spec.TargetPort)
@@ -296,7 +299,7 @@ func getFreePort() (port int, err error) {
 	return
 }
 
-func startTelepresence(kubeConfig string) error {
+func startTelepresence(kubeConfig string, useHostsFile bool) error {
 	status, err := getTelepresenceStatus()
 	if err != nil {
 		return fmt.Errorf("failed to get telepresence status: %w", err)
@@ -314,17 +317,23 @@ func startTelepresence(kubeConfig string) error {
 
 	infoLog.Println("Telepresence is running")
 
-	// Inject ClusterIP services into hosts file
-	if err := injectClusterIPServicesToHosts(kubeConfig); err != nil {
-		warningLog.Printf("Failed to inject cluster services into hosts file: %v\n", err)
+	if useHostsFile {
+		usingHostsFile = true
+		// Inject ClusterIP services into hosts file
+		if err := injectClusterIPServicesToHosts(kubeConfig); err != nil {
+			warningLog.Printf("Failed to inject cluster services into hosts file: %v\n", err)
+		}
 	}
+
 	return nil
 }
 
 func stopTelepresence() error {
-	// Remove KRUN block from hosts file
-	if err := removeKrunBlockFromHosts(); err != nil {
-		warningLog.Printf("Failed to remove KRUN block from hosts file: %v\n", err)
+	if usingHostsFile {
+		// Remove KRUN block from hosts file
+		if err := removeKrunBlockFromHosts(); err != nil {
+			warningLog.Printf("Failed to remove KRUN block from hosts file: %v\n", err)
+		}
 	}
 
 	execCmd := exec.Command("telepresence", "quit")
