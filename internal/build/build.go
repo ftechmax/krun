@@ -25,7 +25,11 @@ func Build(projectName string, servicesToBuild []cfg.Service, skipWeb bool, forc
 		panic(fmt.Sprintf("Failed to start build container: %s", err.Error()))
 	}
 
-	needsBuild := copySource(config.KubeConfig, projectName, skipWeb, password)
+	needsBuild, err := copySource(config.KubeConfig, projectName, skipWeb, password)
+	if err != nil {
+		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to copy source: %s", err.Error()), utils.Red))
+		return
+	}
 	if needsBuild || force {
 
 		for _, s := range servicesToBuild {

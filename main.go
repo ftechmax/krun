@@ -165,12 +165,11 @@ func handleDebugList(cmd *cobra.Command, args []string) {
 }
 
 func handleDebugEnable(cmd *cobra.Command, args []string) {
-	intercept := true
-	
 	// Disable intercept if --replace flag is set
 	replace, _ := cmd.Flags().GetBool("replace")
+	useIntercept := true
 	if replace {
-		intercept = false
+		useIntercept = false
 	}
 
 	argServiceName := args[0]
@@ -186,7 +185,7 @@ func handleDebugEnable(cmd *cobra.Command, args []string) {
 		return
 	}
 	fmt.Printf("Enabling debug mode for service %s\n", argServiceName)
-	debug.Enable(service, config, intercept)
+	debug.Enable(service, config, useIntercept)
 }
 
 func handleDebugDisable(cmd *cobra.Command, args []string) {

@@ -75,11 +75,11 @@ func restartAll(kubeConfig string, kustomize string) {
 		switch res.Kind {
 		case "Deployment", "StatefulSet", "DaemonSet":
 			if res.Metadata.Name != "" {
-				names = append(names, struct {
-					kind      string
-					name      string
-					namespace string
-				}{kind: res.Kind, name: res.Metadata.Name, namespace: res.Metadata.Namespace})
+				names = append(names, ResourceName{
+					kind: res.Kind, 
+					name: res.Metadata.Name, 
+					namespace: res.Metadata.Namespace,
+				})
 			}
 		}
 	}

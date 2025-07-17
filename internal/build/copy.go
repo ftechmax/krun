@@ -59,7 +59,7 @@ func disablePortforwarding(pfProcess *os.Process) {
 	}
 }
 
-func copySource(kubeConfig string, projectName string, skipWeb bool, password string) bool {
+func copySource(kubeConfig string, projectName string, skipWeb bool, password string) (bool, error) {
 	filesCopied := 0
 
 	fmt.Printf("Copying project %s to remote server\n", projectName)
@@ -68,7 +68,7 @@ func copySource(kubeConfig string, projectName string, skipWeb bool, password st
 	localPort, _ := utils.GetFreePort()
 	pfProcess, pfErr := enablePortForwarding(kubeConfig, localPort)
 	if pfErr != nil {
-		panic("Failed to port forward SFTP port: " + pfErr.Error())
+		return false, fmt.Errorf("Failed to port forward SFTP port: %w", pfErr)
 	}
 	defer disablePortforwarding(pfProcess)
 
@@ -98,14 +98,14 @@ func copySource(kubeConfig string, projectName string, skipWeb bool, password st
 		time.Sleep(2 * time.Second)
 	}
 	if err != nil {
-		panic(utils.Colorize(fmt.Sprintf("Failed to dial after %d attempts: %s", maxRetries, err.Error()), utils.Red))
+		return false, fmt.Errorf("Failed to dial after %d attempts: %w", maxRetries, err)
 	}
 	defer client.Close()
 
 	// Create new SFTP client
 	sftpClient, err := sftp.NewClient(client)
 	if err != nil {
-		panic(utils.Colorize("Failed to create SFTP client: "+err.Error(), utils.Red))
+		return false, fmt.Errorf("Failed to create SFTP client: %w", err)
 	}
 	defer sftpClient.Close()
 	
@@ -175,26 +175,26 @@ func copySource(kubeConfig string, projectName string, skipWeb bool, password st
 			// Create remote file (Linux path)
 			dstFile, err := sftpClient.Create(remoteFile)
 			if err != nil {
-				panic("Failed to create remote file: " + err.Error())
+				return fmt.Errorf("Failed to create remote file: %w", err)
 			}
 			defer dstFile.Close()
 
 			// Copy local file to remote file
 			_, err = io.Copy(dstFile, srcFile)
 			if err != nil {
-				panic("Failed to copy file: " + err.Error())
+				return fmt.Errorf("Failed to copy file: %w", err)
 			}
 		}
 		return nil
 	})
 
 	if err != nil {
-		fmt.Println("Error walking the path:", err)
+		return false, fmt.Errorf("Error walking the path: %w", err)
 	}
 
 	if filesCopied > 0 {
-		return true
+		return true, nil
 	} else {
-		return false
+		return false, nil
 	}
 }
