@@ -22,17 +22,12 @@ type Service struct {
 	InterceptPort int    `json:"intercept_port"` // Default is "5000"
 }
 
-type KrunUserConfig struct {
-	Username   string `json:"username"`
-}
-
 type KrunSourceConfig struct {
 	Path        string `json:"path"`
 	SearchDepth int    `json:"search_depth"`
 }
 
 type KrunConfig struct {
-	KrunUserConfig `json:"user"`
 	KrunSourceConfig `json:"source"`
 	Hostname   string `json:"hostname"`
 	LocalRegistry string `json:"local_registry"`

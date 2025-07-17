@@ -17,7 +17,7 @@ import (
 
 var (
 	cacheFile   = "krun.cache"
-	cacheTtl    = 24 * time.Hour
+	cacheTtl    = 8 * time.Hour
 	config      = cfg.Config{}
 	version     = "" // will be set by the build system
 	services    = []cfg.Service{} // map of service name to service struct
@@ -27,9 +27,9 @@ var kubeConfigPath string
 
 func main() {
 	rootCmd := &cobra.Command{
-		Use:   "krun.exe",
+		Use:   "krun",
 		Short: "krun CLI",
-		Long:  `krun.exe [global options] <command> [command options] <service>`,
+		Long:  `krun [global options] <command> [command options] <service>`,
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			initialize(kubeConfigPath)
 		},
@@ -265,12 +265,6 @@ func initialize(optKubeConfig string) {
 		fmt.Println(utils.Colorize(fmt.Sprintf("Error parsing krun-config.json: %s", err), utils.Red))
 		os.Exit(0)
     }
-
-	// Check if User section is present
-	if krunConfig.Username == "" {
-		fmt.Println(utils.Colorize("krun-config.json is missing username", utils.Red))
-		os.Exit(0)
-	}
 
 	config = cfg.Config{
 		KrunConfig: krunConfig,

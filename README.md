@@ -19,11 +19,9 @@ A command-line tool for building, deploying, and debugging microservices in Kube
 
 3. Unzip the downloaded file to a directory in your `PATH`, or add the directory to your `PATH`.
 
-4. Open the unzipped folder and create a [krun-config.json](#krun-configjson) file and fill the `user` section with your hosted kubernetes cluster username.
+4. Place a `krun.json` file in the root of your project repository to define your services. See the [krun.json](#krunjson) section for details.
 
-5. Place a `krun.json` file in the root of your project repository to define your services. See the [krun.json](#krunjson) section for details.
-
-6. Follow the [debugging instructions](#debugging-with-telepresence) to set up your project for debugging with Telepresence.
+5. Follow the [debugging instructions](#debugging-with-telepresence) to set up your project for debugging with Telepresence.
 
 ## Usage
 
@@ -133,9 +131,6 @@ The [krun-config.json](https://github.com/ftechmax/krun/blob/main/krun-config.js
 
 ```json
 {
-  "user": {
-    "username": "cluster-username"
-  },
   "source": {
     "path": "c:/git/",
     "search_depth": 1
@@ -148,16 +143,12 @@ The [krun-config.json](https://github.com/ftechmax/krun/blob/main/krun-config.js
 
 ### Field Reference
 
-- **`user`**
-
-  - `username`: Your username for the hosted Kubernetes cluster.
-
 - **`source`**
 
   - `path`: Root directory where your project source code is located.
   - `search_depth`: How many directory levels to search for services in `path`.
 
-- **`hostname`**: The hostname of the hosted Kubernetes server.
+- **`hostname`**: The hostname of the Kubernetes server.
 
 - **`local_registry`**: Address of your local Docker registry (used for local builds).
 
