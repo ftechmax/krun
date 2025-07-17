@@ -3,6 +3,8 @@ package build
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"fmt"
+	"os/exec"
 	"strings"
 
 	"github.com/ftechmax/krun/internal/utils"
@@ -67,42 +69,55 @@ spec:
       items:
         - key: registries.conf
           path: registries.conf
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: docker-build
-  namespace: default
-spec:
-  type: NodePort
-  selector:
-    app: docker-build
-  ports:
-    - protocol: TCP
-      port: 22
-      targetPort: 22
 `
 
-func createBuildPod(kubeConfig string) (int32, string, error) {
+const password = "r6iq5N6Ji3Kn"
 
-	password, err := generatePassword(16)
+func buildPodExists(kubeConfig string) (bool, error) {
+	cmd := exec.Command("kubectl", "--kubeconfig="+kubeConfig, "get", "pod", buildPodName, "-o", "jsonpath={.status.phase}")
+	phaseOut, err := cmd.CombinedOutput()
+	phase := strings.TrimSpace(string(phaseOut))
+
 	if err != nil {
-		panic("Failed to generate password: " + err.Error())
+		// If the error indicates the pod is not found, treat as not existing, not an error
+		errMsg := string(phaseOut) + err.Error()
+		if strings.Contains(errMsg, "NotFound") {
+			return false, nil
+		}
+		return false, err
 	}
+
+	switch phase {
+	case "Running":
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+func createBuildPod(kubeConfig string) (string, error) {
+	exists, err := buildPodExists(kubeConfig)
+	if err != nil {
+		return "", fmt.Errorf("failed to check if build pod exists: %w", err)
+	}
+	if exists {
+		return password, nil
+	}
+
+	fmt.Println("\033[32mCreating build container\033[0m")
 	manifest := strings.ReplaceAll(manifest, "##password##", password)
 
 	err = utils.RunCmdStdin(manifest, "kubectl", "--kubeconfig="+kubeConfig, "apply", "-f", "-")
 	if err != nil {
-		panic("Failed to create build pod: " + err.Error())
+		return "", fmt.Errorf("failed to create build pod: %w", err)
 	}
 
-	err = utils.RunCmd("kubectl", "--kubeconfig="+kubeConfig, "wait", "--for", "condition=Ready", "--timeout=90s", "pod", "-l", "app=docker-build")
+	err = utils.RunCmd("kubectl", "--kubeconfig="+kubeConfig, "wait", "--for", "condition=Ready", "--timeout=90s", "pod", "-l", "app="+buildPodName)
 	if err != nil {
-		panic("Failed to wait for build pod to be ready: " + err.Error())
+		return "", fmt.Errorf("failed to wait for build pod to be ready: %w", err)
 	}
 
-	nodePort, _ := utils.GetServiceNodePort(kubeConfig, "default", "docker-build", 22)
-	return nodePort, password, nil
+	return password, nil
 }
 
 func generatePassword(length int) (string, error) {

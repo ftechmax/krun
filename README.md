@@ -19,16 +19,14 @@ A command-line tool for building, deploying, and debugging microservices in Kube
 
 3. Unzip the downloaded file to a directory in your `PATH`, or add the directory to your `PATH`.
 
-4. Open the unzipped folder and update the [krun-config.json](#krun-configjson) `user` section with your hosted kubernetes cluster username and SSH key.
+4. Place a `krun.json` file in the root of your project repository to define your services. See the [krun.json](#krunjson) section for details.
 
-5. Place a `krun.json` file in the root of your project repository to define your services. See the [krun.json](#krunjson) section for details.
-
-6. Follow the [debugging instructions](#debugging-with-telepresence) to set up your project for debugging with Telepresence.
+5. Follow the [debugging instructions](#debugging-with-telepresence) to set up your project for debugging with Telepresence.
 
 ## Usage
 
 ```
-krun.exe [global options] <command> [command options] <service>
+krun [global options] <command> [command options] <service>
 ```
 
 ### Global Options
@@ -47,46 +45,45 @@ krun.exe [global options] <command> [command options] <service>
   Build a project or specific service.  
   Use `--skip-web` to skip building the web service, and `--force` to force a rebuild even if the source has not changed.
 
-  Example:
-
   ```sh
-  krun.exe build awesome-app
-  krun.exe build --skip-web awesome-app
-  krun.exe build --skip-web --force awesome-app
+  krun build awesome-app
+  krun build --skip-web awesome-app
+  krun build --skip-web --force awesome-app
   ```
 
 - `deploy [--use-remote-registry] <project>`  
   Deploy a project.  
   Use `--use-remote-registry` to deploy using the remote Docker registry defined in `krun-config.json`. If not specified, it will use the local Docker registry.
 
-  Example:
-
   ```sh
-  krun.exe deploy awesome-app
-  krun.exe deploy --use-remote-registry awesome-app
+  krun deploy awesome-app
+  krun deploy --use-remote-registry awesome-app
   ```
 
 - `debug list`  
-  List all services with their debug status.  
-  Example:
+  List all services with their debug status.
 
   ```sh
-  krun.exe debug list
+  krun debug list
   ```
 
-- `debug enable <service>`  
+- `debug enable <service> [--replace]`  
   Enable debug mode for a service using Telepresence.  
-  Example:
+  Use `--replace` to replace the service in the Kubernetes cluster, allowing you to run it locally while connected to the cluster.  
+  If `--replace` is not specified, it will intercept the service in the cluster and redirect traffic to your local debug session.
 
   ```sh
-  krun.exe debug enable awesome-app-api
+  krun debug enable awesome-app-api
+  krun debug enable awesome-app-api --replace
   ```
+
+  Intercept mode needs a port configured that matches the port your application is listening on. For example, a C# web api application usually listens on port `5000` which is defined in the `launchSettings.json` file. To make this available for intercept mode, you need to add the `intercept_port` property in your `krun.json` file for the service you want to debug.
 
 - `debug disable <service>`  
-  Disable debug mode for a service.  
-  Example:
+  Disable debug mode for a service.
+
   ```sh
-  krun.exe debug disable awesome-app-api
+  krun debug disable awesome-app-api
   ```
 
 ## Examples
@@ -94,48 +91,48 @@ krun.exe [global options] <command> [command options] <service>
 1. Build the entire project:
 
    ```sh
-   krun.exe build awesome-app
+   krun build awesome-app
    ```
 
 1. Build the project without the web service:
 
    ```sh
-   krun.exe build --skip-web awesome-app
+   krun build --skip-web awesome-app
    ```
 
 1. Build a specific service:
 
    ```sh
-   krun.exe build awesome-app-api
+   krun build awesome-app-api
    ```
 
 1. Deploy a service:
 
    ```sh
-   krun.exe deploy awesome-app-api
+   krun deploy awesome-app-api
    ```
 
 1. Enable debug mode:
 
    ```sh
-   krun.exe debug enable awesome-app-api
+   krun debug enable awesome-app-api
    ```
 
 1. Disable debug mode:
    ```sh
-   krun.exe debug disable awesome-app-api
+   krun debug disable awesome-app-api
    ```
 
 ## krun-config.json
 
-The `krun-config.json` file configures how `krun` interacts with your Kubernetes environment, Docker registries, and source code. Below is a description of each field:
+The [krun-config.json](https://github.com/ftechmax/krun/blob/main/krun-config.json) file configures how `krun` interacts with your Kubernetes environment, Docker registries, and source code. Below is a description of each field:
 
 ### Example
 
 ```json
 {
   "source": {
-    "path": "c:/git/ftechmax/",
+    "path": "c:/git/",
     "search_depth": 1
   },
   "hostname": "kube.local",
@@ -151,7 +148,7 @@ The `krun-config.json` file configures how `krun` interacts with your Kubernetes
   - `path`: Root directory where your project source code is located.
   - `search_depth`: How many directory levels to search for services in `path`.
 
-- **`hostname`**: The hostname of the hosted Kubernetes server.
+- **`hostname`**: The hostname of the Kubernetes server.
 
 - **`local_registry`**: Address of your local Docker registry (used for local builds).
 
@@ -159,7 +156,7 @@ The `krun-config.json` file configures how `krun` interacts with your Kubernetes
 
 > Notes  
 > Ensure all paths use forward slashes or are properly escaped for your operating system.  
-> Make sure your SSH key and kubeconfig are correctly configured.
+> Make sure your kubeconfig is correctly configured.
 
 ## krun.json
 
@@ -217,7 +214,7 @@ Ensure your project launches as a console application (which is the default prof
 To enable debug mode for a service, use the following command:
 
 ```powershell
-krun.exe debug enable <service>
+krun debug enable <service>
 ```
 
 ### Disabling Debug Mode
@@ -225,7 +222,7 @@ krun.exe debug enable <service>
 To disable debug mode for a service, use the following command:
 
 ```powershell
-krun.exe debug disable <service>
+krun debug disable <service>
 ```
 
 ### Inject Kubernetes Environment Variables
