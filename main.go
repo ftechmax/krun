@@ -262,7 +262,7 @@ func initialize(optKubeConfig string) {
 	krunConfig, err := cfg.ParseKrunConfig()
 	if err != nil {
 		fmt.Println(utils.Colorize(fmt.Sprintf("Error parsing krun-config.json: %s", err), utils.Red))
-		os.Exit(0)
+		os.Exit(1)
     }
 
 	config = cfg.Config{
