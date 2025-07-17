@@ -12,16 +12,20 @@ import (
 var config cfg.Config
 
 const workspacePath = "/var/workspace"
-const stfpWorkspacePath = "workspace"
+const sftpWorkspacePath = "workspace"
+const buildPodName = "docker-build"
 
 func Build(projectName string, servicesToBuild []cfg.Service, skipWeb bool, force bool, cfg cfg.Config) {
 	config = cfg
-
+	
 	fmt.Printf("Building project %s\n", projectName)
+		
+	password, err := startBuildContainer(config.KubeConfig)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to start build container: %s", err.Error()))
+	}
 
-	sftpPort, password, _ := startBuildContainer(config.KubeConfig)
-
-	needsBuild := copySource(projectName, skipWeb, sftpPort, password)
+	needsBuild := copySource(config.KubeConfig, projectName, skipWeb, password)
 	if needsBuild || force {
 
 		for _, s := range servicesToBuild {
@@ -35,21 +39,34 @@ func Build(projectName string, servicesToBuild []cfg.Service, skipWeb bool, forc
 	}
 }
 
-func startBuildContainer(kubeConfig string) (int32, string, error) {
-	fmt.Println("\033[32mCreating build container\033[0m")
-	sftpPort, password, err := createBuildPod(kubeConfig)
-	time.Sleep(5 * time.Second) // Give docker daemon some time to spin up
+func startBuildContainer(kubeConfig string) (string, error) {
+	password, err := createBuildPod(kubeConfig)
+	if err != nil {
+		return "", err
+	}
 
-	return sftpPort, password, err
+	// Wait for build pod to be up
+	for range 30 {
+		exists, err := buildPodExists(kubeConfig)
+		if err != nil {
+			return "", fmt.Errorf("error checking build pod state: %w", err)
+		}
+		if exists {
+			return password, nil
+		}
+		fmt.Println("Waiting for build pod to become ready...")
+		time.Sleep(500 * time.Millisecond)
+	}
+	return "", fmt.Errorf("build pod did not become ready in time")
 }
 
 func buildAndPushImagesBuildah(service cfg.Service, registry string, kubeConfig string) {
 	contextPath := filepath.ToSlash(filepath.Join(workspacePath, service.Project, service.Context))
 	dockerfilePath := filepath.ToSlash(filepath.Join(workspacePath, service.Project, service.Path, service.Dockerfile, "Dockerfile"))
 
-	cmd := fmt.Sprintf(
+    cmd := fmt.Sprintf(
 		"buildah bud -t %s/%s -f %s %s && buildah push %s/%s:latest docker://%s/%s:latest",
 		registry, service.Name, dockerfilePath, contextPath, registry, service.Name, registry, service.Name,
-	)
-	utils.RunCmd("kubectl", "--kubeconfig="+kubeConfig, "exec", "pod/docker-build", "--", "/bin/sh", "-c", cmd)
+    )
+    utils.RunCmd("kubectl", "--kubeconfig="+kubeConfig, "exec", "pod/"+buildPodName, "--", "/bin/sh", "-c", cmd)
 }
