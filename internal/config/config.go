@@ -19,6 +19,7 @@ type Service struct {
 	Dockerfile    string `json:"dockerfile"`
 	Context       string `json:"context"`
 	ContainerPort int    `json:"container_port"` // Default is "8080"
+	InterceptPort int    `json:"intercept_port"` // Default is "5000"
 }
 
 type KrunSourceConfig struct {
@@ -28,10 +29,9 @@ type KrunSourceConfig struct {
 
 type KrunConfig struct {
 	KrunSourceConfig `json:"source"`
-	Hostname         string `json:"hostname"`
-	LocalRegistry    string `json:"local_registry"`
-	RemoteRegistry   string `json:"remote_registry"`
-	UseHostsFile     bool   `json:"use_hosts_file"`
+	Hostname   string `json:"hostname"`
+	LocalRegistry string `json:"local_registry"`
+	RemoteRegistry string `json:"remote_registry"`
 }
 
 type Config struct {
@@ -39,6 +39,8 @@ type Config struct {
 	KubeConfig string
 	Registry   string
 }
+
+
 
 func ParseKrunConfig() (KrunConfig, error) {
 	exePath, err := utils.GetExecutablePath()
@@ -69,7 +71,7 @@ func ParseKrunConfig() (KrunConfig, error) {
 func DiscoverServices(sourceDir string, searchDepth int, cacheFile string, cacheTtl time.Duration) ([]Service, error) {
 	var services []Service
 	maxDepth := searchDepth + 1 // Add 1 to include the root directory itself
-
+	
 	exePath, _ := utils.GetExecutablePath()
 	cachePath := filepath.Join(filepath.Dir(exePath), cacheFile)
 
@@ -77,7 +79,7 @@ func DiscoverServices(sourceDir string, searchDepth int, cacheFile string, cache
 	info, err := os.Stat(cachePath)
 	if err == nil && !info.IsDir() && info.ModTime().Add(cacheTtl).After(time.Now()) {
 		fmt.Println("Using cached services from", cachePath)
-
+		
 		// Cache file is valid, read from it
 		file, err := os.Open(cachePath)
 
@@ -97,7 +99,7 @@ func DiscoverServices(sourceDir string, searchDepth int, cacheFile string, cache
 
 		return services, nil
 	}
-
+	
 	// If cache file is not valid, walk the directory to discover services
 	err = filepath.WalkDir(sourceDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -148,6 +150,11 @@ func DiscoverServices(sourceDir string, searchDepth int, cacheFile string, cache
 				// Set the container port to a default value if not specified
 				if svc[i].ContainerPort == 0 {
 					svc[i].ContainerPort = 8080 // Default port if not specified
+				}
+
+				// Set the intercept port to a default value if not specified
+				if svc[i].InterceptPort == 0 {
+					svc[i].InterceptPort = 5000 // Default intercept port if not specified
 				}
 			}
 

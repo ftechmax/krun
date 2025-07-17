@@ -11,14 +11,16 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func Enable(service cfg.Service, config cfg.Config) {
+func Enable(service cfg.Service, config cfg.Config, intercept bool) {
 
 	cmd := contracts.PipeCommand{
-		Command:     "debug_enable",
-		KubeConfig:  config.KubeConfig,
+		Command: "debug_enable",
+		KubeConfig: config.KubeConfig,
 		ServiceName: service.Name,
 		ServicePath: filepath.ToSlash(filepath.Join(config.KrunSourceConfig.Path, service.Project, service.Path)),
 		ServicePort: service.ContainerPort,
+		Intercept: intercept,
+		InterceptPort: service.InterceptPort,
 	}
 
 	msg, err := writeCommand(cmd)
@@ -35,10 +37,10 @@ func Enable(service cfg.Service, config cfg.Config) {
 }
 
 func Disable(service cfg.Service, config cfg.Config) {
-
+	
 	cmd := contracts.PipeCommand{
-		Command:     "debug_disable",
-		KubeConfig:  config.KubeConfig,
+		Command: "debug_disable",
+		KubeConfig: config.KubeConfig,
 		ServiceName: service.Name,
 	}
 
@@ -56,9 +58,9 @@ func Disable(service cfg.Service, config cfg.Config) {
 }
 
 func List(config cfg.Config) {
-
+	
 	cmd := contracts.PipeCommand{
-		Command:    "debug_list",
+		Command: "debug_list",
 		KubeConfig: config.KubeConfig,
 	}
 
