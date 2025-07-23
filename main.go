@@ -236,10 +236,11 @@ func handleList(cmd *cobra.Command, args []string) {
 	for project := range projects {
 		rows = append(rows, []string{project})
 	}
-	t.Headers("Available projects").
-		ClearRows().
+	projectsTable := table.New().
+		Border(lipgloss.ASCIIBorder()).
+		Headers("Available projects").
 		Rows(rows...)
-	fmt.Println(t)
+	fmt.Println(projectsTable)
 	fmt.Println("")
 }
 

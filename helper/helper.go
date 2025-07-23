@@ -267,7 +267,7 @@ func debugList(cmd PipeCommand) string {
 		forwards := "-"
 		replaced := "No"
 
-		if len(service.InterceptInfo) > 0 {
+		if service.InterceptInfo != nil && len(service.InterceptInfo) > 0 {
 			replaced = "Yes"
 			for _, intercept := range service.InterceptInfo {
 				forwards = fmt.Sprintf("%s:%d->%s:%d", intercept.PodIP, intercept.Spec.ContainerPort, intercept.Spec.TargetHost, intercept.Spec.TargetPort)
