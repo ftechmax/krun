@@ -6,12 +6,13 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/lipgloss/table"
 	"github.com/ftechmax/krun/internal/build"
 	cfg "github.com/ftechmax/krun/internal/config"
 	"github.com/ftechmax/krun/internal/debug"
 	"github.com/ftechmax/krun/internal/deploy"
 	"github.com/ftechmax/krun/internal/utils"
-	"github.com/jedib0t/go-pretty/table"
 	"github.com/spf13/cobra"
 )
 
@@ -211,19 +212,21 @@ func handleList(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	ts := table.NewWriter()
-    ts.SetOutputMirror(os.Stdout)
-    ts.AppendHeader(table.Row{"Available services"})
+	rows := [][]string{}
 	for _, service := range services {
-		ts.AppendRow(table.Row{service.Name})
+		rows = append(rows, []string{
+			service.Name,
+		})
 	}
-	ts.Render()
 
+	t := table.New().
+		Border(lipgloss.ASCIIBorder()).
+		Headers("Available services").
+		Rows(rows...)
+	fmt.Println(t)
 	fmt.Println("")
 
-	tp := table.NewWriter()
-	tp.SetOutputMirror(os.Stdout)
-	tp.AppendHeader(table.Row{"Available projects"})
+	rows = [][]string{}
 	projects := make(map[string]bool)
 	for _, service := range services {
 		if service.Project != "" {
@@ -231,9 +234,13 @@ func handleList(cmd *cobra.Command, args []string) {
 		}
 	}
 	for project := range projects {
-		tp.AppendRow(table.Row{project})
+		rows = append(rows, []string{project})
 	}
-	tp.Render()
+	t.Headers("Available projects").
+		ClearRows().
+		Rows(rows...)
+	fmt.Println(t)
+	fmt.Println("")
 }
 
 func getServiceNameAndProject(name string) (string, string, error) {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,9 +17,8 @@ import (
 	"time"
 	"unsafe"
 
-	"context"
-
-	"github.com/jedib0t/go-pretty/table"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/lipgloss/table"
 	"golang.org/x/sys/windows"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -262,23 +262,26 @@ func debugList(cmd PipeCommand) string {
 		return ""
 	}
 
-	t := table.NewWriter()
-	t.AppendHeader(table.Row{"Service", "Replaced", "Forward"})
-
+	rows := [][]string{}
 	for _, service := range list.Stdout {
 		forwards := "-"
 		replaced := "No"
 
-		if  service.InterceptInfo != nil && len(service.InterceptInfo) > 0 {
+		if len(service.InterceptInfo) > 0 {
 			replaced = "Yes"
 			for _, intercept := range service.InterceptInfo {
 				forwards = fmt.Sprintf("%s:%d->%s:%d", intercept.PodIP, intercept.Spec.ContainerPort, intercept.Spec.TargetHost, intercept.Spec.TargetPort)
 			}
 		}
 
-		t.AppendRow([]interface{}{service.Name, replaced, forwards})
+		rows = append(rows, []string{service.Name, replaced, forwards})
 	}
 
+	t := table.New().
+		Border(lipgloss.ASCIIBorder()).
+		Headers("Service", "Replaced", "Forward").
+		Rows(rows...)
+	
 	return t.Render()
 }
 
@@ -325,8 +328,6 @@ func startTelepresence(kubeConfig string) error {
 			return fmt.Errorf("failed to start telepresence: %w", err)
 		}
 	}
-
-	infoLog.Println("Telepresence is running")
 
 	// Inject ClusterIP services into hosts file
 	if err := injectClusterIPServicesToHosts(kubeConfig); err != nil {
