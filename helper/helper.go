@@ -329,6 +329,7 @@ func startTelepresence(kubeConfig string) error {
 		}
 	}
 
+	infoLog.Println("Telepresence is running")
 	// Inject ClusterIP services into hosts file
 	if err := injectClusterIPServicesToHosts(kubeConfig); err != nil {
 		warningLog.Printf("Failed to inject cluster services into hosts file: %v\n", err)
