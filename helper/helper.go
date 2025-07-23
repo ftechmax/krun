@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -165,9 +166,15 @@ func main() {
 			if err != nil {
 				if err == io.EOF {
 					infoLog.Println("Client disconnected")
+				} else if errors.Is(err, syscall.Errno(windows.ERROR_INVALID_HANDLE)) {
+					infoLog.Println("Pipe handle is invalid (client likely disconnected)")
 				} else {
 					errorLog.Println("Error reading from pipe:", err)
 				}
+				
+				if closeErr := file.Close(); closeErr != nil {
+					errorLog.Println("Error closing file:", closeErr)
+				} 
 				break
 			}
 
