@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -170,9 +171,10 @@ func main() {
 				} else {
 					errorLog.Println("Error reading from pipe:", err)
 				}
+				
 				if closeErr := file.Close(); closeErr != nil {
 					errorLog.Println("Error closing file:", closeErr)
-				} // Always close file on error
+				} 
 				break
 			}
 
