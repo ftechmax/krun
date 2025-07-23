@@ -165,12 +165,14 @@ func main() {
 			if err != nil {
 				if err == io.EOF {
 					infoLog.Println("Client disconnected")
-				} else if strings.Contains(err.Error(), "The handle is invalid") {
+				} else if errors.Is(err, syscall.Errno(windows.ERROR_INVALID_HANDLE)) {
 					infoLog.Println("Pipe handle is invalid (client likely disconnected)")
 				} else {
 					errorLog.Println("Error reading from pipe:", err)
 				}
-				file.Close() // Always close file on error
+				if closeErr := file.Close(); closeErr != nil {
+					errorLog.Println("Error closing file:", closeErr)
+				} // Always close file on error
 				break
 			}
 
