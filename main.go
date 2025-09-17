@@ -20,7 +20,7 @@ var (
 	cacheFile   = "krun.cache"
 	cacheTtl    = 8 * time.Hour
 	config      = cfg.Config{}
-	version     = "" // will be set by the build system
+	version     = "debug" // will be set by the build system
 	services    = []cfg.Service{} // map of service name to service struct
 )
 
@@ -96,7 +96,7 @@ func main() {
 		Args:  cobra.MinimumNArgs(1),
 		Run: handleDebugEnable,
 	}
-	debugEnableCmd.Flags().Bool("replace", false, "Use replace instead of intercept")
+	debugEnableCmd.Flags().Bool("intercept", false, "Use intercept instead of replace")
 	debugDisableCmd := &cobra.Command{
 		Use:   "disable <service>",
 		Short: "Disable debug mode for a service",
@@ -166,12 +166,8 @@ func handleDebugList(cmd *cobra.Command, args []string) {
 }
 
 func handleDebugEnable(cmd *cobra.Command, args []string) {
-	// Disable intercept if --replace flag is set
-	replace, _ := cmd.Flags().GetBool("replace")
-	useIntercept := true
-	if replace {
-		useIntercept = false
-	}
+	// Disable replace if --intercept flag is set
+	useIntercept,_ := cmd.Flags().GetBool("intercept")
 
 	argServiceName := args[0]
 	service := cfg.Service{}
