@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -218,14 +217,12 @@ func runCleanup() {
 func debugEnable(cmd PipeCommand) {
 	infoLog.Printf("Enabling debug mode with kubeconfig: %s\n", cmd.KubeConfig)
 
-	freePort, err := getFreePort()
-	if err != nil {
-		errorLog.Printf("Failed to get free port: %v\n", err)
-		return
-	}
-
+	// Important:
+	// replace needs --port "InterceptPort:ServicePort" where InterceptPort is the port the application to debug is listening on and ServicePort is the container port in the cluster
+	// intercept needs --port "InterceptPort" where InterceptPort is the port the application to debug is listening on. By omitting the second port telepresence picks the k8s service port from the cluster
 	mode := "replace"
-	port := fmt.Sprintf("%d:%d", freePort, cmd.ServicePort)
+	port := fmt.Sprintf("%d:%d", cmd.InterceptPort, cmd.ServicePort)
+	fmt.Println("Using port mapping:", port)
 	if cmd.Intercept {
 		mode = "intercept"
 		port = fmt.Sprintf("%d", cmd.InterceptPort)
@@ -234,7 +231,7 @@ func debugEnable(cmd PipeCommand) {
 	execCmd := exec.Command("telepresence", mode, cmd.ServiceName, "--port", port, "--env-file", filepath.Join(cmd.ServicePath, "appsettings-debug.env"))
 	execCmd.Stdout = os.Stdout
 	execCmd.Stderr = os.Stderr
-	err = execCmd.Run()
+	err := execCmd.Run()
 	if err != nil {
 		errorLog.Printf("Command execution failed: %v\n", err)
 	}
@@ -308,17 +305,18 @@ func getTelepresenceStatus() (TelepresenceStatus, error) {
 	return status, nil
 }
 
-func getFreePort() (port int, err error) {
-	var a *net.TCPAddr
-	if a, err = net.ResolveTCPAddr("tcp", "localhost:0"); err == nil {
-		var l *net.TCPListener
-		if l, err = net.ListenTCP("tcp", a); err == nil {
-			defer l.Close()
-			return l.Addr().(*net.TCPAddr).Port, nil
-		}
-	}
-	return
-}
+// NOTE: keep for possible future use
+// func getFreePort() (port int, err error) {
+// 	var a *net.TCPAddr
+// 	if a, err = net.ResolveTCPAddr("tcp", "localhost:0"); err == nil {
+// 		var l *net.TCPListener
+// 		if l, err = net.ListenTCP("tcp", a); err == nil {
+// 			defer l.Close()
+// 			return l.Addr().(*net.TCPAddr).Port, nil
+// 		}
+// 	}
+// 	return
+// }
 
 func startTelepresence(kubeConfig string) error {
 	status, err := getTelepresenceStatus()

@@ -1,4 +1,8 @@
-## Build krunhelper.exe
+## Build krun.exe and krunhelper.exe
+
+```powershell
+go build -o krun.exe
+```
 
 ```powershell
 go build -C helper -o ../krunhelper.exe ; `
