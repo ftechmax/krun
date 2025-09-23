@@ -390,7 +390,6 @@ func injectClusterIPServicesToHosts(kubeConfig string) error {
 
 		// Add headless services
 		if svc.Spec.Type == "ClusterIP" && svc.Spec.ClusterIP == "None" {
-			// Do not rely on label selector; fetch all EndpointSlices and filter in code.
 			endpointSlices, err := clientset.DiscoveryV1().EndpointSlices(svc.Namespace).List(context.Background(), metav1.ListOptions{})
 			if err != nil {
 				warningLog.Printf("Failed to list EndpointSlices for headless service %s/%s: %v\n", svc.Namespace, svc.Name, err)
