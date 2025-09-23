@@ -390,12 +390,16 @@ func injectClusterIPServicesToHosts(kubeConfig string) error {
 
 		// Add headless services
 		if svc.Spec.Type == "ClusterIP" && svc.Spec.ClusterIP == "None" {
-			labelSelector := fmt.Sprintf("kubernetes.io/service-name=%s", svc.Name)
-			endpointSlices, err := clientset.DiscoveryV1().EndpointSlices(svc.Namespace).List(context.Background(), metav1.ListOptions{LabelSelector: labelSelector})
+			// Do not rely on label selector; fetch all EndpointSlices and filter in code.
+			endpointSlices, err := clientset.DiscoveryV1().EndpointSlices(svc.Namespace).List(context.Background(), metav1.ListOptions{})
 			if err != nil {
 				warningLog.Printf("Failed to list EndpointSlices for headless service %s/%s: %v\n", svc.Namespace, svc.Name, err)
 			} else {
 				for _, es := range endpointSlices.Items {
+					// Check if this EndpointSlice belongs to the current service
+					if es.Labels["kubernetes.io/service-name"] != svc.Name {
+						continue
+					}
 					for _, ep := range es.Endpoints {
 						if ep.Hostname == nil || *ep.Hostname == "" {
 							// hostname is required for pod DNS name: <podname>.<svc>.<ns>.svc
