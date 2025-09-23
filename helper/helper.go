@@ -271,7 +271,7 @@ func debugList(cmd PipeCommand) string {
 		forwards := "-"
 		replaced := "No"
 
-		if service.InterceptInfo != nil && len(service.InterceptInfo) > 0 {
+		if len(service.InterceptInfo) > 0 {
 			replaced = "Yes"
 			for _, intercept := range service.InterceptInfo {
 				forwards = fmt.Sprintf("%s:%d->%s:%d", intercept.PodIP, intercept.Spec.ContainerPort, intercept.Spec.TargetHost, intercept.Spec.TargetPort)
@@ -335,6 +335,10 @@ func startTelepresence(kubeConfig string) error {
 	}
 
 	infoLog.Println("Telepresence is running")
+	// remove any existing KRUN block from hosts file
+	if err := removeKrunBlockFromHosts(); err != nil {
+		warningLog.Printf("Failed to remove existing KRUN block from hosts file: %v\n", err)
+	}
 	// Inject ClusterIP services into hosts file
 	if err := injectClusterIPServicesToHosts(kubeConfig); err != nil {
 		warningLog.Printf("Failed to inject cluster services into hosts file: %v\n", err)
@@ -378,11 +382,42 @@ func injectClusterIPServicesToHosts(kubeConfig string) error {
 	var block strings.Builder
 	block.WriteString(krunHostsBlockStart + "\n")
 	for _, svc := range services.Items {
+		// Add normal ClusterIP services
 		if svc.Spec.Type == "ClusterIP" && svc.Spec.ClusterIP != "None" && svc.Spec.ClusterIP != "" {
 			host := fmt.Sprintf("%s.%s.svc", svc.Name, svc.Namespace)
 			block.WriteString(fmt.Sprintf("%s %s\n", svc.Spec.ClusterIP, host))
 		}
+
+		// Add headless services
+		if svc.Spec.Type == "ClusterIP" && svc.Spec.ClusterIP == "None" {
+			labelSelector := fmt.Sprintf("kubernetes.io/service-name=%s", svc.Name)
+			endpointSlices, err := clientset.DiscoveryV1().EndpointSlices(svc.Namespace).List(context.Background(), metav1.ListOptions{LabelSelector: labelSelector})
+			if err != nil {
+				warningLog.Printf("Failed to list EndpointSlices for headless service %s/%s: %v\n", svc.Namespace, svc.Name, err)
+			} else {
+				for _, es := range endpointSlices.Items {
+					for _, ep := range es.Endpoints {
+						if ep.Hostname == nil || *ep.Hostname == "" {
+							// hostname is required for pod DNS name: <podname>.<svc>.<ns>.svc
+							continue
+						}
+						for _, addr := range ep.Addresses {
+							if addr == "" {
+								continue
+							}
+							// add full: <podname>.<svc>.<ns>.svc.cluster.local
+							fullHost := fmt.Sprintf("%s.%s.%s.svc.cluster.local", *ep.Hostname, svc.Name, svc.Namespace)
+							block.WriteString(fmt.Sprintf("%s %s\n", addr, fullHost))
+							// add short: <podname>.<svc>.<ns>.svc
+							shortHost := fmt.Sprintf("%s.%s.%s.svc", *ep.Hostname, svc.Name, svc.Namespace)
+							block.WriteString(fmt.Sprintf("%s %s\n", addr, shortHost))
+						}
+					}
+				}
+			}
+		}
 	}
+
 	block.WriteString(krunHostsBlockEnd + "\n")
 
 	return updateHostsFileWithBlock(block.String())
