@@ -228,7 +228,7 @@ func debugEnable(cmd PipeCommand) {
 		port = fmt.Sprintf("%d", cmd.InterceptPort)
 	}
 
-	execCmd := exec.Command("telepresence", mode, cmd.ServiceName, "--port", port, "--env-file", filepath.Join(cmd.ServicePath, "appsettings-debug.env"))
+	execCmd := exec.Command("telepresence", mode, cmd.ServiceName, "--port", port, "--env-file", filepath.Join(cmd.ServicePath, "appsettings-debug.env"), "--mount", "false",)
 	execCmd.Stdout = os.Stdout
 	execCmd.Stderr = os.Stderr
 	err := execCmd.Run()
