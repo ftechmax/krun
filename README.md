@@ -41,14 +41,15 @@ krun [global options] <command> [command options] <service>
 - `version`  
   Show version information.
 
-- `build [--skip-web, --force] <project|service>`  
+- `build [--skip-web, --force, --flush] <project|service>`  
   Build a project or specific service.  
-  Use `--skip-web` to skip building the web service, and `--force` to force a rebuild even if the source has not changed.
+  Use `--skip-web` to skip building the web service, `--force` to force a rebuild even if the source has not changed, and `--flush` to delete the existing build pod before building (clearing any cached layers or copied workspace files).
 
   ```sh
   krun build awesome-app
   krun build --skip-web awesome-app
   krun build --skip-web --force awesome-app
+  krun build --flush awesome-app
   ```
 
 - `deploy [--use-remote-registry] <project>`  

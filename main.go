@@ -61,6 +61,7 @@ func main() {
 	}
 	buildCmd.Flags().Bool("skip-web", false, "Skip building the web component")
 	buildCmd.Flags().Bool("force", false, "Force build even if up to date")
+	buildCmd.Flags().Bool("flush", false, "Delete build cache")
 	rootCmd.AddCommand(buildCmd)
 
 	deployCmd := &cobra.Command{
@@ -115,6 +116,7 @@ func main() {
 func handleBuild(cmd *cobra.Command, args []string) {
 	skipWeb, _ := cmd.Flags().GetBool("skip-web")
 	forceBuild, _ := cmd.Flags().GetBool("force")
+	flush, _ := cmd.Flags().GetBool("flush")
 	argServiceName := args[0]
 	serviceName, projectName, err := getServiceNameAndProject(argServiceName)
 	if err != nil {
@@ -134,7 +136,7 @@ func handleBuild(cmd *cobra.Command, args []string) {
 			}
 		}
 	}
-	build.Build(projectName, servicesToBuild, skipWeb, forceBuild, config)
+	build.Build(projectName, servicesToBuild, skipWeb, forceBuild, flush, config)
 }
 
 func handleDeploy(cmd *cobra.Command, args []string) {

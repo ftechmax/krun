@@ -15,11 +15,26 @@ const workspacePath = "/var/workspace"
 const sftpWorkspacePath = "workspace"
 const buildPodName = "docker-build"
 
-func Build(projectName string, servicesToBuild []cfg.Service, skipWeb bool, force bool, cfg cfg.Config) {
+func Build(projectName string, servicesToBuild []cfg.Service, skipWeb bool, force bool, flush bool, cfg cfg.Config) {
 	config = cfg
 	
 	fmt.Printf("Building project %s\n", projectName)
-		
+
+	// If flush requested, delete existing build pod to clear caches
+	if flush {
+		exists, err := buildPodExists(config.KubeConfig)
+		if err != nil {
+			fmt.Println(utils.Colorize(fmt.Sprintf("Failed to check existing build pod for flush: %s", err.Error()), utils.Red))
+		} else if exists {
+			fmt.Println(utils.Colorize("Flushing existing build pod (clearing build cache)", utils.Yellow))
+			if err := deleteBuildPod(config.KubeConfig); err != nil {
+				fmt.Println(utils.Colorize(fmt.Sprintf("Failed to delete existing build pod: %s", err.Error()), utils.Red))
+			} else {
+				fmt.Println(utils.Colorize("Build pod deleted", utils.Green))
+			}
+		}
+	}
+
 	password, err := startBuildContainer(config.KubeConfig)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to start build container: %s", err.Error()))

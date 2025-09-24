@@ -128,3 +128,12 @@ func generatePassword(length int) (string, error) {
 	}
 	return base64.RawURLEncoding.EncodeToString(b)[:length], nil
 }
+
+func deleteBuildPod(kubeConfig string) error {
+  err := utils.RunCmdStdin(manifest, "kubectl", "--kubeconfig="+kubeConfig, "delete", "-f", "-")
+  if err != nil {
+    return fmt.Errorf("failed to delete build pod: %w", err)
+  }
+
+  return nil	
+}
