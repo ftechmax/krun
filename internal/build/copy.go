@@ -67,6 +67,7 @@ func copySource(kubeConfig string, projectName string, skipWeb bool, password st
 
 	plusSym := utils.Colorize("+", utils.Green)
 	minusSym := utils.Colorize("-", utils.Red)
+	squigglySym := utils.Colorize("~", utils.Yellow)
 
 	fmt.Printf("Copying project %s to remote server\n", projectName)
 
@@ -184,10 +185,11 @@ func copySource(kubeConfig string, projectName string, skipWeb bool, password st
 
 			if statErr != nil { // file does not exist remotely
 				filesAdded++
+				fmt.Printf("%s %s\n", plusSym, filepath.ToSlash(relPath))
 			} else {
 				filesUpdated++
-			}
-			fmt.Printf("%s %s\n", plusSym, filepath.ToSlash(relPath))
+				fmt.Printf("%s %s\n", squigglySym, filepath.ToSlash(relPath))
+			}		
 
 			// Create remote file (Linux path)
 			dstFile, err := sftpClient.Create(remoteFile)
