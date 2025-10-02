@@ -30,7 +30,7 @@ func Build(projectName string, servicesToBuild []cfg.Service, skipWeb bool, forc
 			if err := deleteBuildPod(config.KubeConfig); err != nil {
 				fmt.Println(utils.Colorize(fmt.Sprintf("Failed to delete existing build pod: %s", err.Error()), utils.Red))
 			} else {
-				fmt.Println(utils.Colorize("Build pod deleted", utils.Green))
+				fmt.Println(utils.Colorize("Starting fresh build environment...", utils.Cyan))
 			}
 		}
 	}
@@ -65,7 +65,7 @@ func startBuildContainer(kubeConfig string) (string, error) {
 	}
 
 	// Wait for build pod to be up
-	for range 30 {
+	for range 60 {
 		exists, err := buildPodExists(kubeConfig)
 		if err != nil {
 			return "", fmt.Errorf("error checking build pod state: %w", err)
