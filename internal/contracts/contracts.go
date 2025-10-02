@@ -8,6 +8,7 @@ type PipeCommand struct {
 	ServicePort   int    `json:"service_port,omitempty"`
 	Intercept     bool   `json:"intercept,omitempty"`
 	InterceptPort int    `json:"intercept_port,omitempty"`
+	ContainerName string `json:"container_name,omitempty"`
 }
 
 type PipeResponse struct {

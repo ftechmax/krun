@@ -97,6 +97,7 @@ func main() {
 		Run: handleDebugEnable,
 	}
 	debugEnableCmd.Flags().Bool("intercept", false, "Use intercept instead of replace")
+	debugEnableCmd.Flags().String("container", "", "Name of the container in the pod to replace (telepresence --container)")
 	debugDisableCmd := &cobra.Command{
 		Use:   "disable <service>",
 		Short: "Disable debug mode for a service",
@@ -168,6 +169,7 @@ func handleDebugList(cmd *cobra.Command, args []string) {
 func handleDebugEnable(cmd *cobra.Command, args []string) {
 	// Disable replace if --intercept flag is set
 	useIntercept,_ := cmd.Flags().GetBool("intercept")
+	containerName, _ := cmd.Flags().GetString("container")
 
 	argServiceName := args[0]
 	service := cfg.Service{}
@@ -182,7 +184,7 @@ func handleDebugEnable(cmd *cobra.Command, args []string) {
 		return
 	}
 	fmt.Printf("Enabling debug mode for service %s\n", argServiceName)
-	debug.Enable(service, config, useIntercept)
+	debug.Enable(service, config, useIntercept, containerName)
 }
 
 func handleDebugDisable(cmd *cobra.Command, args []string) {

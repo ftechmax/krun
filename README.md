@@ -67,7 +67,7 @@ krun [global options] <command> [command options] <service>
   krun debug list
   ```
 
-- `debug enable <service> [--intercept]`  
+- `debug enable <service> [--intercept, --container <container>]`  
   Enable debug mode for a service using Telepresence.  
   Use `--intercept` to intercept the service in the Kubernetes cluster, allowing you to run it both locally and in the cluster.  
   If `--intercept` is not specified, it will replace the service in the cluster and redirect traffic to your local debug session.
@@ -78,6 +78,12 @@ krun [global options] <command> [command options] <service>
   ```
 
   Both replace and intercept mode need a port configured that matches the port your application is listening on. For example, a C# web api application usually listens on port `5000` which is defined in the `launchSettings.json` file. To make this available for krun, you need to add the `intercept_port` property in your `krun.json` file for the service you want to debug.
+
+Use the `--container` option to specify which container to debug if your pod has multiple containers.
+
+```sh
+krun debug enable awesome-app-api --container awesome-app-api
+```
 
 - `debug disable <service>`  
   Disable debug mode for a service.
@@ -116,6 +122,12 @@ krun [global options] <command> [command options] <service>
 
    ```sh
    krun debug enable awesome-app-api
+   ```
+
+1. Enable debug mode for specific conttainer:
+
+   ```sh
+   krun debug enable awesome-app-api --container mysidecar
    ```
 
 1. Disable debug mode:
