@@ -39,6 +39,7 @@ type PipeCommand struct {
 	ServicePort   int    `json:"service_port,omitempty"`
 	Intercept     bool   `json:"intercept,omitempty"`
 	InterceptPort int    `json:"intercept_port,omitempty"`
+	ContainerName string `json:"container_name,omitempty"`
 }
 
 type PipeResponse struct {
@@ -228,7 +229,11 @@ func debugEnable(cmd PipeCommand) {
 		port = fmt.Sprintf("%d", cmd.InterceptPort)
 	}
 
-	execCmd := exec.Command("telepresence", mode, cmd.ServiceName, "--port", port, "--env-file", filepath.Join(cmd.ServicePath, "appsettings-debug.env"), "--mount", "false")
+	telepresenceArgs := []string{mode, cmd.ServiceName, "--port", port, "--env-file", filepath.Join(cmd.ServicePath, "appsettings-debug.env"), "--mount", "false"}
+	if cmd.ContainerName != "" {
+		telepresenceArgs = append(telepresenceArgs, "--container", cmd.ContainerName)
+	}
+	execCmd := exec.Command("telepresence", telepresenceArgs...)
 	execCmd.Stdout = os.Stdout
 	execCmd.Stderr = os.Stderr
 	err := execCmd.Run()

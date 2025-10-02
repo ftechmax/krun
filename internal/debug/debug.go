@@ -11,7 +11,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func Enable(service cfg.Service, config cfg.Config, intercept bool) {
+func Enable(service cfg.Service, config cfg.Config, intercept bool, containerName string) {
 
 	cmd := contracts.PipeCommand{
 		Command: "debug_enable",
@@ -21,6 +21,7 @@ func Enable(service cfg.Service, config cfg.Config, intercept bool) {
 		ServicePort: service.ContainerPort,
 		Intercept: intercept,
 		InterceptPort: service.InterceptPort,
+		ContainerName: containerName,
 	}
 
 	msg, err := writeCommand(cmd)
