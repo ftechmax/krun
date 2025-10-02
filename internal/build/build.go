@@ -15,11 +15,33 @@ const workspacePath = "/var/workspace"
 const sftpWorkspacePath = "workspace"
 const buildPodName = "docker-build"
 
-func Build(projectName string, servicesToBuild []cfg.Service, skipWeb bool, force bool, cfg cfg.Config) {
+func Build(projectName string, servicesToBuild []cfg.Service, skipWeb bool, force bool, flush bool, cfg cfg.Config) {
 	config = cfg
 	
 	fmt.Printf("Building project %s\n", projectName)
-		
+
+	// If flush requested, delete existing build pod to clear caches
+	if flush {
+		exists, err := buildPodExists(config.KubeConfig)
+		if err != nil {
+			fmt.Println(utils.Colorize(fmt.Sprintf("Failed to check existing build pod for flush: %s", err.Error()), utils.Red))
+		} else if exists {
+			fmt.Println(utils.Colorize("Flushing existing build pod (clearing build cache)", utils.Yellow))
+			if err := deleteBuildPod(config.KubeConfig); err != nil {
+				fmt.Println(utils.Colorize(fmt.Sprintf("Failed to delete existing build pod: %s", err.Error()), utils.Red))
+			} else {
+				fmt.Print(utils.Colorize("Waiting for previous build pod to terminate", utils.Cyan))
+				if err := waitForBuildPodDeletion(config.KubeConfig, 45*time.Second); err != nil {
+					fmt.Println(utils.Colorize(" (timed out)", utils.Yellow))
+					fmt.Println(utils.Colorize("Previous build pod is still terminating; proceeding to recreate (this may fail if it hasn't released resources yet)", utils.Yellow))
+				} else {
+					fmt.Println(utils.Colorize(" (done)", utils.Green))
+					fmt.Println(utils.Colorize("Previous build pod fully removed.", utils.Green))
+				}
+			}
+		}
+	}
+
 	password, err := startBuildContainer(config.KubeConfig)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to start build container: %s", err.Error()))
@@ -50,7 +72,7 @@ func startBuildContainer(kubeConfig string) (string, error) {
 	}
 
 	// Wait for build pod to be up
-	for range 30 {
+	for range 60 {
 		exists, err := buildPodExists(kubeConfig)
 		if err != nil {
 			return "", fmt.Errorf("error checking build pod state: %w", err)
@@ -73,4 +95,24 @@ func buildAndPushImagesBuildah(service cfg.Service, registry string, kubeConfig 
 		registry, service.Name, dockerfilePath, contextPath, registry, service.Name, registry, service.Name,
     )
     utils.RunCmd("kubectl", "--kubeconfig="+kubeConfig, "exec", "pod/"+buildPodName, "--", "/bin/sh", "-c", cmd)
+}
+
+func waitForBuildPodDeletion(kubeConfig string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	ticker := time.NewTicker(750 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		exists, err := buildPodExists(kubeConfig)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for build pod deletion")
+		}
+		fmt.Print(".")
+		<-ticker.C
+	}
 }
