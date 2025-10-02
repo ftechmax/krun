@@ -55,6 +55,14 @@ spec:
       runAsGroup: 1001
     ports:
       - containerPort: 22
+    readinessProbe:
+      tcpSocket:
+        port: 22
+      initialDelaySeconds: 1
+      periodSeconds: 2
+      failureThreshold: 15
+      successThreshold: 1
+      timeoutSeconds: 1
     volumeMounts:
       - mountPath: /home/user/workspace
         name: workspace
@@ -127,4 +135,12 @@ func generatePassword(length int) (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(b)[:length], nil
+}
+
+func deleteBuildPod(kubeConfig string) error {
+  err := utils.RunCmdStdin(manifest, "kubectl", "--kubeconfig="+kubeConfig, "delete", "--wait=false", "-f", "-")
+  if err != nil {
+    return fmt.Errorf("failed to initiate build pod deletion: %w", err)
+  }
+  return nil
 }
