@@ -24,7 +24,13 @@ func Delete(projectName string, config cfg.Config) {
 }
 
 func handle(config cfg.Config, projectName string, delete bool) string {
-	servicePath := fmt.Sprintf("%s/%s", config.KrunSourceConfig.Path, projectName)
+	projectRelPath := projectName
+	if config.ProjectPaths != nil {
+		if p, ok := config.ProjectPaths[projectName]; ok && p != "" {
+			projectRelPath = p
+		}
+	}
+	servicePath := fmt.Sprintf("%s/%s", config.KrunSourceConfig.Path, projectRelPath)
 	k8sPath := fmt.Sprintf("%s/k8s", servicePath)
 	k8sCloudPath := fmt.Sprintf("%s/cloud", k8sPath)
 	k8sEdgePath := fmt.Sprintf("%s/edge", k8sPath)
@@ -76,8 +82,8 @@ func restartAll(kubeConfig string, kustomize string) {
 		case "Deployment", "StatefulSet", "DaemonSet":
 			if res.Metadata.Name != "" {
 				names = append(names, ResourceName{
-					kind: res.Kind, 
-					name: res.Metadata.Name, 
+					kind:      res.Kind,
+					name:      res.Metadata.Name,
 					namespace: res.Metadata.Namespace,
 				})
 			}

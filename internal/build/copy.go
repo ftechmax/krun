@@ -59,7 +59,7 @@ func disablePortforwarding(pfProcess *os.Process) {
 	}
 }
 
-func copySource(kubeConfig string, projectName string, skipWeb bool, password string) (bool, error) {
+func copySource(kubeConfig string, projectName string, projectPath string, skipWeb bool, password string) (bool, error) {
 	startTime := time.Now()
 	filesAdded := 0
 	filesUpdated := 0
@@ -115,9 +115,13 @@ func copySource(kubeConfig string, projectName string, skipWeb bool, password st
 		return false, fmt.Errorf("Failed to create SFTP client: %w", err)
 	}
 	defer sftpClient.Close()
-	
+
 	remotePath := filepath.ToSlash(filepath.Join(sftpWorkspacePath, projectName))
-	serviceDir := filepath.ToSlash(filepath.Join(config.KrunSourceConfig.Path, projectName))
+	projectRelPath := projectName
+	if projectPath != "" {
+		projectRelPath = projectPath
+	}
+	serviceDir := filepath.ToSlash(filepath.Join(config.KrunSourceConfig.Path, filepath.FromSlash(projectRelPath)))
 	localEntries := make(map[string]struct{})
 
 	err = filepath.Walk(serviceDir, func(path string, info os.FileInfo, err error) error {
@@ -145,7 +149,7 @@ func copySource(kubeConfig string, projectName string, skipWeb bool, password st
 				fmt.Println("Failed to get relative path:", err)
 				return err
 			}
-			
+
 			remoteDir := filepath.ToSlash(filepath.Join(remotePath, relPath))
 			if relPath != "." && relPath != "" {
 				localEntries[filepath.ToSlash(relPath)] = struct{}{}
@@ -189,7 +193,7 @@ func copySource(kubeConfig string, projectName string, skipWeb bool, password st
 			} else {
 				filesUpdated++
 				fmt.Printf("%s %s\n", squigglySym, filepath.ToSlash(relPath))
-			}		
+			}
 
 			// Create remote file (Linux path)
 			dstFile, err := sftpClient.Create(remoteFile)
@@ -218,17 +222,17 @@ func copySource(kubeConfig string, projectName string, skipWeb bool, password st
 		if w.Err() != nil {
 			continue
 		}
-		
+
 		p := w.Path()
 		if p == remotePath { // skip root
 			continue
 		}
-		
+
 		rel := strings.TrimPrefix(p, remotePath+"/")
 		if rel == "" {
 			continue
 		}
-		
+
 		rel = filepath.ToSlash(rel)
 		if _, exists := localEntries[rel]; !exists {
 			fi := w.Stat()
@@ -271,8 +275,8 @@ func copySource(kubeConfig string, projectName string, skipWeb bool, password st
 	deletedStr := utils.Colorize(fmt.Sprintf("Deleted: %d", filesDeleted), utils.Red)
 	timeLabel := utils.Colorize("Completed sync in", utils.Gray)
 	timeVal := utils.Colorize(shortDur.String(), utils.Gray)
-	
+
 	fmt.Printf("Sync summary: %s  %s  %s  | %s %s\n", addedStr, updatedStr, deletedStr, timeLabel, timeVal)
-	
+
 	return true, nil
 }
