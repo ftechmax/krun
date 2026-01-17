@@ -17,7 +17,7 @@ const buildPodName = "docker-build"
 
 func Build(projectName string, servicesToBuild []cfg.Service, skipWeb bool, force bool, flush bool, cfg cfg.Config) {
 	config = cfg
-	
+
 	fmt.Printf("Building project %s\n", projectName)
 
 	// If flush requested, delete existing build pod to clear caches
@@ -47,7 +47,11 @@ func Build(projectName string, servicesToBuild []cfg.Service, skipWeb bool, forc
 		panic(fmt.Sprintf("Failed to start build container: %s", err.Error()))
 	}
 
-	needsBuild, err := copySource(config.KubeConfig, projectName, skipWeb, password)
+	projectPath := ""
+	if config.ProjectPaths != nil {
+		projectPath = config.ProjectPaths[projectName]
+	}
+	needsBuild, err := copySource(config.KubeConfig, projectName, projectPath, skipWeb, password)
 	if err != nil {
 		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to copy source: %s", err.Error()), utils.Red))
 		return
@@ -90,11 +94,11 @@ func buildAndPushImagesBuildah(service cfg.Service, registry string, kubeConfig 
 	contextPath := filepath.ToSlash(filepath.Join(workspacePath, service.Project, service.Context))
 	dockerfilePath := filepath.ToSlash(filepath.Join(workspacePath, service.Project, service.Path, service.Dockerfile, "Dockerfile"))
 
-    cmd := fmt.Sprintf(
+	cmd := fmt.Sprintf(
 		"buildah bud -t %s/%s -f %s %s && buildah push %s/%s:latest docker://%s/%s:latest",
 		registry, service.Name, dockerfilePath, contextPath, registry, service.Name, registry, service.Name,
-    )
-    utils.RunCmd("kubectl", "--kubeconfig="+kubeConfig, "exec", "pod/"+buildPodName, "--", "/bin/sh", "-c", cmd)
+	)
+	utils.RunCmd("kubectl", "--kubeconfig="+kubeConfig, "exec", "pod/"+buildPodName, "--", "/bin/sh", "-c", cmd)
 }
 
 func waitForBuildPodDeletion(kubeConfig string, timeout time.Duration) error {

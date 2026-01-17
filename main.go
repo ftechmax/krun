@@ -17,11 +17,11 @@ import (
 )
 
 var (
-	cacheFile   = "krun.cache"
-	cacheTtl    = 8 * time.Hour
-	config      = cfg.Config{}
-	version     = "debug" // will be set by the build system
-	services    = []cfg.Service{} // map of service name to service struct
+	cacheFile = "krun.cache"
+	cacheTtl  = 8 * time.Hour
+	config    = cfg.Config{}
+	version   = "debug"         // will be set by the build system
+	services  = []cfg.Service{} // map of service name to service struct
 )
 
 var kubeConfigPath string
@@ -46,9 +46,9 @@ func main() {
 			},
 		},
 		&cobra.Command{
-			Use:   "list",
-			Short: "List all services or projects",
-			Run: handleList,
+			Use:     "list",
+			Short:   "List all services or projects",
+			Run:     handleList,
 			Example: "krun list",
 		},
 	)
@@ -57,7 +57,7 @@ func main() {
 		Use:   "build <project|service>",
 		Short: "Build a project or specific service",
 		Args:  cobra.MinimumNArgs(1),
-		Run: handleBuild,
+		Run:   handleBuild,
 	}
 	buildCmd.Flags().Bool("skip-web", false, "Skip building the web component")
 	buildCmd.Flags().Bool("force", false, "Force build even if up to date")
@@ -68,16 +68,16 @@ func main() {
 		Use:   "deploy <project>",
 		Short: "Deploy a project",
 		Args:  cobra.MinimumNArgs(1),
-		Run: handleDeploy,
+		Run:   handleDeploy,
 	}
 	deployCmd.Flags().Bool("use-remote-registry", false, "Use remote registry for deploy")
 	rootCmd.AddCommand(deployCmd)
 
 	deleteCmd := &cobra.Command{
-		Use:   "delete <project>",
-		Short: "Delete a project",
-		Args:  cobra.MinimumNArgs(1),
-		Run: handleDelete,
+		Use:     "delete <project>",
+		Short:   "Delete a project",
+		Args:    cobra.MinimumNArgs(1),
+		Run:     handleDelete,
 		Example: "krun delete myproject",
 	}
 	rootCmd.AddCommand(deleteCmd)
@@ -89,13 +89,13 @@ func main() {
 	debugListCmd := &cobra.Command{
 		Use:   "list",
 		Short: "List all services with debug mode status",
-		Run: handleDebugList,
+		Run:   handleDebugList,
 	}
 	debugEnableCmd := &cobra.Command{
 		Use:   "enable <service>",
 		Short: "Enable debug mode for a service",
 		Args:  cobra.MinimumNArgs(1),
-		Run: handleDebugEnable,
+		Run:   handleDebugEnable,
 	}
 	debugEnableCmd.Flags().Bool("intercept", false, "Use intercept instead of replace")
 	debugEnableCmd.Flags().String("container", "", "Name of the container in the pod to replace (telepresence --container)")
@@ -103,7 +103,7 @@ func main() {
 		Use:   "disable <service>",
 		Short: "Disable debug mode for a service",
 		Args:  cobra.MinimumNArgs(1),
-		Run: handleDebugDisable,
+		Run:   handleDebugDisable,
 	}
 	debugCmd.AddCommand(debugListCmd, debugEnableCmd, debugDisableCmd)
 	rootCmd.AddCommand(debugCmd)
@@ -170,7 +170,7 @@ func handleDebugList(cmd *cobra.Command, args []string) {
 
 func handleDebugEnable(cmd *cobra.Command, args []string) {
 	// Disable replace if --intercept flag is set
-	useIntercept,_ := cmd.Flags().GetBool("intercept")
+	useIntercept, _ := cmd.Flags().GetBool("intercept")
 	containerName, _ := cmd.Flags().GetString("container")
 
 	argServiceName := args[0]
@@ -258,7 +258,7 @@ func getServiceNameAndProject(name string) (string, string, error) {
 			break
 		}
 	}
-	
+
 	if serviceName == "" && projectName == "" {
 		return "", "", fmt.Errorf("Service or project '%s' not found.\nRun krun list to show available options", name)
 	}
@@ -271,7 +271,7 @@ func initialize(optKubeConfig string) {
 	if err != nil {
 		fmt.Println(utils.Colorize(fmt.Sprintf("Error parsing krun-config.json: %s", err), utils.Red))
 		os.Exit(1)
-    }
+	}
 
 	config = cfg.Config{
 		KrunConfig: krunConfig,
@@ -288,12 +288,14 @@ func initialize(optKubeConfig string) {
 		// set default kubeconfig path
 		config.KubeConfig = filepath.ToSlash(dirname + "/.kube/config")
 	}
-	
+
 	config.Registry = config.LocalRegistry
 
-	services, err = cfg.DiscoverServices(krunConfig.KrunSourceConfig.Path, krunConfig.KrunSourceConfig.SearchDepth, cacheFile, cacheTtl)
+	var projectPaths map[string]string
+	services, projectPaths, err = cfg.DiscoverServices(krunConfig.KrunSourceConfig.Path, krunConfig.KrunSourceConfig.SearchDepth, cacheFile, cacheTtl)
 	if err != nil {
 		fmt.Println(utils.Colorize(fmt.Sprintf("Error discovering services: %s", err), utils.Red))
 		os.Exit(0)
 	}
+	config.ProjectPaths = projectPaths
 }
