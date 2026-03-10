@@ -1,0 +1,25 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+patches:
+  - target:
+      kind: Deployment
+      name: krun-traffic-manager
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/image
+        value: registry:5000/krun-traffic-manager:latest
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Always
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: KRUN_AGENT_IMAGE
+          value: registry:5000/krun-traffic-agent:latest
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: KRUN_AGENT_IMAGE_PULL_POLICY
+          value: Always

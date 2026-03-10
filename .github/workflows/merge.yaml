@@ -5,38 +5,23 @@ on:
     branches:
       - main
     paths:
-      - 'helper/**'
+      - 'cmd/**'
+      - 'deploy/**'
       - 'internal/**'
       - 'krun-config.json'
-      - 'main.go'
       - '**/*.mod'
       - '**/*.sum'
 
 jobs:
-  build:
-    runs-on: [ubuntu-latest]
-    env:
-      DOTNET_INSTALL_DIR: './.dotnet'
-    permissions:
-      contents: write
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      release_version: ${{ steps.gitversion.outputs.semVer }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Install DotNet
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
-
-      - name: Install Dependencies
-        run: sudo apt-get update && sudo apt-get install -y zip mingw-w64
-
-      - name: Install golang
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.24'
 
       - name: Install GitVersion
         uses: gittools/actions/gitversion/setup@v3.2.1
@@ -50,24 +35,145 @@ jobs:
           useConfigFile: true
           configFilePath: .github/gitversion.yaml
 
-      - name: Run Go Build
-        env:
-          GIT_VERSION: ${{ steps.gitversion.outputs.MajorMinorPatch }}
-          GOARCH: amd64
-          GOOS: windows
+  build-windows-binaries:
+    runs-on: windows-latest
+    needs: version
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install golang
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+
+      - name: Install make
+        shell: powershell
+        run: choco install make -y
+
+      - name: Build Windows binaries with UAC patch
+        shell: powershell
         run: |
-          x86_64-w64-mingw32-windres helper/helper.rc -O coff -o helper/resource.syso
+          make build-windows VERSION=${{ needs.version.outputs.release_version }} GOARCH=amd64 BUILDVCS=false
 
-          go build -ldflags "-X main.version=$GIT_VERSION" -buildvcs=false -o krun.exe main.go
-          go build -C helper -ldflags "-X main.version=$GIT_VERSION" -buildvcs=false -o ../krunhelper.exe helper.go
+      - name: Verify UAC manifest patch
+        shell: powershell
+        run: |
+          $localMt = Join-Path $PWD 'scripts\mt.exe'
+          if (-not (Test-Path $localMt)) {
+            throw 'scripts/mt.exe not found for UAC manifest verification.'
+          }
 
-          zip -r krun_windows_$GOARCH.zip krun.exe krunhelper.exe
+          & $localMt -inputresource:krun-helper.exe`;#1 -out:krun-helper.extracted.manifest
+          if (-not (Select-String -Path krun-helper.extracted.manifest -Pattern 'requireAdministrator' -Quiet)) {
+            throw 'krun-helper.exe is missing requireAdministrator manifest after patch.'
+          }
+
+      - name: Upload Windows binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-binaries
+          retention-days: 1
+          path: |
+            krun.exe
+            krun-helper.exe
+
+  build:
+    runs-on: ubuntu-latest
+    needs:
+      - version
+      - build-windows-binaries
+    env:
+      DOTNET_INSTALL_DIR: './.dotnet'
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install DotNet
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Install Dependencies
+        run: sudo apt-get update && sudo apt-get install -y zip
+
+      - name: Install golang
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+
+      - name: Install kustomize
+        run: |
+          go install sigs.k8s.io/kustomize/kustomize/v5@latest
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Download Windows binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-binaries
+
+      - name: Build release binaries
+        run: |
+          make build-linux VERSION=${{ needs.version.outputs.release_version }} GOARCH=amd64 BUILDVCS=false
+          zip -j krun_linux_amd64.zip krun krun-helper
+          zip -j krun_windows_amd64.zip krun.exe krun-helper.exe
+
+      - name: Build runtime manifest bundle
+        run: |
+          kustomize build deploy/runtime/overlays/production > krun-traffic-manager.yaml
+          sed -i "s|image: docker.io/ftechmax/krun-traffic-manager:latest|image: docker.io/ftechmax/krun-traffic-manager:${{ needs.version.outputs.release_version }}|g" krun-traffic-manager.yaml
+          test -s krun-traffic-manager.yaml
+
+      - name: Build and Push traffic-manager image (amd64, arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: cmd/traffic-manager/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            GIT_VERSION=${{ needs.version.outputs.release_version }}
+          tags: |
+            docker.io/ftechmax/krun-traffic-manager:${{ needs.version.outputs.release_version }}
+            docker.io/ftechmax/krun-traffic-manager:latest
+
+      - name: Build and Push traffic-agent image (amd64, arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: cmd/traffic-agent/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            GIT_VERSION=${{ needs.version.outputs.release_version }}
+          tags: |
+            docker.io/ftechmax/krun-traffic-agent:${{ needs.version.outputs.release_version }}
+            docker.io/ftechmax/krun-traffic-agent:latest
 
       - name: Create Release
         id: create_release
         uses: ncipollo/release-action@v1
         with:
-          tag: ${{ steps.gitversion.outputs.MajorMinorPatch }}
-          name: Release ${{ steps.gitversion.outputs.MajorMinorPatch }}
+          tag: ${{ needs.version.outputs.release_version }}
+          name: Release ${{ needs.version.outputs.release_version }}
           generateReleaseNotes: true
-          artifacts: krun_*.zip
+          artifacts: krun_*.zip,krun-traffic-manager.yaml
+

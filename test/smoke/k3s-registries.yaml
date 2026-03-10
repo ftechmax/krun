@@ -1,0 +1,8 @@
+mirrors:
+  "registry:5000":
+    endpoint:
+      - "http://127.0.0.1:32000"
+configs:
+  "registry:5000":
+    tls:
+      insecure_skip_verify: true

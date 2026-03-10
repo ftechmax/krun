@@ -1,0 +1,257 @@
+name: Smoke Tests
+
+on:
+  push:
+    branches:
+      - develop
+    paths:
+      - 'cmd/**'
+      - 'deploy/**'
+      - 'internal/**'
+      - 'test/**'
+      - 'krun-config.json'
+      - '**/*.mod'
+      - '**/*.sum'
+  workflow_dispatch:
+
+jobs:
+  smoke-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install k3s
+        run: |
+          sudo mkdir -p /etc/rancher/k3s
+          sudo cp test/smoke/k3s-registries.yaml /etc/rancher/k3s/registries.yaml
+          curl -sfL https://get.k3s.io | sudo sh -s - --write-kubeconfig-mode 644 --disable=traefik
+
+      - name: Configure kubectl
+        run: |
+          mkdir -p "$HOME/.kube"
+          sudo cp /etc/rancher/k3s/k3s.yaml "$HOME/.kube/config"
+          sudo chown "$USER:$USER" "$HOME/.kube/config"
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+          kubectl wait --for=condition=Ready node --all --timeout=120s
+
+      - name: Wait for kubelet
+        run: |
+          for i in $(seq 1 30); do
+            ready=$(kubectl get nodes -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+            if [ "$ready" = "True" ]; then
+              break
+            fi
+            sleep 2
+          done
+
+          kubectl get nodes
+
+          for i in $(seq 1 30); do
+            if kubectl get serviceaccount default -n default >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Start local registry
+        run: |
+          kubectl apply -f test/smoke/registry.yaml
+          kubectl wait --for=condition=Ready pod/registry --timeout=120s
+
+      - name: Build krun binaries
+        run: |
+          mkdir -p bin
+          make build-linux VERSION=debug GOARCH=amd64 BUILDVCS=false
+          mv krun bin/krun
+          mv krun-helper bin/krun-helper
+          chmod +x bin/krun
+          chmod +x bin/krun-helper
+          
+          cat > bin/krun-config.json <<EOF
+          {
+            "source": {
+              "path": "${GITHUB_WORKSPACE}/apps",
+              "search_depth": 1
+            },
+            "hostname": "kube.local",
+            "local_registry": "registry:5000",
+            "remote_registry": "registry:5000"
+          }
+          EOF
+          echo "$PWD/bin" >> "$GITHUB_PATH"
+
+      - name: Build krun runtime images
+        run: |
+          docker build -f cmd/traffic-manager/Dockerfile -t 127.0.0.1:32000/krun-traffic-manager:latest .
+          docker push 127.0.0.1:32000/krun-traffic-manager:latest
+          docker build -f cmd/traffic-agent/Dockerfile -t 127.0.0.1:32000/krun-traffic-agent:latest .
+          docker push 127.0.0.1:32000/krun-traffic-agent:latest
+
+      - name: Build runtime manifests
+        run: |
+          kubectl kustomize deploy/runtime/overlays/local > /tmp/krun-runtime.yaml
+          test -s /tmp/krun-runtime.yaml
+          kubectl kustomize deploy/runtime/overlays/production > /tmp/krun-runtime-prod.yaml
+          test -s /tmp/krun-runtime-prod.yaml
+
+      - name: Create smoke app
+        run: |
+          mkdir -p apps/smoke-app
+          cp test/smoke/krun.json apps/smoke-app/krun.json
+          cp -R test/smoke/app apps/smoke-app/
+          cp -R test/smoke/k8s apps/smoke-app/
+
+      - name: Test krun version
+        run: |
+          output=$(krun version)
+          echo "$output"
+          echo "$output" | grep -q "debug"
+
+      - name: Test krun list
+        run: |
+          output=$(krun list)
+          echo "$output"
+          echo "$output" | grep -q "smoke-app"
+
+      - name: Test krun build
+        run: |
+          output=$(krun build smoke-app)
+          echo "$output" | grep -q "Building project"
+
+      - name: Test krun deploy
+        run: |
+          output=$(krun deploy --no-restart smoke-app)
+          echo "$output"
+          echo "$output" | grep -q "Deploying"
+          kubectl wait --for=condition=Available deployment/smoke-app --timeout=120s
+
+      - name: Debug smoke-app deploy (on failure)
+        if: ${{ failure() }}
+        run: |
+          echo "[debug] deployment summary"
+          kubectl get deployment smoke-app -o wide || true
+          echo "[debug] pod summary"
+          kubectl get pods -l app=smoke-app -o wide || true
+          echo "[debug] pod descriptions"
+          kubectl describe pods -l app=smoke-app || true
+          echo "[debug] pod logs"
+          kubectl logs -l app=smoke-app --all-containers=true --tail=200 || true
+
+      - name: Test krun debug runtime install
+        env:
+          KRUN_AGENT_IMAGE: registry:5000/krun-traffic-agent:latest
+        run: |
+          output=$(krun debug runtime install)
+          echo "$output"
+          echo "$output" | grep -q "Traffic manager installed successfully"
+
+      - name: Debug runtime install (on failure)
+        if: ${{ failure() }}
+        run: |
+          echo "[debug] runtime namespace"
+          kubectl get namespace krun-system || true
+          echo "[debug] runtime resources"
+          kubectl get all -n krun-system || true
+          echo "[debug] runtime deployment"
+          kubectl get deployment krun-traffic-manager -n krun-system -o wide || true
+          echo "[debug] runtime pod descriptions"
+          kubectl describe pods -n krun-system || true
+          echo "[debug] runtime pod logs"
+          kubectl logs -n krun-system -l app.kubernetes.io/name=krun-traffic-manager --all-containers=true --tail=200 || true
+
+      - name: Test krun debug runtime status
+        run: |
+          output=$(krun debug runtime status)
+          echo "$output"
+          echo "$output" | grep -q "Traffic manager: healthy"
+
+      - name: Start krun-helper daemon
+        run: |
+          sudo -n "$GITHUB_WORKSPACE/bin/krun-helper" --kubeconfig "$HOME/.kube/config" &
+          for i in $(seq 1 20); do
+            if nc -z 127.0.0.1 47831 2>/dev/null; then
+              echo "krun-helper daemon is ready"
+              break
+            fi
+            sleep 0.5
+          done
+          nc -z 127.0.0.1 47831 || { echo "krun-helper daemon failed to start"; exit 1; }
+
+      - name: Test krun debug enable
+        run: |
+          output=$(krun debug enable smoke-app)
+          echo "$output"
+          echo "$output" | grep -q "Session created"
+
+          ready=0
+          for i in $(seq 1 30); do
+            names=$(kubectl get deployment smoke-app -o jsonpath='{.spec.template.spec.containers[*].name}' 2>/dev/null || true)
+            count=$(echo "$names" | wc -w)
+            available=$(kubectl get deployment smoke-app -o jsonpath='{.status.availableReplicas}' 2>/dev/null || true)
+            echo "[poll $i/30] containers='$names' count=$count available='$available'"
+
+            if [ "$count" = "2" ] && [ "$available" = "1" ]; then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "$ready" != "1" ]; then
+            echo "[debug] smoke-app did not become ready with sidecar"
+            kubectl get deployment smoke-app -o yaml || true
+            kubectl describe deployment smoke-app || true
+            kubectl get pods -l app=smoke-app -o wide || true
+            kubectl describe pods -l app=smoke-app || true
+            kubectl get events --sort-by=.lastTimestamp --field-selector involvedObject.name=smoke-app || true
+            kubectl logs -l app=smoke-app --all-containers=true --tail=200 || true
+            exit 1
+          fi
+
+          echo "[debug] Loop passed: containers='$names' available='$available'"
+          echo "[debug] Checking for krun-traffic-agent in container names..."
+          echo "$names" | tr ' ' '\n'
+          echo "$names" | tr ' ' '\n' | grep -q '^krun-traffic-agent$'
+
+      - name: Test krun debug list
+        run: |
+          output=$(krun debug list)
+          echo "$output"
+          echo "$output" | grep -q "Active debug sessions"
+          echo "$output" | grep -q "smoke-app"
+
+      - name: Test krun debug disable
+        run: |
+          output=$(krun debug disable smoke-app)
+          echo "$output"
+          echo "$output" | grep -q "Session removed"
+          
+          for i in $(seq 1 30); do
+            count=$(kubectl get deployment smoke-app -o jsonpath='{.spec.template.spec.containers[*].name}' 2>/dev/null | wc -w)
+            if [ "$count" = "1" ]; then
+              break
+            fi
+            sleep 2
+          done
+          test "$(kubectl get deployment smoke-app -o jsonpath='{.spec.template.spec.containers[*].name}' 2>/dev/null | wc -w)" = "1" || true
+
+      - name: Test krun debug runtime uninstall
+        run: |
+          output=$(krun debug runtime uninstall)
+          echo "$output"
+          echo "$output" | grep -q "Traffic manager uninstalled successfully"
+          kubectl wait --for=delete deployment/krun-traffic-manager -n krun-system --timeout=120s || true
+          kubectl wait --for=delete namespace/krun-system --timeout=120s || true
+
+      - name: Test krun delete
+        run: |
+          output=$(krun delete smoke-app)
+          echo "$output"
+          echo "$output" | grep -q "Deleting smoke-app"
+          kubectl wait --for=delete deployment/smoke-app --timeout=120s || true

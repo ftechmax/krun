@@ -1,0 +1,405 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"testing"
+
+	"github.com/ftechmax/krun/internal/contracts"
+	"github.com/ftechmax/krun/internal/krun-helper/hostfile"
+	managerclient "github.com/ftechmax/krun/internal/krun-helper/manager-client"
+	"github.com/ftechmax/krun/internal/krun-helper/session"
+)
+
+func TestDebugEnableHandlerAppliesHostsAndPortForwards(t *testing.T) {
+	resetHelperGlobals(t)
+
+	fakeRegistry := &fakePortForwardRegistry{}
+	portForwardRegistry = fakeRegistry
+	fakeManager := &fakeManagerSessionClient{createSessionID: "mgr-session-1"}
+	managerSessionClient = fakeManager
+	fakeStreams := &fakeStreamRegistry{}
+	streamRegistry = fakeStreams
+
+	originalUpdate := hostfileUpdate
+	var updatedEntries []contracts.HostsEntry
+	hostfileUpdate = func(entries []contracts.HostsEntry) error {
+		updatedEntries = append([]contracts.HostsEntry(nil), entries...)
+		return nil
+	}
+	t.Cleanup(func() { hostfileUpdate = originalUpdate })
+
+	handler := newHandler(make(chan struct{}, 1))
+	body, _ := json.Marshal(contracts.DebugSessionCommandRequest{
+		Context: contracts.DebugServiceContext{
+			Project:       "awesome-app3",
+			ServiceName:   "awesome-app3-worker",
+			ContainerPort: 8080,
+			InterceptPort: 5001,
+			ServiceDependencies: []contracts.DebugServiceDependencyContext{
+				{Host: "rabbitmq.default.svc", Port: 5672},
+			},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/debug/enable", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+	if len(updatedEntries) != 1 || updatedEntries[0].Hostname != "rabbitmq.default.svc" {
+		t.Fatalf("unexpected hosts entries: %+v", updatedEntries)
+	}
+	if fakeRegistry.upsertCalls != 1 {
+		t.Fatalf("expected one Upsert call, got %d", fakeRegistry.upsertCalls)
+	}
+	if fakeManager.createCalls != 1 {
+		t.Fatalf("expected one manager create call, got %d", fakeManager.createCalls)
+	}
+	if fakeRegistry.lastSessionKey != "awesome-app3/awesome-app3-worker" {
+		t.Fatalf("unexpected session key %q", fakeRegistry.lastSessionKey)
+	}
+	if len(fakeRegistry.lastForwards) != 1 {
+		t.Fatalf("expected 1 forward, got %+v", fakeRegistry.lastForwards)
+	}
+	if fakeStreams.upsertCalls != 1 {
+		t.Fatalf("expected one stream Upsert call, got %d", fakeStreams.upsertCalls)
+	}
+	if fakeStreams.lastSessionID != "mgr-session-1" {
+		t.Fatalf("unexpected stream session id %q", fakeStreams.lastSessionID)
+	}
+	if fakeStreams.lastInterceptPort != 5001 {
+		t.Fatalf("unexpected stream intercept port %d", fakeStreams.lastInterceptPort)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/v1/debug/sessions", nil)
+	listRec := httptest.NewRecorder()
+	handler.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected list status 200, got %d", listRec.Code)
+	}
+	var listResponse contracts.HelperDebugSessionsResponse
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listResponse); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	if len(listResponse.Sessions) != 1 {
+		t.Fatalf("expected one debug session, got %+v", listResponse.Sessions)
+	}
+	if listResponse.Sessions[0].Context.ServiceName != "awesome-app3-worker" {
+		t.Fatalf("unexpected session service: %+v", listResponse.Sessions[0])
+	}
+	if listResponse.Sessions[0].Context.InterceptPort != 5001 {
+		t.Fatalf("unexpected intercept port: %+v", listResponse.Sessions[0])
+	}
+	if len(listResponse.Sessions[0].Context.ServiceDependencies) != 1 {
+		t.Fatalf("unexpected service dependencies: %+v", listResponse.Sessions[0].Context.ServiceDependencies)
+	}
+
+	managerSessionID, ok := managerSessionsRegistry.Get("awesome-app3/awesome-app3-worker")
+	if !ok || managerSessionID != "mgr-session-1" {
+		t.Fatalf("unexpected manager session mapping: %q %v", managerSessionID, ok)
+	}
+}
+
+func TestDebugDisableHandlerRemovesScopedState(t *testing.T) {
+	resetHelperGlobals(t)
+
+	fakeRegistry := &fakePortForwardRegistry{}
+	portForwardRegistry = fakeRegistry
+	fakeManager := &fakeManagerSessionClient{}
+	managerSessionClient = fakeManager
+	fakeStreams := &fakeStreamRegistry{}
+	streamRegistry = fakeStreams
+
+	hostsRegistry.Upsert("proj-a/svc-a", []contracts.HostsEntry{
+		{IP: "127.0.0.1", Hostname: "rabbitmq.default.svc"},
+	})
+	hostsRegistry.Upsert("proj-b/svc-b", []contracts.HostsEntry{
+		{IP: "127.0.0.1", Hostname: "redis.default.svc"},
+	})
+	managerSessionsRegistry.Upsert("proj-a/svc-a", "mgr-session-2")
+
+	originalUpdate := hostfileUpdate
+	var updatedEntries []contracts.HostsEntry
+	hostfileUpdate = func(entries []contracts.HostsEntry) error {
+		updatedEntries = append([]contracts.HostsEntry(nil), entries...)
+		return nil
+	}
+	t.Cleanup(func() { hostfileUpdate = originalUpdate })
+
+	handler := newHandler(make(chan struct{}, 1))
+	body, _ := json.Marshal(contracts.DebugSessionCommandRequest{
+		Context: contracts.DebugServiceContext{
+			Project:     "proj-a",
+			ServiceName: "svc-a",
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/debug/disable", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+	if fakeRegistry.removeCalls != 1 {
+		t.Fatalf("expected one Remove call, got %d", fakeRegistry.removeCalls)
+	}
+	if fakeStreams.removeCalls != 1 {
+		t.Fatalf("expected one stream Remove call, got %d", fakeStreams.removeCalls)
+	}
+	if fakeManager.deleteCalls != 1 {
+		t.Fatalf("expected one manager delete call, got %d", fakeManager.deleteCalls)
+	}
+	if fakeManager.lastDeletedSessionID != "mgr-session-2" {
+		t.Fatalf("unexpected manager session id %q", fakeManager.lastDeletedSessionID)
+	}
+	if fakeRegistry.lastSessionKey != "proj-a/svc-a" {
+		t.Fatalf("unexpected session key %q", fakeRegistry.lastSessionKey)
+	}
+	want := []contracts.HostsEntry{
+		{IP: "127.0.0.1", Hostname: "redis.default.svc"},
+	}
+	if !slices.Equal(updatedEntries, want) {
+		t.Fatalf("unexpected hosts entries after disable: %+v", updatedEntries)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/v1/debug/sessions", nil)
+	listRec := httptest.NewRecorder()
+	handler.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected list status 200, got %d", listRec.Code)
+	}
+	var listResponse contracts.HelperDebugSessionsResponse
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listResponse); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	if len(listResponse.Sessions) != 0 {
+		t.Fatalf("expected no active sessions after disable, got %+v", listResponse.Sessions)
+	}
+	if _, ok := managerSessionsRegistry.Get("proj-a/svc-a"); ok {
+		t.Fatalf("expected manager session mapping to be removed")
+	}
+}
+
+func TestDebugDisableHandlerFallsBackToManagerLookup(t *testing.T) {
+	resetHelperGlobals(t)
+
+	fakeRegistry := &fakePortForwardRegistry{}
+	portForwardRegistry = fakeRegistry
+	fakeManager := &fakeManagerSessionClient{
+		listSessions: []contracts.DebugSession{
+			{SessionID: "other", Namespace: "default", ServiceName: "other-svc", ClientID: managerclient.ManagerClientID, CreatedAt: "2026-01-01T00:00:00Z"},
+			{SessionID: "target-1", Namespace: "default", ServiceName: "svc-a", ClientID: managerclient.ManagerClientID, CreatedAt: "2026-01-01T00:00:01Z"},
+			{SessionID: "target-2", Namespace: "default", ServiceName: "svc-a", ClientID: managerclient.ManagerClientID, CreatedAt: "2026-01-01T00:00:02Z"},
+		},
+	}
+	managerSessionClient = fakeManager
+	streamRegistry = &fakeStreamRegistry{}
+
+	hostsRegistry.Upsert("proj-a/svc-a", []contracts.HostsEntry{
+		{IP: "127.0.0.1", Hostname: "rabbitmq.default.svc"},
+	})
+
+	originalUpdate := hostfileUpdate
+	hostfileUpdate = func(entries []contracts.HostsEntry) error { return nil }
+	t.Cleanup(func() { hostfileUpdate = originalUpdate })
+
+	handler := newHandler(make(chan struct{}, 1))
+	body, _ := json.Marshal(contracts.DebugSessionCommandRequest{
+		Context: contracts.DebugServiceContext{
+			Project:     "proj-a",
+			ServiceName: "svc-a",
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/debug/disable", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+	if fakeManager.listCalls != 1 {
+		t.Fatalf("expected one manager list call, got %d", fakeManager.listCalls)
+	}
+	if fakeManager.deleteCalls != 1 {
+		t.Fatalf("expected one manager delete call, got %d", fakeManager.deleteCalls)
+	}
+	if fakeManager.lastDeletedSessionID != "target-2" {
+		t.Fatalf("expected latest matching manager session to be deleted, got %q", fakeManager.lastDeletedSessionID)
+	}
+}
+
+func TestDebugEnableHandlerRollsBackWhenManagerCreateFails(t *testing.T) {
+	resetHelperGlobals(t)
+
+	fakeRegistry := &fakePortForwardRegistry{}
+	portForwardRegistry = fakeRegistry
+	managerSessionClient = &fakeManagerSessionClient{
+		createErr: errors.New("manager unavailable"),
+	}
+	streamRegistry = &fakeStreamRegistry{}
+
+	originalUpdate := hostfileUpdate
+	var lastUpdated []contracts.HostsEntry
+	hostfileUpdate = func(entries []contracts.HostsEntry) error {
+		lastUpdated = append([]contracts.HostsEntry(nil), entries...)
+		return nil
+	}
+	t.Cleanup(func() { hostfileUpdate = originalUpdate })
+
+	handler := newHandler(make(chan struct{}, 1))
+	body, _ := json.Marshal(contracts.DebugSessionCommandRequest{
+		Context: contracts.DebugServiceContext{
+			Project:       "proj-a",
+			ServiceName:   "svc-a",
+			ContainerPort: 8080,
+			InterceptPort: 5001,
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/debug/enable", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", rec.Code)
+	}
+	if fakeRegistry.removeCalls != 1 {
+		t.Fatalf("expected rollback remove call, got %d", fakeRegistry.removeCalls)
+	}
+	if len(lastUpdated) != 0 {
+		t.Fatalf("expected hosts rollback to empty entries, got %+v", lastUpdated)
+	}
+	if len(sessionsRegistry.List()) != 0 {
+		t.Fatalf("expected no active sessions after rollback, got %+v", sessionsRegistry.List())
+	}
+}
+
+func TestDebugSessionsListMethodNotAllowed(t *testing.T) {
+	resetHelperGlobals(t)
+	handler := newHandler(make(chan struct{}, 1))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/debug/sessions", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected status 405, got %d", rec.Code)
+	}
+}
+
+func resetHelperGlobals(t *testing.T) {
+	t.Helper()
+	hostsRegistry = hostfile.NewSessionHostsRegistry()
+	sessionsRegistry = session.NewDebugSessionRegistry()
+	managerSessionsRegistry = session.NewManagerSessionRegistry()
+	portForwardRegistry = noopPortForwardRegistry{}
+	streamRegistry = noopStreamRegistry{}
+	managerSessionClient = managerclient.NoopSessionClient{}
+}
+
+type fakePortForwardRegistry struct {
+	upsertCalls    int
+	removeCalls    int
+	clearCalls     int
+	lastSessionKey string
+	lastForwards   []contracts.PortForward
+}
+
+func (f *fakePortForwardRegistry) Upsert(sessionKey string, forwards []contracts.PortForward) error {
+	f.upsertCalls++
+	f.lastSessionKey = sessionKey
+	f.lastForwards = append([]contracts.PortForward(nil), forwards...)
+	return nil
+}
+
+func (f *fakePortForwardRegistry) Remove(sessionKey string) error {
+	f.removeCalls++
+	f.lastSessionKey = sessionKey
+	return nil
+}
+
+func (f *fakePortForwardRegistry) Clear() error {
+	f.clearCalls++
+	return nil
+}
+
+type fakeManagerSessionClient struct {
+	createCalls          int
+	listCalls            int
+	deleteCalls          int
+	createSessionID      string
+	lastDeletedSessionID string
+	createErr            error
+	listErr              error
+	deleteErr            error
+	listSessions         []contracts.DebugSession
+}
+
+func (f *fakeManagerSessionClient) CreateSession(ctx contracts.DebugServiceContext) (contracts.DebugSession, error) {
+	f.createCalls++
+	if f.createErr != nil {
+		return contracts.DebugSession{}, f.createErr
+	}
+
+	sessionID := f.createSessionID
+	if sessionID == "" {
+		sessionID = "mgr-default"
+	}
+	return contracts.DebugSession{
+		SessionID:   sessionID,
+		ServiceName: ctx.ServiceName,
+	}, nil
+}
+
+func (f *fakeManagerSessionClient) DeleteSession(sessionID string) error {
+	f.deleteCalls++
+	f.lastDeletedSessionID = sessionID
+	return f.deleteErr
+}
+
+func (f *fakeManagerSessionClient) ListSessions() ([]contracts.DebugSession, error) {
+	f.listCalls++
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return append([]contracts.DebugSession(nil), f.listSessions...), nil
+}
+
+type fakeStreamRegistry struct {
+	upsertCalls       int
+	removeCalls       int
+	clearCalls        int
+	lastSessionKey    string
+	lastSessionID     string
+	lastSessionToken  string
+	lastInterceptPort int
+}
+
+func (f *fakeStreamRegistry) Upsert(sessionKey string, sessionID string, sessionToken string, interceptPort int) error {
+	f.upsertCalls++
+	f.lastSessionKey = sessionKey
+	f.lastSessionID = sessionID
+	f.lastSessionToken = sessionToken
+	f.lastInterceptPort = interceptPort
+	return nil
+}
+
+func (f *fakeStreamRegistry) Remove(sessionKey string) error {
+	f.removeCalls++
+	f.lastSessionKey = sessionKey
+	return nil
+}
+
+func (f *fakeStreamRegistry) Clear() error {
+	f.clearCalls++
+	return nil
+}

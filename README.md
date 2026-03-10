@@ -6,22 +6,57 @@ A command-line tool for building, deploying, and debugging microservices in Kube
 
 - Build Docker images for services
 - Deploy services to Kubernetes
-- Enable/disable debug mode for services using Telepresence
+- Enable/disable debug mode for services using the in-cluster krun runtime
 
 ## Installation
 
-1. Ensure you have the following dependencies installed:
+1. Get the latest version of `krun` from the [releases page](https://github.com/ftechmax/krun/releases).
 
-   - [kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl)
-   - [telepresence](https://telepresence.io/docs/quick-start/)
+2. Unzip the downloaded file to a directory in your `PATH`, or add the directory to your `PATH`.
 
-2. Get the latest version of `krun` from the [releases page](./releases).
+3. Place a `krun.json` file in the root of your project repository to define your services. See the [krun.json](#krunjson) section for details.
 
-3. Unzip the downloaded file to a directory in your `PATH`, or add the directory to your `PATH`.
+4. Install the runtime components in your cluster
 
-4. Place a `krun.json` file in the root of your project repository to define your services. See the [krun.json](#krunjson) section for details.
+   ```sh
+   krun debug runtime install
+   ```
 
-5. Follow the [debugging instructions](#debugging-with-telepresence) to set up your project for debugging with Telepresence.
+   You can also apply the release manifest directly if you prefer:
+
+   ```sh
+   kubectl apply -f https://github.com/ftechmax/krun/releases/latest/download/krun-traffic-manager.yaml
+   ```
+
+5. Follow the [debugging instructions](#debugging-with-krun-runtime) to set up your project for debugging with the krun runtime.
+
+## Quick Start
+
+Before enabling debug, set `intercept_port` in `krun.json` to the local port your app listens on (for example, `http://localhost:5000` from `launchSettings.json`). Ensure the value is unique per service.
+
+1. Enable debug mode for a service:
+
+```sh
+krun debug enable <service>
+```
+
+2. List active debug sessions:
+
+```sh
+krun debug list
+```
+
+3. Check local helper daemon status (without starting it):
+
+```sh
+krun debug helper status
+```
+
+4. Disable debug mode when finished:
+
+```sh
+krun debug disable <service>
+```
 
 ## Usage
 
@@ -52,45 +87,71 @@ krun [global options] <command> [command options] <service>
   krun build --flush awesome-app
   ```
 
-- `deploy [--use-remote-registry] <project>`  
+- `deploy [--use-remote-registry, --no-restart] <project>`  
   Deploy a project.  
-  Use `--use-remote-registry` to deploy using the remote Docker registry defined in `krun-config.json`. If not specified, it will use the local Docker registry.
+  Use `--use-remote-registry` to deploy using the remote Docker registry defined in `krun-config.json`. If not specified, it will use the local Docker registry. Use `--no-restart` to skip the rollout restart after applying manifests.
 
   ```sh
   krun deploy awesome-app
   krun deploy --use-remote-registry awesome-app
+  krun deploy --no-restart awesome-app
   ```
 
 - `debug list`  
-  List all services with their debug status.
+  List active debug sessions.
 
   ```sh
   krun debug list
   ```
 
-- `debug enable <service> [--intercept, --container <container>]`  
-  Enable debug mode for a service using Telepresence.  
-  Use `--intercept` to intercept the service in the Kubernetes cluster, allowing you to run it both locally and in the cluster.  
-  If `--intercept` is not specified, it will replace the service in the cluster and redirect traffic to your local debug session.
+- `debug enable <service> [--container <container>]`  
+  Enable debug mode for a service using the in-cluster krun runtime.
 
   ```sh
   krun debug enable awesome-app-api
-  krun debug enable awesome-app-api --intercept
   ```
 
-  Both replace and intercept mode need a port configured that matches the port your application is listening on. For example, a C# web api application usually listens on port `5000` which is defined in the `launchSettings.json` file. To make this available for krun, you need to add the `intercept_port` property in your `krun.json` file for the service you want to debug.
+  Debug mode needs a local port configured for your developer machine. Set `intercept_port` in `krun.json` to the port your app listens on locally. Normally you want this to match the `launchSettings.json` `applicationUrl` (for example, `http://localhost:5000`). Ensure the value is unique per service so multiple debug sessions do not conflict.
 
-Use the `--container` option to specify which container to debug if your pod has multiple containers.
+  Use the `--container` option to specify which container to debug if your pod has multiple containers.
 
-```sh
-krun debug enable awesome-app-api --container awesome-app-api
-```
+  ```sh
+  krun debug enable awesome-app-api --container awesome-app-api
+  ```
 
 - `debug disable <service>`  
   Disable debug mode for a service.
 
   ```sh
   krun debug disable awesome-app-api
+  ```
+
+- `debug helper status`  
+  Check whether the local elevated `krun-helper` daemon is currently running.
+
+  ```sh
+  krun debug helper status
+  ```
+
+- `debug runtime install`  
+  Install or upgrade the in-cluster debug runtime resources.
+
+  ```sh
+  krun debug runtime install
+  ```
+
+- `debug runtime status`  
+  Check if the in-cluster debug runtime is healthy and version-aligned.
+
+  ```sh
+  krun debug runtime status
+  ```
+
+- `debug runtime uninstall`  
+  Remove the in-cluster debug runtime resources.
+
+  ```sh
+  krun debug runtime uninstall
   ```
 
 ## Examples
@@ -125,16 +186,23 @@ krun debug enable awesome-app-api --container awesome-app-api
    krun debug enable awesome-app-api
    ```
 
-1. Enable debug mode for specific conttainer:
+1. Enable debug mode for specific container:
 
    ```sh
    krun debug enable awesome-app-api --container mysidecar
    ```
 
 1. Disable debug mode:
+
    ```sh
    krun debug disable awesome-app-api
    ```
+
+1. Check helper daemon status:
+
+```sh
+krun debug helper status
+```
 
 ## krun-config.json
 
@@ -157,7 +225,6 @@ The [krun-config.json](https://github.com/ftechmax/krun/blob/main/krun-config.js
 ### Field Reference
 
 - **`source`**
-
   - `path`: Root directory where your project source code is located.
   - `search_depth`: How many directory levels to search for services in `path`.
 
@@ -184,7 +251,11 @@ The `krun.json` file is used by `krun` to detect available services in your proj
     "path": "src/worker",
     "dockerfile": "AwesomeApp.Worker",
     "context": "src/",
-    "container_port": 8080
+    "service_dependencies": [
+      { "host": "awesome-app-cache", "port": 6379 },
+      { "host": "rabbitmq.default.svc", "port": 5672 },
+      { "host": "ferretdb.ferretdb-system.svc", "port": 27017 }
+    ]
   },
   {
     "name": "awesome-app-api",
@@ -205,6 +276,10 @@ The `krun.json` file is used by `krun` to detect available services in your proj
 
 - **`name`**: The name of the service as it will be referenced in commands. Make sure this matches the name in your `deployment.yaml` files.
 
+- **`namespace`** (optional): The Kubernetes namespace the service is deployed to. This is used during debug mode to reach the correct workload.
+
+  > NOTE: The default is `default` if not specified.
+
 - **`path`**: The relative path to the service directory from the root of your project. This is where the Dockerfile and source code for the service are located.
 
 - **`dockerfile`**: The path where the Dockerfile is located relative to the `path` directory. If the Dockerfile is in the service directory, you can use `"."`.
@@ -212,29 +287,70 @@ The `krun.json` file is used by `krun` to detect available services in your proj
 - **`context`**: The build context for the Docker image. This is the directory that will be sent to the Docker daemon during the build process. If you have a shared project between multiple services, you can set this to the parent directory of the service directories as shown in the example.
 
 - **`container_port`** (optional): The port of the container running inside the service pod. This is used for debugging and should match the port exposed by your service container.
+
   > NOTE: The default is `8080` if not specified.
 
-## Debugging with Telepresence
+- **`intercept_port`** (optional): The local port that your app listens on when running a debug session. This should match the port your service uses when run locally and be unique per service to avoid conflicts.
 
-To debug a service using Telepresence, you can enable debug mode for that service. This will allow you to run your project locally while still connected to the Kubernetes cluster.
+  > NOTE: The default is `5000` if not specified.
+
+- **`service_dependencies`** (optional): Service hostnames your local app must resolve during a debug session. Each dependency also triggers a local port-forward so calls go to the cluster.
+  - `host`: DNS name used by the application (for example `rabbitmq.default.svc`).
+  - `namespace`: Namespace of the dependency service (optional if `host` includes it).
+  - `service`: Service name in Kubernetes (optional if `host` includes it).
+  - `port`: Port to forward locally (local and remote ports are the same).
+  - Hosts are expanded with `service.svc` and `service` aliases to match common connection string formats.
+
+Example host expansion:
+
+```text
+Input:  rabbitmq.default.svc
+Adds:   rabbitmq.default.svc
+        rabbitmq.svc
+        rabbitmq
+```
+
+## Debugging with krun Runtime
+
+To debug a service using the krun runtime, first install the runtime components in your cluster and then enable debug mode for the target service.
 
 ### Prerequisites
 
 Ensure your project launches as a console application (which is the default profile).
 
+Install the runtime components once per cluster:
+
+```sh
+krun debug runtime install
+```
+
 ### Enabling Debug Mode
 
 To enable debug mode for a service, use the following command:
 
-```powershell
+```sh
 krun debug enable <service>
+```
+
+### Optional: Enable traffic-agent diagnostics
+
+To log iptables rules and redirect counters from the traffic-agent, set an env var on the traffic-manager deployment:
+
+```sh
+kubectl -n krun-system set env deployment/krun-traffic-manager KRUN_AGENT_DIAGNOSTICS=true
+```
+
+Unset it when you are done:
+
+```sh
+kubectl -n krun-system unset env deployment/krun-traffic-manager KRUN_AGENT_DIAGNOSTICS
 ```
 
 ### Disabling Debug Mode
 
 To disable debug mode for a service, use the following command:
 
-```powershell
+```sh
 krun debug disable <service>
 ```
 

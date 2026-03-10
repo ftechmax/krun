@@ -1,0 +1,10 @@
+[
+  {
+    "name": "smoke-app",
+    "path": "app",
+    "dockerfile": ".",
+    "context": "app",
+    "container_port": 80,
+    "intercept_port": 5000
+  }
+]

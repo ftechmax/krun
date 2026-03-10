@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: krun-system
+  labels:
+    app.kubernetes.io/name: krun-runtime
+    app.kubernetes.io/part-of: krun-debug-runtime
+    app.kubernetes.io/managed-by: krun
+    krun.ftechmax/runtime: "true"
+  annotations:
+    krun.ftechmax/component: traffic-runtime

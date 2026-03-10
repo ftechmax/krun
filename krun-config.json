@@ -1,7 +1,7 @@
 {
   "source": {
-    "path": "c:/git/",
-    "search_depth": 1
+    "path": "~/git/",
+    "search_depth": 2
   },
   "hostname": "kube.local",
   "local_registry": "registry:5000",

@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: smoke-app
+  labels:
+    app: smoke-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: smoke-app
+  template:
+    metadata:
+      labels:
+        app: smoke-app
+    spec:
+      containers:
+        - name: smoke-app
+          image: registry:5000/smoke-app:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80

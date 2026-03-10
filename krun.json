@@ -1,0 +1,16 @@
+[
+  {
+    "name": "krun-traffic-manager",
+    "path": "cmd/traffic-manager",
+    "dockerfile": ".",
+    "context": ".",
+    "container_port": 8080
+  },
+  {
+    "name": "krun-traffic-agent",
+    "path": "cmd/traffic-agent",
+    "dockerfile": ".",
+    "context": ".",
+    "container_port": 8081
+  }
+]

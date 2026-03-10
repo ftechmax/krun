@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -58,20 +59,24 @@ func Colorize(text string, color Color) string {
 }
 
 func GetExecutablePath() (string, error) {
-    exePath, err := os.Executable()
-    if err != nil {
-        return "", fmt.Errorf("failed to get executable path: %w", err)
-    }
+	exePath, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("failed to get executable path: %w", err)
+	}
 
-    // If running from a go-build temp directory, use the current working directory
-    if strings.Contains(exePath, "go-build") {
-        cwd, err := os.Getwd()
-        if err != nil {
-            return "", fmt.Errorf("failed to get current working directory: %w", err)
-        }
-        exePath = filepath.Join(cwd, "krun.exe")
-    }
-    return exePath, nil
+	// If running from a go-build temp directory, use the current working directory
+	if strings.Contains(exePath, "go-build") {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("failed to get current working directory: %w", err)
+		}
+		binaryName := "krun"
+		if runtime.GOOS == "windows" {
+			binaryName = "krun.exe"
+		}
+		exePath = filepath.Join(cwd, binaryName)
+	}
+	return exePath, nil
 }
 
 func RunCmd(name string, args ...string) error {

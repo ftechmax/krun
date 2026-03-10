@@ -7,19 +7,27 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/ftechmax/krun/internal/utils"
 )
 
 type Service struct {
-	Name          string `json:"name"`
-	Project       string `json:"project"` // This will be set based on the directory structure
-	Path          string `json:"path"`
-	Dockerfile    string `json:"dockerfile"`
-	Context       string `json:"context"`
-	ContainerPort int    `json:"container_port"` // Default is "8080"
-	InterceptPort int    `json:"intercept_port"` // Default is "5000"
+	Name                string              `json:"name"`
+	Project             string              `json:"project"`   // This will be set based on the directory structure
+	Namespace           string              `json:"namespace"` // Kubernetes namespace (default: "default")
+	Path                string              `json:"path"`
+	Dockerfile          string              `json:"dockerfile"`
+	Context             string              `json:"context"`
+	ContainerPort       int                 `json:"container_port"` // Default is "8080"
+	InterceptPort       int                 `json:"intercept_port"` // Default is "5000"
+	ServiceDependencies []ServiceDependency `json:"service_dependencies"`
+}
+
+type ServiceDependency struct {
+	Host      string `json:"host"`
+	Namespace string `json:"namespace"`
+	Service   string `json:"service"`
+	Port      int    `json:"port"`
 }
 
 type KrunSourceConfig struct {
@@ -36,14 +44,9 @@ type KrunConfig struct {
 
 type Config struct {
 	KrunConfig
-	KubeConfig string
-	Registry   string
+	KubeConfig   string
+	Registry     string
 	ProjectPaths map[string]string
-}
-
-type cacheData struct {
-	Services     []Service          `json:"services"`
-	ProjectPaths map[string]string `json:"project_paths"`
 }
 
 func ParseKrunConfig() (KrunConfig, error) {
@@ -69,63 +72,45 @@ func ParseKrunConfig() (KrunConfig, error) {
 		return KrunConfig{}, fmt.Errorf("failed to unmarshal JSON: %w", err)
 	}
 
+	config.KrunSourceConfig.Path = expandHomePath(config.KrunSourceConfig.Path)
+
 	return config, nil
 }
 
-func DiscoverServices(sourceDir string, searchDepth int, cacheFile string, cacheTtl time.Duration) ([]Service, map[string]string, error) {
+func expandHomePath(path string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return path
+	}
+
+	if trimmed == "~" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return path
+		}
+		return home
+	}
+
+	if strings.HasPrefix(trimmed, "~/") || strings.HasPrefix(trimmed, "~\\") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return path
+		}
+		suffix := strings.TrimPrefix(trimmed, "~/")
+		suffix = strings.TrimPrefix(suffix, "~\\")
+		return filepath.Join(home, suffix)
+	}
+
+	return path
+}
+
+func DiscoverServices(sourceDir string, searchDepth int) ([]Service, map[string]string, error) {
 	var services []Service
 	projectPaths := map[string]string{}
 	maxDepth := searchDepth + 1 // Add 1 to include the root directory itself
 
-	exePath, _ := utils.GetExecutablePath()
-	cachePath := filepath.Join(filepath.Dir(exePath), cacheFile)
-
-	// Check if cache file exists and is not older than cacheTtl
-	info, err := os.Stat(cachePath)
-	if err == nil && !info.IsDir() && info.ModTime().Add(cacheTtl).After(time.Now()) {
-		fmt.Println("Using cached services from", cachePath)
-
-		// Cache file is valid, read from it
-		file, err := os.Open(cachePath)
-
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to open cache file: %w", err)
-		}
-		defer file.Close()
-
-		cacheBytes, err := io.ReadAll(file)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to read cache file: %w", err)
-		}
-
-		var cache cacheData
-		if err := json.Unmarshal(cacheBytes, &cache); err != nil {
-			var legacy []Service
-			if legacyErr := json.Unmarshal(cacheBytes, &legacy); legacyErr != nil {
-				return nil, nil, fmt.Errorf("failed to unmarshal cache file: %w", err)
-			}
-			services = nil
-		} else {
-			cacheValid := len(cache.Services) > 0 && len(cache.ProjectPaths) > 0
-			if cacheValid {
-				for _, svc := range cache.Services {
-					if svc.Project != "" {
-						if _, ok := cache.ProjectPaths[svc.Project]; !ok {
-							cacheValid = false
-							break
-						}
-					}
-				}
-			}
-			if cacheValid {
-				return cache.Services, cache.ProjectPaths, nil
-			}
-			services = nil
-		}
-	}
-
-	// If cache file is not valid, walk the directory to discover services
-	err = filepath.WalkDir(sourceDir, func(path string, d os.DirEntry, err error) error {
+	// Walk the directory to discover services
+	err := filepath.WalkDir(sourceDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -196,20 +181,6 @@ func DiscoverServices(sourceDir string, searchDepth int, cacheFile string, cache
 
 	if err != nil {
 		return nil, nil, err
-	}
-
-	// Cache the services in a file
-	cachePayload := cacheData{
-		Services:     services,
-		ProjectPaths: projectPaths,
-	}
-	cacheBytes, err := json.Marshal(cachePayload)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to marshal services: %w", err)
-	}
-	err = os.WriteFile(cachePath, cacheBytes, 0644)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to write cache file: %w", err)
 	}
 
 	return services, projectPaths, nil

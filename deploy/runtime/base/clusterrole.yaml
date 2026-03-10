@@ -1,0 +1,25 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: krun-traffic-manager
+  labels:
+    app.kubernetes.io/name: krun-traffic-manager
+    app.kubernetes.io/component: traffic-manager
+    app.kubernetes.io/part-of: krun-debug-runtime
+    app.kubernetes.io/managed-by: krun
+    krun.ftechmax/runtime: "true"
+  annotations:
+    krun.ftechmax/component: traffic-runtime
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "endpoints", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]

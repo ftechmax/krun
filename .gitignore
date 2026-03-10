@@ -7,6 +7,10 @@
 *.dll
 *.so
 *.dylib
+/krun
+/krun-helper
+!scripts/*.exe
+!scripts/*.dll
 
 # Test binary, built with `go test -c`
 *.test
@@ -33,3 +37,4 @@ go.work.sum
 
 # Temporary files
 *.cache
+
