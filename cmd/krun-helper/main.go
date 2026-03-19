@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -186,7 +185,6 @@ func startHelperDaemon(listenAddress string, kubeConfigPath string) error {
 
 func newHandler(shutdownCh chan<- struct{}) http.Handler {
 	mux := http.NewServeMux()
-	// Use path-only routes for compatibility; enforce methods in handlers.
 	mux.HandleFunc("/healthz", handleHealthz)
 	mux.HandleFunc("/v1/debug/sessions", handleDebugSessionsList)
 	mux.HandleFunc("/v1/debug/enable", handleDebugEnable)
@@ -247,72 +245,83 @@ func handleDebugEnable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	forwards := buildDebugPortForwards(req.Context)
+	// Each step appends a rollback function. On failure, all rollbacks
+	// run in reverse order so every completed step is undone cleanly.
+	var rollbacks []func() error
 
+	rollbackAll := func() error {
+		var failures []string
+		for i := len(rollbacks) - 1; i >= 0; i-- {
+			if err := rollbacks[i](); err != nil {
+				failures = append(failures, err.Error())
+			}
+		}
+		if len(failures) > 0 {
+			return fmt.Errorf("rollback failed: %s", strings.Join(failures, "; "))
+		}
+		return nil
+	}
+
+	fail := func(w http.ResponseWriter, step string, err error) {
+		if rollbackErr := rollbackAll(); rollbackErr != nil {
+			writeJSON(w, http.StatusInternalServerError, contracts.HelperResponse{
+				Success: false,
+				Message: fmt.Sprintf("%s: %v (%v)", step, err, rollbackErr),
+			})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, contracts.HelperResponse{
+			Success: false,
+			Message: fmt.Sprintf("%s: %v", step, err),
+		})
+	}
+
+	// 1. update hostfile
 	entries := buildDebugHostEntries(req.Context)
 	mergedEntries := hostsRegistry.Upsert(sessionKey, entries)
 	if err := hostfileUpdate(mergedEntries); err != nil {
-		writeJSON(w, http.StatusInternalServerError, contracts.HelperResponse{
-			Success: false,
-			Message: fmt.Sprintf("hostfile update failed: %v", err),
-		})
+		fail(w, "hostfile update failed", err)
 		return
 	}
+	rollbacks = append(rollbacks, func() error {
+		restored := hostsRegistry.Remove(sessionKey)
+		return hostfileUpdate(restored)
+	})
 
+	// 2. set up port-forwards
+	forwards := buildDebugPortForwards(req.Context)
 	if err := portForwardRegistry.Upsert(sessionKey, forwards); err != nil {
-		rollbackEntries := hostsRegistry.Remove(sessionKey)
-		if rollbackErr := hostfileUpdate(rollbackEntries); rollbackErr != nil {
-			writeJSON(w, http.StatusInternalServerError, contracts.HelperResponse{
-				Success: false,
-				Message: fmt.Sprintf("port-forward update failed: %v (rollback failed: %v)", err, rollbackErr),
-			})
-			return
-		}
-		writeJSON(w, http.StatusInternalServerError, contracts.HelperResponse{
-			Success: false,
-			Message: fmt.Sprintf("port-forward update failed: %v", err),
-		})
+		fail(w, "port-forward update failed", err)
 		return
 	}
+	rollbacks = append(rollbacks, func() error {
+		return portForwardRegistry.Remove(sessionKey)
+	})
 
+	// 3. clean up previous manager session if one exists for this key
+	if previousManagerSessionID, ok := managerSessionsRegistry.Get(sessionKey); ok {
+		_ = streamRegistry.Remove(sessionKey)
+		_ = managerSessionClient.DeleteSession(previousManagerSessionID)
+		managerSessionsRegistry.Remove(sessionKey)
+	}
+
+	// 4. create manager session
 	managerSession, err := managerSessionClient.CreateSession(req.Context)
 	if err != nil {
-		if rollbackErr := rollbackLocalDebugState(sessionKey); rollbackErr != nil {
-			writeJSON(w, http.StatusInternalServerError, contracts.HelperResponse{
-				Success: false,
-				Message: fmt.Sprintf("manager session create failed: %v (rollback failed: %v)", err, rollbackErr),
-			})
-			return
-		}
-		writeJSON(w, http.StatusInternalServerError, contracts.HelperResponse{
-			Success: false,
-			Message: fmt.Sprintf("manager session create failed: %v", err),
-		})
+		fail(w, "manager session create failed", err)
 		return
 	}
+	rollbacks = append(rollbacks, func() error {
+		return managerSessionClient.DeleteSession(managerSession.SessionID)
+	})
 
+	// 5. attach traffic stream
 	if err := streamRegistry.Upsert(sessionKey, managerSession.SessionID, managerSession.SessionToken, req.Context.InterceptPort); err != nil {
-		if deleteErr := managerSessionClient.DeleteSession(managerSession.SessionID); deleteErr != nil {
-			writeJSON(w, http.StatusInternalServerError, contracts.HelperResponse{
-				Success: false,
-				Message: fmt.Sprintf("manager stream attach failed: %v (manager session delete failed: %v)", err, deleteErr),
-			})
-			return
-		}
-		if rollbackErr := rollbackLocalDebugState(sessionKey); rollbackErr != nil {
-			writeJSON(w, http.StatusInternalServerError, contracts.HelperResponse{
-				Success: false,
-				Message: fmt.Sprintf("manager stream attach failed: %v (rollback failed: %v)", err, rollbackErr),
-			})
-			return
-		}
-		writeJSON(w, http.StatusInternalServerError, contracts.HelperResponse{
-			Success: false,
-			Message: fmt.Sprintf("manager stream attach failed: %v", err),
-		})
+		fail(w, "manager stream attach failed", err)
 		return
 	}
 
+	// register the session.
 	managerSessionsRegistry.Upsert(sessionKey, managerSession.SessionID)
 	sessionsRegistry.Upsert(sessionKey, req.Context)
 
@@ -343,6 +352,14 @@ func handleDebugDisable(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, contracts.HelperResponse{
 			Success: false,
 			Message: "invalid payload: session key or context.service_name is required",
+		})
+		return
+	}
+
+	if !sessionsRegistry.Has(sessionKey) {
+		writeJSON(w, http.StatusOK, contracts.HelperResponse{
+			Success: true,
+			Message: "no active session",
 		})
 		return
 	}
@@ -485,23 +502,6 @@ func resolveManagerSessionIDForDisable(ctx contracts.DebugServiceContext) (strin
 	return strings.TrimSpace(matched.SessionID), nil
 }
 
-func rollbackLocalDebugState(sessionKey string) error {
-	var failures []string
-
-	if err := portForwardRegistry.Remove(sessionKey); err != nil {
-		failures = append(failures, fmt.Sprintf("port-forward rollback failed: %v", err))
-	}
-	mergedEntries := hostsRegistry.Remove(sessionKey)
-	if err := hostfileUpdate(mergedEntries); err != nil {
-		failures = append(failures, fmt.Sprintf("hostfile rollback failed: %v", err))
-	}
-
-	if len(failures) > 0 {
-		return errors.New(strings.Join(failures, "; "))
-	}
-	return nil
-}
-
 func parsePortFromAddress(address string) (int, error) {
 	host, portValue, err := net.SplitHostPort(strings.TrimSpace(address))
 	if err != nil {
@@ -557,10 +557,11 @@ func resolveDebugSessionKey(sessionKey string, project string, serviceName strin
 func buildDebugHostEntries(ctx contracts.DebugServiceContext) []contracts.HostsEntry {
 	entries := make([]contracts.HostsEntry, 0, len(ctx.ServiceDependencies))
 	indexByHost := map[string]int{}
-	for _, dependency := range ctx.ServiceDependencies {
-		host := strings.TrimSpace(dependency.Host)
+
+	addHost := func(host string) {
+		host = strings.TrimSpace(host)
 		if host == "" {
-			continue
+			return
 		}
 		entry := contracts.HostsEntry{
 			IP:       "127.0.0.1",
@@ -568,10 +569,17 @@ func buildDebugHostEntries(ctx contracts.DebugServiceContext) []contracts.HostsE
 		}
 		if idx, ok := indexByHost[host]; ok {
 			entries[idx] = entry
-			continue
+			return
 		}
 		indexByHost[host] = len(entries)
 		entries = append(entries, entry)
+	}
+
+	for _, dependency := range ctx.ServiceDependencies {
+		addHost(dependency.Host)
+		for _, alias := range dependency.Aliases {
+			addHost(alias)
+		}
 	}
 	return entries
 }

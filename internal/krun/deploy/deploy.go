@@ -110,25 +110,43 @@ func resolveOverlayPaths(config cfg.Config, projectName string) ([]string, error
 	k8sCloudPath := filepath.Join(k8sPath, "cloud")
 	k8sEdgePath := filepath.Join(k8sPath, "edge")
 
-	overlayPaths := []string{filepath.Join(k8sPath, "overlays", "local")}
 	if isDir(k8sCloudPath) {
-		overlayPaths = []string{
+		overlayPaths := []string{
 			filepath.Join(k8sCloudPath, "overlays", "local"),
 			filepath.Join(k8sEdgePath, "overlays", "local"),
 		}
+		for _, p := range overlayPaths {
+			if !isDir(p) {
+				return nil, fmt.Errorf("kustomize overlay not found: %s", p)
+			}
+		}
+		return overlayPaths, nil
 	}
 
-	for _, p := range overlayPaths {
-		if !isDir(p) {
-			return nil, fmt.Errorf("kustomize overlay not found: %s", p)
-		}
+	localOverlay := filepath.Join(k8sPath, "overlays", "local")
+	if isDir(localOverlay) {
+		return []string{localOverlay}, nil
 	}
-	return overlayPaths, nil
+
+	if hasKustomization(k8sPath) {
+		return []string{k8sPath}, nil
+	}
+
+	return nil, fmt.Errorf("kustomize overlay not found: %s", localOverlay)
 }
 
 func isDir(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
+}
+
+func hasKustomization(dir string) bool {
+	for _, name := range []string{"kustomization.yaml", "kustomization.yml", "Kustomization"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func RenderKustomizeObjects(overlayPath string) ([]*unstructured.Unstructured, error) {

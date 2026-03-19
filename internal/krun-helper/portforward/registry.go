@@ -36,6 +36,12 @@ type SessionRegistry struct {
 	client         *kube.Client
 	startForwardFn func(contracts.PortForward) (*forwardHandle, error)
 	sessions       map[string]map[string]*forwardHandle
+	shared         map[string]*sharedForward
+}
+
+type sharedForward struct {
+	handle   *forwardHandle
+	refCount int
 }
 
 type forwardHandle struct {
@@ -54,6 +60,7 @@ func NewSessionRegistry(kubeConfigPath string) (*SessionRegistry, error) {
 	registry := &SessionRegistry{
 		client:   client,
 		sessions: map[string]map[string]*forwardHandle{},
+		shared:   map[string]*sharedForward{},
 	}
 	registry.startForwardFn = registry.startForward
 	return registry, nil
@@ -75,7 +82,7 @@ func (r *SessionRegistry) Upsert(sessionKey string, forwards []contracts.PortFor
 	}
 
 	next := make(map[string]*forwardHandle, len(normalized))
-	startedKeys := make([]string, 0, len(normalized))
+	acquiredKeys := make([]string, 0, len(normalized))
 	for _, forward := range normalized {
 		forwardKey := portForwardKey(forward)
 		if existingHandle, ok := existing[forwardKey]; ok {
@@ -83,26 +90,35 @@ func (r *SessionRegistry) Upsert(sessionKey string, forwards []contracts.PortFor
 			continue
 		}
 
+		// Check if another session already owns this forward.
+		if sf, ok := r.shared[forwardKey]; ok {
+			sf.refCount++
+			next[forwardKey] = sf.handle
+			acquiredKeys = append(acquiredKeys, forwardKey)
+			continue
+		}
+
 		handle, err := r.startForwardFn(forward)
 		if err != nil {
-			for _, startedKey := range startedKeys {
-				next[startedKey].stop()
-				delete(next, startedKey)
+			for _, acquiredKey := range acquiredKeys {
+				r.releaseSharedLocked(acquiredKey)
+				delete(next, acquiredKey)
 			}
 			return err
 		}
 
-		fmt.Printf("Started port-forward %s/%s %d -> 127.0.0.1:%d\n", forward.Namespace, forward.Service, forward.RemotePort, forward.LocalPort)
+		fmt.Printf("Started port-forward %s/%s:%d -> 127.0.0.1:%d\n", forward.Namespace, forward.Service, forward.RemotePort, forward.LocalPort)
+		r.shared[forwardKey] = &sharedForward{handle: handle, refCount: 1}
 		next[forwardKey] = handle
-		startedKeys = append(startedKeys, forwardKey)
+		acquiredKeys = append(acquiredKeys, forwardKey)
 	}
 
 	for existingKey, existingHandle := range existing {
 		if _, ok := next[existingKey]; ok {
 			continue
 		}
-		fmt.Printf("Stopping port-forward %s/%s %d -> 127.0.0.1:%d\n", existingHandle.spec.Namespace, existingHandle.spec.Service, existingHandle.spec.RemotePort, existingHandle.spec.LocalPort)
-		existingHandle.stop()
+		fmt.Printf("Stopping port-forward %s/%s:%d -> 127.0.0.1:%d\n", existingHandle.spec.Namespace, existingHandle.spec.Service, existingHandle.spec.RemotePort, existingHandle.spec.LocalPort)
+		r.releaseSharedLocked(existingKey)
 	}
 
 	r.sessions[key] = next
@@ -124,9 +140,9 @@ func (r *SessionRegistry) Clear() error {
 func (r *SessionRegistry) removeLocked(sessionKey string) error {
 	if sessionkey.IsBlank(sessionKey) {
 		for _, handles := range r.sessions {
-			for _, handle := range handles {
-				fmt.Printf("Stopping port-forward %s/%s %d -> 127.0.0.1:%d\n", handle.spec.Namespace, handle.spec.Service, handle.spec.RemotePort, handle.spec.LocalPort)
-				handle.stop()
+			for forwardKey, handle := range handles {
+				fmt.Printf("Stopping port-forward %s/%s:%d -> 127.0.0.1:%d\n", handle.spec.Namespace, handle.spec.Service, handle.spec.RemotePort, handle.spec.LocalPort)
+				r.releaseSharedLocked(forwardKey)
 			}
 		}
 		r.sessions = map[string]map[string]*forwardHandle{}
@@ -138,12 +154,26 @@ func (r *SessionRegistry) removeLocked(sessionKey string) error {
 	if !ok {
 		return nil
 	}
-	for _, handle := range handles {
-		fmt.Printf("Stopping port-forward %s/%s %d -> 127.0.0.1:%d\n", handle.spec.Namespace, handle.spec.Service, handle.spec.RemotePort, handle.spec.LocalPort)
-		handle.stop()
+	for forwardKey, handle := range handles {
+		fmt.Printf("Stopping port-forward %s/%s:%d -> 127.0.0.1:%d\n", handle.spec.Namespace, handle.spec.Service, handle.spec.RemotePort, handle.spec.LocalPort)
+		r.releaseSharedLocked(forwardKey)
 	}
 	delete(r.sessions, key)
 	return nil
+}
+
+// releaseSharedLocked decrements the reference count for a shared forward
+// and stops it only when no sessions reference it anymore.
+func (r *SessionRegistry) releaseSharedLocked(forwardKey string) {
+	sf, ok := r.shared[forwardKey]
+	if !ok {
+		return
+	}
+	sf.refCount--
+	if sf.refCount <= 0 {
+		sf.handle.stop()
+		delete(r.shared, forwardKey)
+	}
 }
 
 func (r *SessionRegistry) startForward(forward contracts.PortForward) (*forwardHandle, error) {

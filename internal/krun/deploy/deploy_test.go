@@ -81,6 +81,34 @@ func TestResolveOverlayPathsCloudEdge(t *testing.T) {
 	}
 }
 
+func TestResolveOverlayPathsK8sRoot(t *testing.T) {
+	root := t.TempDir()
+	k8sDir := filepath.Join(root, "svc", "k8s")
+	mkdirAll(t, k8sDir)
+	writeFile(t, filepath.Join(k8sDir, "kustomization.yaml"), `
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources: []
+`)
+
+	config := cfg.Config{
+		KrunConfig: cfg.KrunConfig{
+			KrunSourceConfig: cfg.KrunSourceConfig{Path: root},
+		},
+	}
+
+	paths, err := resolveOverlayPaths(config, "svc")
+	if err != nil {
+		t.Fatalf("resolveOverlayPaths returned error: %v", err)
+	}
+	if len(paths) != 1 {
+		t.Fatalf("expected 1 overlay path, got %d", len(paths))
+	}
+	if paths[0] != k8sDir {
+		t.Fatalf("unexpected overlay path: got %q want %q", paths[0], k8sDir)
+	}
+}
+
 func TestResolveOverlayPathsMissingOverlay(t *testing.T) {
 	root := t.TempDir()
 	config := cfg.Config{

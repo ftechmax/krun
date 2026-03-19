@@ -31,6 +31,15 @@ func (r *DebugSessionRegistry) Upsert(sessionKey string, context contracts.Debug
 	r.sessions[key] = context
 }
 
+func (r *DebugSessionRegistry) Has(sessionKey string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	key := sessionkey.Trim(sessionKey)
+	_, ok := r.sessions[key]
+	return ok
+}
+
 func (r *DebugSessionRegistry) Remove(sessionKey string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

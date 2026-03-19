@@ -50,16 +50,15 @@ func (s *DebugSessionRegistry) Create(req contracts.CreateDebugSessionRequest) (
 	}
 
 	session := contracts.DebugSession{
-		SessionID:       "sess_" + randomHex(8),
-		SessionToken:    randomHex(16),
-		Namespace:       namespace,
-		ServiceName:     serviceName,
-		Workload:        workload,
-		TargetContainer: strings.TrimSpace(req.TargetContainer),
-		ServicePort:     req.ServicePort,
-		LocalPort:       req.LocalPort,
-		ClientID:        strings.TrimSpace(req.ClientID),
-		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
+		SessionID:    "sess_" + randomHex(8),
+		SessionToken: randomHex(16),
+		Namespace:    namespace,
+		ServiceName:  serviceName,
+		Workload:     workload,
+		ServicePort:  req.ServicePort,
+		LocalPort:    req.LocalPort,
+		ClientID:     strings.TrimSpace(req.ClientID),
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 	}
 	if session.ClientID == "" {
 		session.ClientID = "unknown"

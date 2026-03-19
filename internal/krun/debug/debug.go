@@ -87,8 +87,6 @@ func Enable(service cfg.Service, config cfg.Config, containerName string) {
 		return
 	}
 
-	_ = containerName
-
 	request := contracts.DebugSessionCommandRequest{
 		Context: buildDebugServiceContext(service),
 	}
@@ -103,6 +101,10 @@ func Enable(service cfg.Service, config cfg.Config, containerName string) {
 	}
 
 	fmt.Println(utils.Colorize("Session created", utils.Green))
+
+	if err := deploy.CreateEnvFile(service, config, containerName); err != nil {
+		fmt.Println(utils.Colorize(fmt.Sprintf("warning: could not create env file: %v", err), utils.Yellow))
+	}
 }
 
 func Disable(service cfg.Service, config cfg.Config) {
@@ -123,7 +125,14 @@ func Disable(service cfg.Service, config cfg.Config) {
 		return
 	}
 
-	fmt.Println(utils.Colorize("Session removed", utils.Green))
+	if response.Message == "no active session" {
+		fmt.Println(utils.Colorize("No active debug session found", utils.Yellow))
+	} else {
+		fmt.Println(utils.Colorize("Session removed", utils.Green))
+		if err := deploy.RemoveEnvFile(service, config); err != nil {
+			fmt.Println(utils.Colorize(fmt.Sprintf("warning: could not remove env file: %v", err), utils.Yellow))
+		}
+	}
 }
 
 func HelperStatus(config cfg.Config) {
@@ -166,12 +175,7 @@ func RuntimeInstall(config cfg.Config, version string) {
 		return
 	}
 
-	var objs []*unstructured.Unstructured
-	if version == "debug" {
-		objs, err = deploy.RenderKustomizeObjects("deploy/runtime/overlays/local")
-	} else {
-		objs, err = fetchRemoteManifestObjects(version)
-	}
+	objs, err := loadManifestObjects(version)
 	if err != nil {
 		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to load manifests: %s", err), utils.Red))
 		return
@@ -253,12 +257,7 @@ func RuntimeUninstall(config cfg.Config, version string) {
 		return
 	}
 
-	var objs []*unstructured.Unstructured
-	if version == "debug" {
-		objs, err = deploy.RenderKustomizeObjects("deploy/runtime/overlays/local")
-	} else {
-		objs, err = fetchRemoteManifestObjects(version)
-	}
+	objs, err := loadManifestObjects(version)
 	if err != nil {
 		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to load manifests: %s", err), utils.Red))
 		return
@@ -272,8 +271,18 @@ func RuntimeUninstall(config cfg.Config, version string) {
 	fmt.Println(utils.Colorize("Traffic manager uninstalled successfully", utils.Green))
 }
 
+func loadManifestObjects(version string) ([]*unstructured.Unstructured, error) {
+	if version == "debug" && os.Getenv("KRUN_MANIFEST_URL") == "" {
+		return deploy.RenderKustomizeObjects("deploy/runtime/overlays/local")
+	}
+	return fetchRemoteManifestObjects(version)
+}
+
 func fetchRemoteManifestObjects(version string) ([]*unstructured.Unstructured, error) {
 	url := fmt.Sprintf("https://github.com/ftechmax/krun/releases/download/%s/krun-traffic-manager.yaml", version)
+	if override := os.Getenv("KRUN_MANIFEST_URL"); override != "" {
+		url = override
+	}
 	resp, err := http.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("fetch manifest from %s: %w", url, err)
@@ -469,6 +478,7 @@ func buildDebugServiceContext(service cfg.Service) contracts.DebugServiceContext
 			Namespace: dependency.Namespace,
 			Service:   dependency.Service,
 			Port:      dependency.Port,
+			Aliases:   dependency.Aliases,
 		})
 	}
 

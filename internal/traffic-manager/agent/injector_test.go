@@ -33,13 +33,12 @@ func TestWorkloadInjectorInjectAndRemove(t *testing.T) {
 			})
 
 			session := contracts.DebugSession{
-				SessionID:       "session-1",
-				SessionToken:    "token-1",
-				Namespace:       "default",
-				ServiceName:     "orders-api",
-				Workload:        "orders-api",
-				TargetContainer: "app",
-				ServicePort:     8080,
+				SessionID:    "session-1",
+				SessionToken: "token-1",
+				Namespace:    "default",
+				ServiceName:  "orders-api",
+				Workload:     "orders-api",
+				ServicePort:  8080,
 			}
 
 			if err := injector.Inject(context.Background(), session); err != nil {

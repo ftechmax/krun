@@ -24,10 +24,11 @@ type Service struct {
 }
 
 type ServiceDependency struct {
-	Host      string `json:"host"`
-	Namespace string `json:"namespace"`
-	Service   string `json:"service"`
-	Port      int    `json:"port"`
+	Host      string   `json:"host"`
+	Namespace string   `json:"namespace"`
+	Service   string   `json:"service"`
+	Port      int      `json:"port"`
+	Aliases   []string `json:"aliases"`
 }
 
 type KrunSourceConfig struct {
@@ -37,7 +38,6 @@ type KrunSourceConfig struct {
 
 type KrunConfig struct {
 	KrunSourceConfig `json:"source"`
-	Hostname         string `json:"hostname"`
 	LocalRegistry    string `json:"local_registry"`
 	RemoteRegistry   string `json:"remote_registry"`
 }

@@ -79,7 +79,6 @@ jobs:
               "path": "${GITHUB_WORKSPACE}/apps",
               "search_depth": 1
             },
-            "hostname": "kube.local",
             "local_registry": "registry:5000",
             "remote_registry": "registry:5000"
           }
@@ -147,6 +146,12 @@ jobs:
         env:
           KRUN_AGENT_IMAGE: registry:5000/krun-traffic-agent:latest
         run: |
+          python3 -m http.server 8000 --directory /tmp &
+          HTTP_PID=$!
+          trap "kill $HTTP_PID 2>/dev/null" EXIT
+          for i in $(seq 1 20); do nc -z 127.0.0.1 8000 2>/dev/null && break; sleep 0.5; done
+
+          export KRUN_MANIFEST_URL="http://localhost:8000/krun-runtime.yaml"
           output=$(krun debug runtime install)
           echo "$output"
           echo "$output" | grep -q "Traffic manager installed successfully"
@@ -242,7 +247,14 @@ jobs:
           test "$(kubectl get deployment smoke-app -o jsonpath='{.spec.template.spec.containers[*].name}' 2>/dev/null | wc -w)" = "1" || true
 
       - name: Test krun debug runtime uninstall
+        env:
+          KRUN_MANIFEST_URL: http://localhost:8000/krun-runtime.yaml
         run: |
+          python3 -m http.server 8000 --directory /tmp &
+          HTTP_PID=$!
+          trap "kill $HTTP_PID 2>/dev/null" EXIT
+          for i in $(seq 1 20); do nc -z 127.0.0.1 8000 2>/dev/null && break; sleep 0.5; done
+
           output=$(krun debug runtime uninstall)
           echo "$output"
           echo "$output" | grep -q "Traffic manager uninstalled successfully"

@@ -124,6 +124,10 @@ func TestDebugDisableHandlerRemovesScopedState(t *testing.T) {
 		{IP: "127.0.0.1", Hostname: "redis.default.svc"},
 	})
 	managerSessionsRegistry.Upsert("proj-a/svc-a", "mgr-session-2")
+	sessionsRegistry.Upsert("proj-a/svc-a", contracts.DebugServiceContext{
+		Project:     "proj-a",
+		ServiceName: "svc-a",
+	})
 
 	originalUpdate := hostfileUpdate
 	var updatedEntries []contracts.HostsEntry
@@ -206,6 +210,10 @@ func TestDebugDisableHandlerFallsBackToManagerLookup(t *testing.T) {
 	hostsRegistry.Upsert("proj-a/svc-a", []contracts.HostsEntry{
 		{IP: "127.0.0.1", Hostname: "rabbitmq.default.svc"},
 	})
+	sessionsRegistry.Upsert("proj-a/svc-a", contracts.DebugServiceContext{
+		Project:     "proj-a",
+		ServiceName: "svc-a",
+	})
 
 	originalUpdate := hostfileUpdate
 	hostfileUpdate = func(entries []contracts.HostsEntry) error { return nil }
@@ -283,6 +291,79 @@ func TestDebugEnableHandlerRollsBackWhenManagerCreateFails(t *testing.T) {
 	}
 }
 
+func TestDebugEnableHandlerCleansUpPreviousSession(t *testing.T) {
+	resetHelperGlobals(t)
+
+	fakeRegistry := &fakePortForwardRegistry{}
+	portForwardRegistry = fakeRegistry
+	fakeManager := &fakeManagerSessionClient{createSessionIDs: []string{"mgr-session-1", "mgr-session-2"}}
+	managerSessionClient = fakeManager
+	fakeStreams := &fakeStreamRegistry{}
+	streamRegistry = fakeStreams
+
+	hostfileUpdate = func(entries []contracts.HostsEntry) error { return nil }
+	t.Cleanup(func() { hostfileUpdate = hostfile.Update })
+
+	handler := newHandler(make(chan struct{}, 1))
+	makeBody := func() *bytes.Reader {
+		body, _ := json.Marshal(contracts.DebugSessionCommandRequest{
+			Context: contracts.DebugServiceContext{
+				Project:       "proj-a",
+				ServiceName:   "svc-a",
+				ContainerPort: 8080,
+				InterceptPort: 5001,
+			},
+		})
+		return bytes.NewReader(body)
+	}
+
+	// First enable
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/debug/enable", makeBody()))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first enable: expected 200, got %d", rec.Code)
+	}
+	if fakeManager.createCalls != 1 {
+		t.Fatalf("expected 1 create call after first enable, got %d", fakeManager.createCalls)
+	}
+	if fakeManager.deleteCalls != 0 {
+		t.Fatalf("expected 0 delete calls after first enable, got %d", fakeManager.deleteCalls)
+	}
+
+	// Second enable for the same service — should clean up the previous session
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/debug/enable", makeBody()))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second enable: expected 200, got %d", rec.Code)
+	}
+	if fakeManager.createCalls != 2 {
+		t.Fatalf("expected 2 create calls after second enable, got %d", fakeManager.createCalls)
+	}
+	if fakeManager.deleteCalls != 1 {
+		t.Fatalf("expected 1 delete call (cleanup of old session), got %d", fakeManager.deleteCalls)
+	}
+	if fakeManager.lastDeletedSessionID != "mgr-session-1" {
+		t.Fatalf("expected old session mgr-session-1 to be deleted, got %q", fakeManager.lastDeletedSessionID)
+	}
+	// Stream should have been removed for cleanup + upserted for new session
+	if fakeStreams.removeCalls != 1 {
+		t.Fatalf("expected 1 stream remove (cleanup), got %d", fakeStreams.removeCalls)
+	}
+	if fakeStreams.upsertCalls != 2 {
+		t.Fatalf("expected 2 stream upserts, got %d", fakeStreams.upsertCalls)
+	}
+
+	// Verify only one session is registered
+	sessions := sessionsRegistry.List()
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 active session, got %d", len(sessions))
+	}
+	managerSessionID, ok := managerSessionsRegistry.Get("proj-a/svc-a")
+	if !ok || managerSessionID != "mgr-session-2" {
+		t.Fatalf("expected manager session mgr-session-2, got %q (ok=%v)", managerSessionID, ok)
+	}
+}
+
 func TestDebugSessionsListMethodNotAllowed(t *testing.T) {
 	resetHelperGlobals(t)
 	handler := newHandler(make(chan struct{}, 1))
@@ -337,6 +418,7 @@ type fakeManagerSessionClient struct {
 	listCalls            int
 	deleteCalls          int
 	createSessionID      string
+	createSessionIDs     []string
 	lastDeletedSessionID string
 	createErr            error
 	listErr              error
@@ -350,8 +432,13 @@ func (f *fakeManagerSessionClient) CreateSession(ctx contracts.DebugServiceConte
 		return contracts.DebugSession{}, f.createErr
 	}
 
-	sessionID := f.createSessionID
-	if sessionID == "" {
+	var sessionID string
+	if len(f.createSessionIDs) > 0 {
+		sessionID = f.createSessionIDs[0]
+		f.createSessionIDs = f.createSessionIDs[1:]
+	} else if f.createSessionID != "" {
+		sessionID = f.createSessionID
+	} else {
 		sessionID = "mgr-default"
 	}
 	return contracts.DebugSession{

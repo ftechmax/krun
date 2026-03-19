@@ -7,7 +7,6 @@ type DebugSession struct {
 	Namespace       string `json:"namespace"`
 	ServiceName     string `json:"service_name"`
 	Workload        string `json:"workload"`
-	TargetContainer string `json:"target_container,omitempty"`
 	ServicePort     int    `json:"service_port"`
 	LocalPort       int    `json:"local_port"`
 	ClientID        string `json:"client_id"`
@@ -16,13 +15,12 @@ type DebugSession struct {
 }
 
 type CreateDebugSessionRequest struct {
-	Namespace       string `json:"namespace,omitempty"`
-	ServiceName     string `json:"service_name"`
-	Workload        string `json:"workload,omitempty"`
-	TargetContainer string `json:"target_container,omitempty"`
-	ServicePort     int    `json:"service_port"`
-	LocalPort       int    `json:"local_port"`
-	ClientID        string `json:"client_id,omitempty"`
+	Namespace   string `json:"namespace,omitempty"`
+	ServiceName string `json:"service_name"`
+	Workload    string `json:"workload,omitempty"`
+	ServicePort int    `json:"service_port"`
+	LocalPort   int    `json:"local_port"`
+	ClientID    string `json:"client_id,omitempty"`
 }
 
 type ListDebugSessionsResponse struct {
@@ -42,10 +40,11 @@ type PortForward struct {
 }
 
 type DebugServiceDependencyContext struct {
-	Host      string `json:"host"`
-	Namespace string `json:"namespace,omitempty"`
-	Service   string `json:"service,omitempty"`
-	Port      int    `json:"port"`
+	Host      string   `json:"host"`
+	Namespace string   `json:"namespace,omitempty"`
+	Service   string   `json:"service,omitempty"`
+	Port      int      `json:"port"`
+	Aliases   []string `json:"aliases,omitempty"`
 }
 
 type DebugServiceContext struct {

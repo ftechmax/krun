@@ -370,7 +370,6 @@ func (i *WorkloadInjector) buildContainer(session contracts.DebugSession) corev1
 			{Name: "KRUN_MANAGER_ADDRESS", Value: i.options.ManagerAddress},
 			{Name: "KRUN_TARGET_NAMESPACE", Value: session.Namespace},
 			{Name: "KRUN_TARGET_WORKLOAD", Value: session.Workload},
-			{Name: "KRUN_TARGET_CONTAINER", Value: session.TargetContainer},
 			{Name: "KRUN_TARGET_PORT", Value: strconv.Itoa(session.ServicePort)},
 		},
 		SecurityContext: &corev1.SecurityContext{

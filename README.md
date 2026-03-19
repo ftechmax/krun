@@ -2,6 +2,18 @@
 
 A command-line tool for building, deploying, and debugging microservices in Kubernetes environments.
 
+## Why krun?
+
+Working with microservices on Kubernetes usually means somehow handling Docker builds, kubectl commands, and other local setups just to test a change. krun wraps all of that into a single CLI:
+
+- **Build** Docker images inside your cluster so no local Docker install is required.
+- **Deploy** projects with one command.
+- **Debug** a live service by intercepting its cluster traffic and routing it to your local machine, so you can set breakpoints against real requests without mocking anything.
+
+The debug workflow is where krun will really make a difference: enable debug mode, launch your app locally, and traffic that would normally hit the pod flows to your local app instead. Your app can call other cluster services as normal, and you can set breakpoints and inspect variables in your local IDE while handling real requests from the cluster.
+
+This tool pairs perfectly with services made with my [msa-templates](https://github.com/ftechmax/msa-templates) project, but it can be used with any Kubernetes-deployed app.
+
 ## Features
 
 - Build Docker images for services
@@ -14,9 +26,11 @@ A command-line tool for building, deploying, and debugging microservices in Kube
 
 2. Unzip the downloaded file to a directory in your `PATH`, or add the directory to your `PATH`.
 
-3. Place a `krun.json` file in the root of your project repository to define your services. See the [krun.json](#krunjson) section for details.
+3. Place a `krun-config.json` file **next to the `krun` binary** to configure your source directory and Docker registries. See the [krun-config.json](#krun-configjson) section for details.
 
-4. Install the runtime components in your cluster
+4. Place a `krun.json` file in the root of your project repository to define your services. See the [krun.json](#krunjson) section for details.
+
+5. Install the runtime components in your cluster
 
    ```sh
    krun debug runtime install
@@ -28,7 +42,7 @@ A command-line tool for building, deploying, and debugging microservices in Kube
    kubectl apply -f https://github.com/ftechmax/krun/releases/latest/download/krun-traffic-manager.yaml
    ```
 
-5. Follow the [debugging instructions](#debugging-with-krun-runtime) to set up your project for debugging with the krun runtime.
+6. Follow the [debugging instructions](#debugging-with-krun-runtime) to set up your project for debugging with the krun runtime.
 
 ## Quick Start
 
@@ -73,15 +87,23 @@ krun [global options] <command> [command options] <service>
 - `help`  
   Show help message.
 
-- `version`  
+- `version`
   Show version information.
 
+- `list`
+  List all discovered services and projects. Useful for verifying that `krun` has found your `krun.json` files.
+
+  ```sh
+  krun list
+  ```
+
 - `build [--skip-web, --force, --flush] <project|service>`  
-  Build a project or specific service.  
-  Use `--skip-web` to skip building the web service, `--force` to force a rebuild even if the source has not changed, and `--flush` to delete the existing build pod before building (clearing any cached layers or copied workspace files).
+  Build a project or specific service.
+  Builds run inside a persistent `docker-build` pod in your cluster that caches layers and workspace files between builds. Use `--skip-web` to skip building the web service, `--force` to force a rebuild even if the source has not changed, and `--flush` to delete the existing build pod before building (clearing any cached layers or copied workspace files).
 
   ```sh
   krun build awesome-app
+  krun build awesome-app-api
   krun build --skip-web awesome-app
   krun build --skip-web --force awesome-app
   krun build --flush awesome-app
@@ -97,6 +119,13 @@ krun [global options] <command> [command options] <service>
   krun deploy --no-restart awesome-app
   ```
 
+- `delete <project>`
+  Delete a deployed project and its resources from the cluster.
+
+  ```sh
+  krun delete awesome-app
+  ```
+
 - `debug list`  
   List active debug sessions.
 
@@ -104,12 +133,14 @@ krun [global options] <command> [command options] <service>
   krun debug list
   ```
 
-- `debug enable <service> [--container <container>]`  
+- `debug enable <service> [--container <container>]`
   Enable debug mode for a service using the in-cluster krun runtime.
 
   ```sh
   krun debug enable awesome-app-api
   ```
+
+  > NOTE: Debug mode launches the `krun-helper` daemon which requires **elevated privileges** (Windows UAC / Linux sudo) to modify your hosts file and set up port-forwards.
 
   Debug mode needs a local port configured for your developer machine. Set `intercept_port` in `krun.json` to the port your app listens on locally. Normally you want this to match the `launchSettings.json` `applicationUrl` (for example, `http://localhost:5000`). Ensure the value is unique per service so multiple debug sessions do not conflict.
 
@@ -126,11 +157,18 @@ krun [global options] <command> [command options] <service>
   krun debug disable awesome-app-api
   ```
 
-- `debug helper status`  
+- `debug helper status`
   Check whether the local elevated `krun-helper` daemon is currently running.
 
   ```sh
   krun debug helper status
+  ```
+
+- `debug helper stop`
+  Stop the local `krun-helper` daemon.
+
+  ```sh
+  krun debug helper stop
   ```
 
 - `debug runtime install`  
@@ -154,59 +192,9 @@ krun [global options] <command> [command options] <service>
   krun debug runtime uninstall
   ```
 
-## Examples
-
-1. Build the entire project:
-
-   ```sh
-   krun build awesome-app
-   ```
-
-1. Build the project without the web service:
-
-   ```sh
-   krun build --skip-web awesome-app
-   ```
-
-1. Build a specific service:
-
-   ```sh
-   krun build awesome-app-api
-   ```
-
-1. Deploy a service:
-
-   ```sh
-   krun deploy awesome-app-api
-   ```
-
-1. Enable debug mode:
-
-   ```sh
-   krun debug enable awesome-app-api
-   ```
-
-1. Enable debug mode for specific container:
-
-   ```sh
-   krun debug enable awesome-app-api --container mysidecar
-   ```
-
-1. Disable debug mode:
-
-   ```sh
-   krun debug disable awesome-app-api
-   ```
-
-1. Check helper daemon status:
-
-```sh
-krun debug helper status
-```
-
 ## krun-config.json
 
-The [krun-config.json](https://github.com/ftechmax/krun/blob/main/krun-config.json) file configures how `krun` interacts with your Kubernetes environment, Docker registries, and source code. Below is a description of each field:
+The [krun-config.json](https://github.com/ftechmax/krun/blob/main/krun-config.json) file configures how `krun` interacts with your Kubernetes environment, Docker registries, and source code. This file must be placed **next to the `krun` binary**. Below is a description of each field:
 
 ### Example
 
@@ -216,7 +204,6 @@ The [krun-config.json](https://github.com/ftechmax/krun/blob/main/krun-config.js
     "path": "c:/git/",
     "search_depth": 1
   },
-  "hostname": "kube.local",
   "local_registry": "registry:5000",
   "remote_registry": "docker.io/ftechmax"
 }
@@ -225,22 +212,21 @@ The [krun-config.json](https://github.com/ftechmax/krun/blob/main/krun-config.js
 ### Field Reference
 
 - **`source`**
-  - `path`: Root directory where your project source code is located.
-  - `search_depth`: How many directory levels to search for services in `path`.
+  - `path`: Root directory where your project source code is located. `krun` will recursively search this directory for `krun.json` files to discover services.
+  - `search_depth`: How many directory levels deep to search for `krun.json` files in `path`.
 
-- **`hostname`**: The hostname of the Kubernetes server.
-
-- **`local_registry`**: Address of your local Docker registry (used for local builds).
+- **`local_registry`**: Address of your local Docker registry (used for local builds). This can include a path segment (for example `registry:5000/myuser`).
 
 - **`remote_registry`**: Address of the remote Docker registry (used for deploying non-local builds).
 
 > Notes  
-> Ensure all paths use forward slashes or are properly escaped for your operating system.  
-> Make sure your kubeconfig is correctly configured.
+> Ensure all paths use forward slashes or are properly escaped for your operating system.
 
 ## krun.json
 
-The `krun.json` file is used by `krun` to detect available services in your project. It should be placed in the root of your project repository and contains an array of service definitions.
+The `krun.json` file is used by `krun` to detect available services in your defined source folder. It should be placed in the root of your project repository and contains an array of service definitions.
+
+The **project name** is derived from the directory that contains the `krun.json` file. For example, if the file is located at `c:/git/awesome-app/krun.json`, the project name will be `awesome-app`. This is the name you use in commands like `krun build awesome-app` and `krun deploy awesome-app`.
 
 ### Example
 
@@ -261,7 +247,11 @@ The `krun.json` file is used by `krun` to detect available services in your proj
     "name": "awesome-app-api",
     "path": "src/api",
     "dockerfile": "AwesomeApp.Api",
-    "context": "src/"
+    "context": "src/",
+    "service_dependencies": [
+      { "host": "awesome-app-cache", "port": 6379 },
+      { "host": "rabbitmq.default.svc", "port": 5672 }
+    ]
   },
   {
     "name": "awesome-app-web",
@@ -299,16 +289,20 @@ The `krun.json` file is used by `krun` to detect available services in your proj
   - `namespace`: Namespace of the dependency service (optional if `host` includes it).
   - `service`: Service name in Kubernetes (optional if `host` includes it).
   - `port`: Port to forward locally (local and remote ports are the same).
-  - Hosts are expanded with `service.svc` and `service` aliases to match common connection string formats.
 
-Example host expansion:
+### Host Aliases
 
-```text
-Input:  rabbitmq.default.svc
-Adds:   rabbitmq.default.svc
-        rabbitmq.svc
-        rabbitmq
+Some operators (for example MongoDB) generate connection strings that use pod-specific DNS names instead of the service name. When the hostname in a connection string does not match the `host` of any service dependency, you can use `aliases` to add extra hosts-file entries that also resolve to `127.0.0.1`. Traffic is still forwarded through the same port-forward as the parent dependency.
+
+```json
+{
+  "host": "mongo.default.svc",
+  "port": 27017,
+  "aliases": ["mongodb-server-0.mongo.default.svc.cluster.local"]
+}
 ```
+
+In this example both `mongo.default.svc` and `mongodb-server-0.mongo.default.svc.cluster.local` will resolve to `127.0.0.1`, and traffic on port `27017` will be forwarded to the `mongo` service in the cluster.
 
 ## Debugging with krun Runtime
 
@@ -317,6 +311,8 @@ To debug a service using the krun runtime, first install the runtime components 
 ### Prerequisites
 
 Ensure your project launches as a console application (which is the default profile).
+
+Debug mode requires **elevated privileges** because the `krun-helper` daemon modifies your hosts file and sets up port-forwards. On Windows you will see a UAC prompt, on Linux/macOS the helper is started with `sudo`.
 
 Install the runtime components once per cluster:
 
@@ -356,90 +352,45 @@ krun debug disable <service>
 
 ### Inject Kubernetes Environment Variables
 
-To inject Kubernetes environment variables into your project when in debug mode, you have to consume the `appsettings-debug.env` file that the debug mode creates in your solution directory.
+When debug mode is enabled, krun creates a `.env` file in the service directory containing the environment variables from the running pod. Kubernetes-injected service discovery variables and system variables are filtered out automatically, leaving only app-relevant configuration.
 
-Add the following in your `program.cs` file.
+Your application needs a dotenv library to load the `.env` file at startup. Most languages have one:
 
-#### For WebApplication builder
+#### C# (.NET)
+
+Install the [DotNetEnv](https://www.nuget.org/packages/DotNetEnv) NuGet package:
+
+```sh
+dotnet add package DotNetEnv
+```
+
+Add the `.env` file to your configuration. `TraversePath()` walks up parent directories to find it, so it works regardless of working directory:
 
 ```csharp
 var builder = WebApplication.CreateBuilder(args);
 
-ConfigureConfiguration(builder);
+builder.Configuration.AddDotNetEnv(".env", LoadOptions.TraversePath());
 ```
 
-```csharp
-private static void ConfigureConfiguration(WebApplicationBuilder builder)
-{
-    if (!builder.Environment.IsDevelopment())
-    {
-        return;
-    }
+#### Go
 
-    // Read appsettings-debug.env and inject each line as environment variable
-    var envFile = Path.Combine("../appsettings-debug.env");
-    if (File.Exists(envFile))
-    {
-        foreach (var line in File.ReadAllLines(envFile))
-        {
-            var trimmed = line.Trim();
-            if (string.IsNullOrWhiteSpace(trimmed) || trimmed.StartsWith("#")) continue;
-            var separatorIndex = trimmed.IndexOf('=');
-            if (separatorIndex > 0)
-            {
-                var key = trimmed.Substring(0, separatorIndex).Trim();
-                var value = trimmed.Substring(separatorIndex + 1).Trim();
-                if (!string.IsNullOrEmpty(key))
-                {
-                    Environment.SetEnvironmentVariable(key, value);
-                }
-            }
-        }
-    }
+Use [godotenv](https://github.com/joho/godotenv):
 
-    // Read environment variables into the configuration
-    builder.Configuration.AddEnvironmentVariables();
+```go
+import "github.com/joho/godotenv"
+
+func main() {
+    godotenv.Load("../.env")
+    // ...
 }
 ```
 
-#### For Default Host builder
+#### Node.js
 
-```csharp
-var builder = Host.CreateDefaultBuilder(args);
+Use [dotenv](https://www.npmjs.com/package/dotenv):
 
-builder.ConfigureAppConfiguration(ConFigureConfiguration);
+```js
+require('dotenv').config({ path: '../.env' })
 ```
 
-```csharp
-private static void ConFigureConfiguration(HostBuilderContext context, IConfigurationBuilder config)
-{
-    if (!context.HostingEnvironment.IsDevelopment())
-    {
-        return;
-    }
-
-    // Read appsettings-debug.env and inject each line as environment variable
-    var envFile = Path.Combine("../appsettings-debug.env");
-    if (File.Exists(envFile))
-    {
-        foreach (var line in File.ReadAllLines(envFile))
-        {
-            var trimmed = line.Trim();
-            if (string.IsNullOrWhiteSpace(trimmed) || trimmed.StartsWith("#")) continue;
-            var separatorIndex = trimmed.IndexOf('=');
-            if (separatorIndex > 0)
-            {
-                var key = trimmed.Substring(0, separatorIndex).Trim();
-                var value = trimmed.Substring(separatorIndex + 1).Trim();
-                if (!string.IsNullOrEmpty(key))
-                {
-                    Environment.SetEnvironmentVariable(key, value);
-                }
-            }
-        }
-    }
-
-    // Read environment variables into the configuration
-    config.AddEnvironmentVariables();
-}
-```
+> **Note:** The `.env` file path is relative to your application's working directory. Since krun writes the file to the service directory (the `path` from `krun.json`), you typically need `../.env` when your app runs from a subdirectory.
