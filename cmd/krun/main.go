@@ -27,9 +27,6 @@ func main() {
 		Use:   "krun",
 		Short: "krun CLI",
 		Long:  `krun [global options] <command> [command options] <service>`,
-		PersistentPreRun: func(cmd *cobra.Command, args []string) {
-			initialize(cmd, kubeConfigPath)
-		},
 	}
 	rootCmd.PersistentFlags().StringVar(&kubeConfigPath, "kubeconfig", "", "Path to kubeconfig file")
 
@@ -44,16 +41,18 @@ func main() {
 		&cobra.Command{
 			Use:     "list",
 			Short:   "List all services or projects",
+			PreRun:  preRunInit,
 			Run:     handleList,
 			Example: "krun list",
 		},
 	)
 
 	buildCmd := &cobra.Command{
-		Use:   "build <project|service>",
-		Short: "Build a project or specific service",
-		Args:  cobra.MinimumNArgs(1),
-		Run:   handleBuild,
+		Use:    "build <project|service>",
+		Short:  "Build a project or specific service",
+		Args:   cobra.MinimumNArgs(1),
+		PreRun: preRunInit,
+		Run:    handleBuild,
 	}
 	buildCmd.Flags().Bool("skip-web", false, "Skip building the web component")
 	buildCmd.Flags().Bool("force", false, "Force build even if up to date")
@@ -61,10 +60,11 @@ func main() {
 	rootCmd.AddCommand(buildCmd)
 
 	deployCmd := &cobra.Command{
-		Use:   "deploy <project>",
-		Short: "Deploy a project",
-		Args:  cobra.MinimumNArgs(1),
-		Run:   handleDeploy,
+		Use:    "deploy <project>",
+		Short:  "Deploy a project",
+		Args:   cobra.MinimumNArgs(1),
+		PreRun: preRunInit,
+		Run:    handleDeploy,
 	}
 	deployCmd.Flags().Bool("use-remote-registry", false, "Use remote registry for deploy")
 	deployCmd.Flags().Bool("no-restart", false, "Skip rollout restart after apply")
@@ -74,14 +74,16 @@ func main() {
 		Use:     "delete <project>",
 		Short:   "Delete a project",
 		Args:    cobra.MinimumNArgs(1),
+		PreRun:  preRunInit,
 		Run:     handleDelete,
 		Example: "krun delete myproject",
 	}
 	rootCmd.AddCommand(deleteCmd)
 
 	debugCmd := &cobra.Command{
-		Use:   "debug",
-		Short: "Debug commands",
+		Use:              "debug",
+		Short:            "Debug commands",
+		PersistentPreRun: preRunInit,
 	}
 	debugListCmd := &cobra.Command{
 		Use:   "list",
@@ -135,10 +137,11 @@ func main() {
 	}
 	debugRuntimeCmd.AddCommand(debugRuntimeInstallCmd, debugRuntimeStatusCmd, debugRuntimeUninstallCmd)
 	debugHelperStopCmd := &cobra.Command{
-		Use:   "stop",
-		Short: "Stop the local debug helper daemon",
-		Args:  cobra.NoArgs,
-		Run:   handleDebugHelperStop,
+		Use:              "stop",
+		Short:            "Stop the local debug helper daemon",
+		Args:             cobra.NoArgs,
+		PersistentPreRun: func(cmd *cobra.Command, args []string) {},
+		Run:              handleDebugHelperStop,
 	}
 	debugHelperCmd.AddCommand(debugHelperStatusCmd, debugHelperStopCmd)
 	debugCmd.AddCommand(debugListCmd, debugEnableCmd, debugDisableCmd, debugHelperCmd, debugRuntimeCmd)
@@ -148,6 +151,10 @@ func main() {
 		fmt.Println(utils.Colorize(err.Error(), utils.Red))
 		os.Exit(1)
 	}
+}
+
+func preRunInit(cmd *cobra.Command, args []string) {
+	initialize(cmd, kubeConfigPath)
 }
 
 func initialize(_ *cobra.Command, optKubeConfig string) {

@@ -148,7 +148,8 @@ func DiscoverServices(sourceDir string, searchDepth int) ([]Service, map[string]
 
 			var svc []Service
 			if err := json.Unmarshal(bytes, &svc); err != nil {
-				return err
+				fmt.Printf("Warning: skipping invalid krun.json at %s: %v\n", path, err)
+				return nil
 			}
 
 			projectDir := filepath.Dir(path)
