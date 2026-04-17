@@ -23,7 +23,7 @@ func Update(entries []contracts.HostsEntry) error {
 		return err
 	}
 
-	content, err := os.ReadFile(path)
+	content, err := os.ReadFile(path) //nolint:gosec // Path comes from a trusted hosts-file resolver.
 	if err != nil {
 		return fmt.Errorf("failed to read hosts file: %w", err)
 	}
@@ -56,7 +56,7 @@ func Remove() error {
 		return err
 	}
 
-	content, err := os.ReadFile(path)
+	content, err := os.ReadFile(path) //nolint:gosec // Path comes from a trusted hosts-file resolver.
 	if err != nil {
 		return fmt.Errorf("failed to read hosts file: %w", err)
 	}
@@ -93,14 +93,22 @@ func writeHosts(path string, content string) error {
 		return fmt.Errorf("failed to create temp hosts file: %w", err)
 	}
 	tempName := tempFile.Name()
-	defer os.Remove(tempName)
+	defer func() {
+		if removeErr := os.Remove(tempName); removeErr != nil && !os.IsNotExist(removeErr) {
+			fmt.Printf("warning: failed to remove temp hosts file %s: %v\n", tempName, removeErr)
+		}
+	}()
 
 	if _, err := tempFile.WriteString(content); err != nil {
-		tempFile.Close()
+		if closeErr := tempFile.Close(); closeErr != nil {
+			return fmt.Errorf("failed to write temp hosts file: %w (close temp file: %v)", err, closeErr)
+		}
 		return fmt.Errorf("failed to write temp hosts file: %w", err)
 	}
 	if err := tempFile.Chmod(perm); err != nil {
-		tempFile.Close()
+		if closeErr := tempFile.Close(); closeErr != nil {
+			return fmt.Errorf("failed to set temp hosts file permissions: %w (close temp file: %v)", err, closeErr)
+		}
 		return fmt.Errorf("failed to set temp hosts file permissions: %w", err)
 	}
 	if err := tempFile.Close(); err != nil {

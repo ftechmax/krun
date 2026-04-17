@@ -333,14 +333,20 @@ func captureConnection(
 			continue
 		}
 		if errors.Is(readErr, io.EOF) {
-			_ = streamClient.Send(ctx, cfg.newStreamEnvelope(connectionID, contracts.StreamTypeClose))
+			if err := streamClient.Send(ctx, cfg.newStreamEnvelope(connectionID, contracts.StreamTypeClose)); err != nil {
+				log.Printf("send close envelope failed after EOF (connection_id=%s): %v", connectionID, err)
+			}
 			return
 		}
 
 		errorEnvelope := cfg.newStreamEnvelope(connectionID, contracts.StreamTypeError)
 		errorEnvelope.Message = readErr.Error()
-		_ = streamClient.Send(ctx, errorEnvelope)
-		_ = streamClient.Send(ctx, cfg.newStreamEnvelope(connectionID, contracts.StreamTypeClose))
+		if err := streamClient.Send(ctx, errorEnvelope); err != nil {
+			log.Printf("send error envelope failed (connection_id=%s): %v", connectionID, err)
+		}
+		if err := streamClient.Send(ctx, cfg.newStreamEnvelope(connectionID, contracts.StreamTypeClose)); err != nil {
+			log.Printf("send close envelope failed (connection_id=%s): %v", connectionID, err)
+		}
 		return
 	}
 }
@@ -350,7 +356,7 @@ func newReconnectingStreamClient(
 	cfg runtimeConfig,
 	onReceive func(contracts.StreamEnvelope),
 ) *reconnectingStreamClient {
-	ctx, cancel := context.WithCancel(parent)
+	ctx, cancel := context.WithCancel(parent) //nolint:gosec // Cancel func is stored and called by Close.
 	headers := make(http.Header)
 	headers.Set("X-Krun-Session-ID", cfg.SessionID)
 	if strings.TrimSpace(cfg.SessionToken) != "" {
@@ -484,7 +490,7 @@ func nextBackoff(current time.Duration) time.Duration {
 }
 
 func runIptablesCommand(ctx context.Context, args ...string) error {
-	cmd := exec.CommandContext(ctx, "iptables", args...)
+	cmd := exec.CommandContext(ctx, "iptables", args...) //nolint:gosec // Binary is fixed; args are built internally.
 	output, err := cmd.CombinedOutput()
 	if err == nil {
 		return nil

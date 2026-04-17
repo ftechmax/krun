@@ -80,6 +80,45 @@ func main() {
 	}
 	rootCmd.AddCommand(deleteCmd)
 
+	installCmd := &cobra.Command{
+		Use:              "install",
+		Short:            "Install or update krun-helper service and in-cluster runtime",
+		Args:             cobra.NoArgs,
+		PersistentPreRun: preRunKubeConfigOnly,
+		Run:              handleInstall,
+	}
+	uninstallCmd := &cobra.Command{
+		Use:              "uninstall",
+		Short:            "Uninstall krun-helper service and in-cluster runtime",
+		Args:             cobra.NoArgs,
+		PersistentPreRun: preRunKubeConfigOnly,
+		Run:              handleUninstall,
+	}
+	statusCmd := &cobra.Command{
+		Use:              "status",
+		Short:            "Show health and version of krun-helper and in-cluster runtime",
+		Args:             cobra.NoArgs,
+		PersistentPreRun: preRunKubeConfigOnly,
+		Run:              handleStatus,
+	}
+	rootCmd.AddCommand(installCmd, uninstallCmd, statusCmd)
+
+	rootCmd.AddCommand(
+		&cobra.Command{
+			Use:              "__helper-install",
+			Hidden:           true,
+			Args:             cobra.NoArgs,
+			PersistentPreRun: preRunKubeConfigOnly,
+			Run:              func(cmd *cobra.Command, args []string) { debug.HelperInstall(config) },
+		},
+		&cobra.Command{
+			Use:    "__helper-uninstall",
+			Hidden: true,
+			Args:   cobra.NoArgs,
+			Run:    func(cmd *cobra.Command, args []string) { debug.HelperUninstall() },
+		},
+	)
+
 	debugCmd := &cobra.Command{
 		Use:              "debug",
 		Short:            "Debug commands",
@@ -107,35 +146,6 @@ func main() {
 		Use:   "helper",
 		Short: "Inspect local debug helper daemon",
 	}
-	debugHelperStatusCmd := &cobra.Command{
-		Use:   "status",
-		Short: "Check local debug helper daemon status",
-		Args:  cobra.NoArgs,
-		Run:   handleDebugHelperStatus,
-	}
-	debugRuntimeCmd := &cobra.Command{
-		Use:   "runtime",
-		Short: "Manage krun debug runtime components",
-	}
-	debugRuntimeInstallCmd := &cobra.Command{
-		Use:   "install",
-		Short: "Install or upgrade debug runtime in the cluster",
-		Args:  cobra.NoArgs,
-		Run:   handleDebugRuntimeInstall,
-	}
-	debugRuntimeStatusCmd := &cobra.Command{
-		Use:   "status",
-		Short: "Check debug runtime status in the cluster",
-		Args:  cobra.NoArgs,
-		Run:   handleDebugRuntimeStatus,
-	}
-	debugRuntimeUninstallCmd := &cobra.Command{
-		Use:   "uninstall",
-		Short: "Uninstall debug runtime from the cluster",
-		Args:  cobra.NoArgs,
-		Run:   handleDebugRuntimeUninstall,
-	}
-	debugRuntimeCmd.AddCommand(debugRuntimeInstallCmd, debugRuntimeStatusCmd, debugRuntimeUninstallCmd)
 	debugHelperStopCmd := &cobra.Command{
 		Use:              "stop",
 		Short:            "Stop the local debug helper daemon",
@@ -143,8 +153,8 @@ func main() {
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {},
 		Run:              handleDebugHelperStop,
 	}
-	debugHelperCmd.AddCommand(debugHelperStatusCmd, debugHelperStopCmd)
-	debugCmd.AddCommand(debugListCmd, debugEnableCmd, debugDisableCmd, debugHelperCmd, debugRuntimeCmd)
+	debugHelperCmd.AddCommand(debugHelperStopCmd)
+	debugCmd.AddCommand(debugListCmd, debugEnableCmd, debugDisableCmd, debugHelperCmd)
 	rootCmd.AddCommand(debugCmd)
 
 	if err := rootCmd.Execute(); err != nil {
@@ -157,38 +167,48 @@ func preRunInit(cmd *cobra.Command, args []string) {
 	initialize(cmd, kubeConfigPath)
 }
 
+func preRunKubeConfigOnly(cmd *cobra.Command, args []string) {
+	initializeKubeConfig(kubeConfigPath)
+}
+
 func initialize(_ *cobra.Command, optKubeConfig string) {
+	initializeKubeConfig(optKubeConfig)
+
 	krunConfig, err := cfg.ParseKrunConfig()
 	if err != nil {
 		fmt.Println(utils.Colorize(fmt.Sprintf("Error parsing krun-config.json: %s", err), utils.Red))
 		os.Exit(1)
 	}
 
-	config = cfg.Config{
-		KrunConfig: krunConfig,
-	}
-
-	if optKubeConfig != "" {
-		config.KubeConfig = filepath.ToSlash(optKubeConfig)
-	} else {
-		dirname, err := os.UserHomeDir()
-		if err != nil {
-			fmt.Println(utils.Colorize(fmt.Sprintf("Error getting user home directory: %s", err), utils.Red))
-			os.Exit(0)
-		}
-		// set default kubeconfig path
-		config.KubeConfig = filepath.ToSlash(dirname + "/.kube/config")
-	}
+	config.KrunConfig = krunConfig
 
 	config.Registry = config.LocalRegistry
 
 	var projectPaths map[string]string
-	services, projectPaths, err = cfg.DiscoverServices(krunConfig.KrunSourceConfig.Path, krunConfig.KrunSourceConfig.SearchDepth)
+	services, projectPaths, err = cfg.DiscoverServices(krunConfig.Path, krunConfig.SearchDepth)
 	if err != nil {
 		fmt.Println(utils.Colorize(fmt.Sprintf("Error discovering services: %s", err), utils.Red))
 		os.Exit(0)
 	}
 	config.ProjectPaths = projectPaths
+}
+
+func initializeKubeConfig(optKubeConfig string) {
+	config = cfg.Config{}
+
+	if optKubeConfig != "" {
+		config.KubeConfig = filepath.ToSlash(optKubeConfig)
+		return
+	}
+
+	dirname, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Println(utils.Colorize(fmt.Sprintf("Error getting user home directory: %s", err), utils.Red))
+		os.Exit(0)
+	}
+
+	// set default kubeconfig path
+	config.KubeConfig = filepath.ToSlash(dirname + "/.kube/config")
 }
 
 func handleList(cmd *cobra.Command, args []string) {
@@ -316,24 +336,28 @@ func handleDebugDisable(cmd *cobra.Command, args []string) {
 	debug.Disable(service, config)
 }
 
-func handleDebugHelperStatus(cmd *cobra.Command, args []string) {
-	debug.HelperStatus(config)
-}
-
 func handleDebugHelperStop(cmd *cobra.Command, args []string) {
 	debug.HelperStop()
 }
 
-func handleDebugRuntimeInstall(cmd *cobra.Command, args []string) {
+func handleInstall(cmd *cobra.Command, args []string) {
+	debug.HelperInstall(config)
 	debug.RuntimeInstall(config, version)
 }
 
-func handleDebugRuntimeStatus(cmd *cobra.Command, args []string) {
-	debug.RuntimeStatus(config)
+func handleUninstall(cmd *cobra.Command, args []string) {
+	debug.RuntimeUninstall(config, version)
+	debug.HelperUninstall()
 }
 
-func handleDebugRuntimeUninstall(cmd *cobra.Command, args []string) {
-	debug.RuntimeUninstall(config, version)
+func handleStatus(cmd *cobra.Command, args []string) {
+	fmt.Println("krun-helper")
+	fmt.Println("-----------")
+	debug.HelperStatus(config)
+	fmt.Println("")
+	fmt.Println("traffic-manager")
+	fmt.Println("---------------")
+	debug.RuntimeStatus(config)
 }
 
 func getServiceNameAndProject(name string) (string, string, error) {
@@ -352,7 +376,7 @@ func getServiceNameAndProject(name string) (string, string, error) {
 	}
 
 	if serviceName == "" && projectName == "" {
-		return "", "", fmt.Errorf("Service or project '%s' not found.\nRun krun list to show available options", name)
+		return "", "", fmt.Errorf("service or project '%s' not found\nrun krun list to show available options", name)
 	}
 
 	return serviceName, projectName, nil

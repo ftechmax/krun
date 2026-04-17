@@ -18,8 +18,14 @@ type linuxLaunchSpec struct {
 }
 
 func startElevatedProcess(binaryPath string, args []string) error {
-	sudoPath, _ := exec.LookPath("sudo")
-	pkexecPath, _ := exec.LookPath("pkexec")
+	sudoPath, err := exec.LookPath("sudo")
+	if err != nil {
+		sudoPath = ""
+	}
+	pkexecPath, err := exec.LookPath("pkexec")
+	if err != nil {
+		pkexecPath = ""
+	}
 
 	spec, err := buildLinuxLaunchSpec(binaryPath, args, os.Geteuid(), sudoPath, pkexecPath)
 	if err != nil {
@@ -33,17 +39,50 @@ func startElevatedProcess(binaryPath string, args []string) error {
 	return runForegroundCommand(spec.path, spec.args)
 }
 
+func runElevatedCommand(binaryPath string, args []string) error {
+	sudoPath, err := exec.LookPath("sudo")
+	if err != nil {
+		sudoPath = ""
+	}
+	pkexecPath, err := exec.LookPath("pkexec")
+	if err != nil {
+		pkexecPath = ""
+	}
+
+	spec, err := buildLinuxRunSpec(binaryPath, args, os.Geteuid(), sudoPath, pkexecPath)
+	if err != nil {
+		return err
+	}
+
+	if spec.detached {
+		return startDetachedProcess(spec.path, spec.args)
+	}
+
+	return runForegroundCommand(spec.path, spec.args)
+}
+
 func buildLinuxLaunchSpec(binaryPath string, args []string, euid int, sudoPath string, pkexecPath string) (linuxLaunchSpec, error) {
+	return buildLinuxElevationSpec(binaryPath, args, euid, sudoPath, pkexecPath, true)
+}
+
+func buildLinuxRunSpec(binaryPath string, args []string, euid int, sudoPath string, pkexecPath string) (linuxLaunchSpec, error) {
+	return buildLinuxElevationSpec(binaryPath, args, euid, sudoPath, pkexecPath, false)
+}
+
+func buildLinuxElevationSpec(binaryPath string, args []string, euid int, sudoPath string, pkexecPath string, detached bool) (linuxLaunchSpec, error) {
 	if euid == 0 {
 		return linuxLaunchSpec{
 			path:     binaryPath,
 			args:     append([]string(nil), args...),
-			detached: true,
+			detached: detached,
 		}, nil
 	}
 
 	if sudoPath != "" {
-		sudoArgs := append([]string{"-b", "--", binaryPath}, args...)
+		sudoArgs := append([]string{"--", binaryPath}, args...)
+		if detached {
+			sudoArgs = append([]string{"-b", "--", binaryPath}, args...)
+		}
 		return linuxLaunchSpec{
 			path: sudoPath,
 			args: sudoArgs,
@@ -51,8 +90,16 @@ func buildLinuxLaunchSpec(binaryPath string, args []string, euid int, sudoPath s
 	}
 
 	if pkexecPath != "" {
-		pkexecArgs := []string{"/bin/sh", "-c", pkexecDetachScript, "sh", binaryPath}
-		pkexecArgs = append(pkexecArgs, args...)
+		if detached {
+			pkexecArgs := []string{"/bin/sh", "-c", pkexecDetachScript, "sh", binaryPath}
+			pkexecArgs = append(pkexecArgs, args...)
+			return linuxLaunchSpec{
+				path: pkexecPath,
+				args: pkexecArgs,
+			}, nil
+		}
+
+		pkexecArgs := append([]string{binaryPath}, args...)
 		return linuxLaunchSpec{
 			path: pkexecPath,
 			args: pkexecArgs,
@@ -63,7 +110,7 @@ func buildLinuxLaunchSpec(binaryPath string, args []string, euid int, sudoPath s
 }
 
 func startDetachedProcess(binaryPath string, args []string) error {
-	cmd := exec.Command(binaryPath, args...)
+	cmd := exec.Command(binaryPath, args...) //nolint:gosec // binaryPath and args are prepared by trusted launch-spec selection.
 
 	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
@@ -84,9 +131,13 @@ func startDetachedProcess(binaryPath string, args []string) error {
 }
 
 func runForegroundCommand(binaryPath string, args []string) error {
-	cmd := exec.Command(binaryPath, args...)
+	cmd := exec.Command(binaryPath, args...) //nolint:gosec // binaryPath and args are prepared by trusted launch-spec selection.
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func isProcessElevated() bool {
+	return os.Geteuid() == 0
 }

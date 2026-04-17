@@ -25,7 +25,7 @@ func TestWorkloadInjectorInjectAndRemove(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			client := fake.NewSimpleClientset(newTestWorkload(tc.kind, "default", "orders-api"))
+			client := fake.NewClientset(newTestWorkload(tc.kind, "default", "orders-api"))
 			injector := NewWorkloadInjector(client, Options{
 				Image:           "registry.local/krun-traffic-agent:latest",
 				ImagePullPolicy: string(corev1.PullAlways),
@@ -109,7 +109,7 @@ func TestWorkloadInjectorCleanupRemovesAnnotatedAgents(t *testing.T) {
 		Image: "agent:latest",
 	})
 
-	client := fake.NewSimpleClientset(deployment, statefulSet, daemonSet, unannotatedDeployment)
+	client := fake.NewClientset(deployment, statefulSet, daemonSet, unannotatedDeployment)
 	injector := NewWorkloadInjector(client, Options{})
 
 	if err := injector.Cleanup(context.Background()); err != nil {
@@ -150,7 +150,7 @@ func TestWorkloadInjectorCleanupRemovesAnnotatedAgents(t *testing.T) {
 }
 
 func TestWorkloadInjectorLookupOrder(t *testing.T) {
-	client := fake.NewSimpleClientset(
+	client := fake.NewClientset(
 		newTestDeployment("default", "orders-api"),
 		newTestStatefulSet("default", "orders-api"),
 		newTestDaemonSet("default", "orders-api"),
@@ -184,7 +184,7 @@ func TestWorkloadInjectorLookupOrder(t *testing.T) {
 }
 
 func TestWorkloadInjectorInjectMissingWorkload(t *testing.T) {
-	client := fake.NewSimpleClientset()
+	client := fake.NewClientset()
 	injector := NewWorkloadInjector(client, Options{})
 	err := injector.Inject(context.Background(), contracts.DebugSession{
 		Namespace:   "default",
@@ -198,7 +198,7 @@ func TestWorkloadInjectorInjectMissingWorkload(t *testing.T) {
 }
 
 func TestWorkloadInjectorDefaults(t *testing.T) {
-	client := fake.NewSimpleClientset(newTestDeployment("default", "orders-api"))
+	client := fake.NewClientset(newTestDeployment("default", "orders-api"))
 	injector := NewWorkloadInjector(client, Options{})
 	session := contracts.DebugSession{
 		SessionID:    "session-1",

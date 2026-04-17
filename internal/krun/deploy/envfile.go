@@ -132,11 +132,11 @@ func writeDotEnv(dir string, vars []envVar) error {
 	for _, v := range vars {
 		fmt.Fprintf(&buf, "%s=%s\n", v.Key, v.Value)
 	}
-	return os.WriteFile(filepath.Join(dir, ".env"), []byte(buf.String()), 0644)
+	return os.WriteFile(filepath.Join(dir, ".env"), []byte(buf.String()), 0o600)
 }
 
 func serviceDir(service cfg.Service, config cfg.Config) (string, error) {
-	baseDir := config.KrunConfig.Path
+	baseDir := config.Path
 	if service.Project != "" && config.ProjectPaths != nil {
 		if rel, ok := config.ProjectPaths[service.Project]; ok && rel != "" {
 			baseDir = filepath.Join(baseDir, filepath.FromSlash(rel))

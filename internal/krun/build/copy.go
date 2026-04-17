@@ -60,7 +60,7 @@ func copySource(kubeConfig string, projectName string, projectPath string, skipW
 	if projectPath != "" {
 		projectRelPath = projectPath
 	}
-	localRoot := filepath.ToSlash(filepath.Join(config.KrunSourceConfig.Path, filepath.FromSlash(projectRelPath)))
+	localRoot := filepath.ToSlash(filepath.Join(config.Path, filepath.FromSlash(projectRelPath)))
 	remoteRoot := path.Join(workspacePath, projectName)
 
 	client, err := kube.NewClient(kubeConfig)

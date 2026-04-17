@@ -136,16 +136,24 @@ func Disable(service cfg.Service, config cfg.Config) {
 }
 
 func HelperStatus(config cfg.Config) {
-	if err := ensureHelperStarted(config); err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("cannot start helper: %v", err), utils.Red))
+	running, installed := helperServiceStatus()
+	if !installed {
+		printStatusValue("service:", "not installed", utils.Red)
+		fmt.Printf("kubeconfig: %s\n", config.KubeConfig)
 		return
 	}
 
-	if err := helperCheckHealth(); err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("helper unreachable: %v", err), utils.Red))
-		return
+	if running {
+		printStatusValue("service:", "installed (running)", utils.Green)
+	} else {
+		printStatusValue("service:", "installed (stopped)", utils.Red)
 	}
-	fmt.Println(utils.Colorize("helper is running", utils.Green))
+
+	if err := helperCheckHealth(); err != nil {
+		printStatusValue("health:", fmt.Sprintf("unreachable (%v)", err), utils.Red)
+	} else {
+		printStatusValue("health:", "ok", utils.Green)
+	}
 	fmt.Printf("kubeconfig: %s\n", config.KubeConfig)
 }
 
@@ -166,6 +174,78 @@ func HelperStop() {
 	}
 
 	fmt.Println(utils.Colorize("helper is shutting down", utils.Green))
+}
+
+func HelperInstall(config cfg.Config) {
+	binaryPath, err := resolveHelperBinaryPath()
+	if err != nil {
+		fmt.Println(utils.Colorize(fmt.Sprintf("cannot find krun-helper binary: %v", err), utils.Red))
+		return
+	}
+
+	absKubeConfig, err := filepath.Abs(config.KubeConfig)
+	if err != nil {
+		fmt.Println(utils.Colorize(fmt.Sprintf("cannot resolve kubeconfig path: %v", err), utils.Red))
+		return
+	}
+
+	if needsElevationForHelperService() {
+		if err := rerunHelperServiceCommandElevated("install", absKubeConfig); err != nil {
+			fmt.Println(utils.Colorize(fmt.Sprintf("failed to install helper service: %v", err), utils.Red))
+		}
+		return
+	}
+
+	if err := installHelperService(binaryPath, absKubeConfig); err != nil {
+		fmt.Println(utils.Colorize(fmt.Sprintf("failed to install helper service: %v", err), utils.Red))
+		return
+	}
+
+	fmt.Println("Waiting for helper service to become ready...")
+	if err := waitForHelperHealth(); err != nil {
+		fmt.Println(utils.Colorize(fmt.Sprintf("helper service installed but did not become ready: %v", err), utils.Yellow))
+		return
+	}
+
+	fmt.Println(utils.Colorize("helper service installed", utils.Green))
+}
+
+func HelperUninstall() {
+	if !isHelperServiceInstalled() {
+		fmt.Println(utils.Colorize("helper service is not installed", utils.Yellow))
+		return
+	}
+
+	if needsElevationForHelperService() {
+		if err := rerunHelperServiceCommandElevated("uninstall", ""); err != nil {
+			fmt.Println(utils.Colorize(fmt.Sprintf("failed to uninstall helper service: %v", err), utils.Red))
+		}
+		return
+	}
+
+	if err := uninstallHelperService(); err != nil {
+		fmt.Println(utils.Colorize(fmt.Sprintf("failed to uninstall helper service: %v", err), utils.Red))
+		return
+	}
+	fmt.Println(utils.Colorize("helper service uninstalled", utils.Green))
+}
+
+func needsElevationForHelperService() bool {
+	return !isProcessElevated()
+}
+
+func rerunHelperServiceCommandElevated(action string, kubeConfigPath string) error {
+	krunBinaryPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve krun executable: %w", err)
+	}
+
+	args := []string{"__helper-" + action}
+	if trimmedKubeConfig := strings.TrimSpace(kubeConfigPath); trimmedKubeConfig != "" {
+		args = append(args, "--kubeconfig", trimmedKubeConfig)
+	}
+
+	return runElevatedCommand(krunBinaryPath, args)
 }
 
 func RuntimeInstall(config cfg.Config, version string) {
@@ -200,7 +280,7 @@ func RuntimeInstall(config cfg.Config, version string) {
 				desired = *dep.Spec.Replicas
 			}
 			if dep.Status.ReadyReplicas >= desired {
-				fmt.Println(utils.Colorize("Traffic manager installed successfully", utils.Green))
+				fmt.Println(utils.Colorize("traffic manager installed", utils.Green))
 				return
 			}
 		}
@@ -213,17 +293,17 @@ func RuntimeInstall(config cfg.Config, version string) {
 func RuntimeStatus(config cfg.Config) {
 	client, err := kube.NewClient(config.KubeConfig)
 	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to create Kubernetes client: %s", err), utils.Red))
+		fmt.Println(utils.Colorize(fmt.Sprintf("error: failed to create kubernetes client (%v)", err), utils.Red))
 		return
 	}
 
 	dep, err := client.Clientset.AppsV1().Deployments("krun-system").Get(context.Background(), "krun-traffic-manager", metav1.GetOptions{})
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
-			fmt.Println(utils.Colorize("Traffic manager is not installed", utils.Yellow))
+			printStatusValue("service:", "not installed", utils.Red)
 			return
 		}
-		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to get deployment: %s", err), utils.Red))
+		fmt.Println(utils.Colorize(fmt.Sprintf("error: failed to get traffic-manager deployment (%v)", err), utils.Red))
 		return
 	}
 
@@ -241,13 +321,19 @@ func RuntimeStatus(config cfg.Config) {
 		}
 	}
 
+	printStatusValue("service:", "installed", utils.Green)
+
 	if ready == desired {
-		fmt.Println(utils.Colorize("Traffic manager: healthy", utils.Green))
+		printStatusValue("health:", "ok", utils.Green)
 	} else {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Traffic manager: not ready (%d/%d pods ready)", ready, desired), utils.Yellow))
+		printStatusValue("health:", fmt.Sprintf("not ready (%d/%d pods ready)", ready, desired), utils.Red)
 	}
 
-	fmt.Printf("Version: %s\n", version)
+	fmt.Printf("version: %s\n", version)
+}
+
+func printStatusValue(label string, value string, color utils.Color) {
+	fmt.Printf("%s %s\n", label, utils.Colorize(value, color))
 }
 
 func RuntimeUninstall(config cfg.Config, version string) {
@@ -283,7 +369,8 @@ func fetchRemoteManifestObjects(version string) ([]*unstructured.Unstructured, e
 	if override := os.Getenv("KRUN_MANIFEST_URL"); override != "" {
 		url = override
 	}
-	resp, err := http.Get(url)
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Get(url) //nolint:gosec // URL is a trusted release endpoint or explicit user override.
 	if err != nil {
 		return nil, fmt.Errorf("fetch manifest from %s: %w", url, err)
 	}
@@ -302,10 +389,25 @@ func fetchRemoteManifestObjects(version string) ([]*unstructured.Unstructured, e
 }
 
 func ensureHelperStarted(config cfg.Config) error {
+	// 1. Already running?
 	if err := helperCheckHealth(); err == nil {
 		return nil
 	}
 
+	// 2. Service installed?
+	running, installed := helperServiceStatus()
+	if installed {
+		if running {
+			// Service claims to be running but health check failed.
+			return fmt.Errorf("helper service is running but not healthy on %s", helperBaseURL)
+		}
+		if err := startHelperService(); err != nil {
+			return fmt.Errorf("failed to start helper service: %w", err)
+		}
+		return waitForHelperHealth()
+	}
+
+	// 3. No service — fall back to ad-hoc elevation.
 	if err := startHelperProcess(config); err != nil {
 		// Handle races where another process started the helper concurrently.
 		if checkErr := helperCheckHealth(); checkErr == nil {
@@ -314,6 +416,10 @@ func ensureHelperStarted(config cfg.Config) error {
 		return err
 	}
 
+	return waitForHelperHealth()
+}
+
+func waitForHelperHealth() error {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if err := helperCheckHealth(); err == nil {
@@ -321,7 +427,6 @@ func ensureHelperStarted(config cfg.Config) error {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-
 	return fmt.Errorf("helper failed to become healthy on %s", helperBaseURL)
 }
 
@@ -452,7 +557,9 @@ func helperListSessions() ([]contracts.HelperDebugSession, error) {
 	if response.StatusCode >= 400 {
 		var helperResponse contracts.HelperResponse
 		if len(responseBody) > 0 {
-			_ = json.Unmarshal(responseBody, &helperResponse)
+			if err := json.Unmarshal(responseBody, &helperResponse); err != nil {
+				return nil, fmt.Errorf("helper request failed with status %d and invalid error payload: %w", response.StatusCode, err)
+			}
 		}
 		if helperResponse.Message != "" {
 			return nil, errors.New(helperResponse.Message)

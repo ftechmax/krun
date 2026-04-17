@@ -107,75 +107,108 @@ func (h *SessionRelayRegistry) unregister(peer *relayPeer) {
 		return
 	}
 
-	switch peer.role {
-	case contracts.StreamRoleClient:
-		if session.client == peer {
-			session.client = nil
-		}
-		if len(session.connectionPeer) > 0 {
-			toAgent = map[*relayPeer][]contracts.StreamEnvelope{}
-			for connectionID, owner := range session.connectionPeer {
-				delete(session.connectionPeer, connectionID)
-				if owner == nil {
-					continue
-				}
-				toAgent[owner] = append(toAgent[owner],
-					contracts.StreamEnvelope{
-						Type:         contracts.StreamTypeError,
-						SessionID:    peer.sessionID,
-						ConnectionID: connectionID,
-						Message:      "helper stream disconnected",
-					},
-					contracts.StreamEnvelope{
-						Type:         contracts.StreamTypeClose,
-						SessionID:    peer.sessionID,
-						ConnectionID: connectionID,
-					},
-				)
-			}
-		}
-	default:
-		delete(session.agents, peer)
-		if len(session.connectionPeer) > 0 {
-			for connectionID, owner := range session.connectionPeer {
-				if owner != peer {
-					continue
-				}
-				delete(session.connectionPeer, connectionID)
-				if session.client != nil {
-					toClient = append(toClient,
-						contracts.StreamEnvelope{
-							Type:         contracts.StreamTypeError,
-							SessionID:    peer.sessionID,
-							ConnectionID: connectionID,
-							Message:      "agent stream disconnected",
-						},
-						contracts.StreamEnvelope{
-							Type:         contracts.StreamTypeClose,
-							SessionID:    peer.sessionID,
-							ConnectionID: connectionID,
-						},
-					)
-				}
-			}
-		}
+	if peer.role == contracts.StreamRoleClient {
+		toAgent = unregisterClientLocked(session, peer)
+	} else {
+		toClient = unregisterAgentLocked(session, peer)
 	}
 	targetClient = session.client
 
-	if session.client == nil && len(session.agents) == 0 && len(session.connectionPeer) == 0 {
+	if shouldDeleteSession(session) {
 		delete(h.sessions, peer.sessionID)
 	}
 	h.mu.Unlock()
 
-	if len(toClient) > 0 && targetClient != nil {
-		for _, envelope := range toClient {
-			sendEnvelope(targetClient, envelope)
+	sendEnvelopes(targetClient, toClient)
+	sendEnvelopeMap(toAgent)
+}
+
+func unregisterClientLocked(session *sessionRelay, peer *relayPeer) map[*relayPeer][]contracts.StreamEnvelope {
+	if session.client == peer {
+		session.client = nil
+	}
+	if len(session.connectionPeer) == 0 {
+		return nil
+	}
+
+	toAgent := map[*relayPeer][]contracts.StreamEnvelope{}
+	for connectionID, owner := range session.connectionPeer {
+		delete(session.connectionPeer, connectionID)
+		if owner == nil {
+			continue
+		}
+		toAgent[owner] = append(toAgent[owner], helperDisconnectEnvelopes(peer.sessionID, connectionID)...)
+	}
+	if len(toAgent) == 0 {
+		return nil
+	}
+	return toAgent
+}
+
+func unregisterAgentLocked(session *sessionRelay, peer *relayPeer) []contracts.StreamEnvelope {
+	delete(session.agents, peer)
+	if len(session.connectionPeer) == 0 {
+		return nil
+	}
+
+	var toClient []contracts.StreamEnvelope
+	for connectionID, owner := range session.connectionPeer {
+		if owner != peer {
+			continue
+		}
+		delete(session.connectionPeer, connectionID)
+		if session.client != nil {
+			toClient = append(toClient, agentDisconnectEnvelopes(peer.sessionID, connectionID)...)
 		}
 	}
-	for agentPeer, envelopes := range toAgent {
-		for _, envelope := range envelopes {
-			sendEnvelope(agentPeer, envelope)
-		}
+	return toClient
+}
+
+func helperDisconnectEnvelopes(sessionID string, connectionID string) []contracts.StreamEnvelope {
+	return []contracts.StreamEnvelope{
+		{
+			Type:         contracts.StreamTypeError,
+			SessionID:    sessionID,
+			ConnectionID: connectionID,
+			Message:      "helper stream disconnected",
+		},
+		{
+			Type:         contracts.StreamTypeClose,
+			SessionID:    sessionID,
+			ConnectionID: connectionID,
+		},
+	}
+}
+
+func agentDisconnectEnvelopes(sessionID string, connectionID string) []contracts.StreamEnvelope {
+	return []contracts.StreamEnvelope{
+		{
+			Type:         contracts.StreamTypeError,
+			SessionID:    sessionID,
+			ConnectionID: connectionID,
+			Message:      "agent stream disconnected",
+		},
+		{
+			Type:         contracts.StreamTypeClose,
+			SessionID:    sessionID,
+			ConnectionID: connectionID,
+		},
+	}
+}
+
+func shouldDeleteSession(session *sessionRelay) bool {
+	return session.client == nil && len(session.agents) == 0 && len(session.connectionPeer) == 0
+}
+
+func sendEnvelopes(peer *relayPeer, envelopes []contracts.StreamEnvelope) {
+	for _, envelope := range envelopes {
+		sendEnvelope(peer, envelope)
+	}
+}
+
+func sendEnvelopeMap(envelopesByPeer map[*relayPeer][]contracts.StreamEnvelope) {
+	for agentPeer, envelopes := range envelopesByPeer {
+		sendEnvelopes(agentPeer, envelopes)
 	}
 }
 

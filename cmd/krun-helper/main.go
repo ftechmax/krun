@@ -17,6 +17,7 @@ import (
 	"github.com/ftechmax/krun/internal/krun-helper/hostfile"
 	managerclient "github.com/ftechmax/krun/internal/krun-helper/manager-client"
 	helperportforward "github.com/ftechmax/krun/internal/krun-helper/portforward"
+	"github.com/ftechmax/krun/internal/krun-helper/service"
 	"github.com/ftechmax/krun/internal/krun-helper/session"
 	helperstream "github.com/ftechmax/krun/internal/krun-helper/stream"
 	"github.com/spf13/cobra"
@@ -56,17 +57,18 @@ func (noopStreamRegistry) Remove(_ string) error                            { re
 func (noopStreamRegistry) Clear() error                                     { return nil }
 
 var (
-	hostfileUpdate                                     = hostfile.Update
-	hostfileRemove                                     = hostfile.Remove
-	hostsRegistry                                      = hostfile.NewSessionHostsRegistry()
-	sessionsRegistry                                   = session.NewDebugSessionRegistry()
-	managerSessionsRegistry                            = session.NewManagerSessionRegistry()
-	portForwardRegistry     sessionPortForwardRegistry = noopPortForwardRegistry{}
-	streamRegistry          sessionStreamRegistry      = noopStreamRegistry{}
-	managerSessionClient    managerclient.SessionAPI   = managerclient.NoopSessionClient{}
-	newPortForwardRegistry                             = newHelperPortForwardRegistry
-	newManagerClient                                   = managerclient.NewSessionClient
-	newStreamRegistry                                  = newHelperStreamRegistry
+	hostfileUpdate                                             = hostfile.Update
+	hostfileRemove                                             = hostfile.Remove
+	hostsRegistry                                              = hostfile.NewSessionHostsRegistry()
+	sessionsRegistry                                           = session.NewDebugSessionRegistry()
+	managerSessionsRegistry                                    = session.NewManagerSessionRegistry()
+	portForwardRegistry             sessionPortForwardRegistry = noopPortForwardRegistry{}
+	streamRegistry                  sessionStreamRegistry      = noopStreamRegistry{}
+	managerSessionClient            managerclient.SessionAPI   = managerclient.NoopSessionClient{}
+	managerForwardBootstrapRequired bool
+	newPortForwardRegistry          = newHelperPortForwardRegistry
+	newManagerClient                = managerclient.NewSessionClient
+	newStreamRegistry               = newHelperStreamRegistry
 )
 
 func newHelperPortForwardRegistry(kubeConfigPath string) (sessionPortForwardRegistry, error) {
@@ -77,15 +79,37 @@ func newHelperStreamRegistry(managerAddress string) sessionStreamRegistry {
 	return helperstream.NewSessionRegistry(managerAddress)
 }
 
+type daemonOptions struct {
+	externalShutdown <-chan struct{} // service stop signal (nil channel = not used)
+	onReady          func()          // called when HTTP listener is bound
+}
+
+// startHelperDaemonForService adapts startHelperDaemon to the service.StartDaemonFunc
+// signature so the service runner can call it without importing main.
+func startHelperDaemonForService(listenAddress, kubeConfigPath string, opts service.DaemonOptions) error {
+	return startHelperDaemon(listenAddress, kubeConfigPath, daemonOptions{
+		externalShutdown: opts.ExternalShutdown,
+		onReady:          opts.OnReady,
+	})
+}
+
 func main() {
 	var kubeConfigPath string
 	var listenAddress string
+	var serviceFlag bool
 
 	rootCmd := &cobra.Command{
 		Use:   "krun-helper",
 		Short: "Elevated daemon helper for krun debug sessions",
 		Run: func(cmd *cobra.Command, args []string) {
-			if err := startHelperDaemon(listenAddress, kubeConfigPath); err != nil {
+			if shouldRunAsService(serviceFlag) {
+				if err := runAsService(listenAddress, kubeConfigPath); err != nil {
+					fmt.Printf("service failed: %v\n", err)
+					os.Exit(1)
+				}
+				return
+			}
+			if err := startHelperDaemon(listenAddress, kubeConfigPath, daemonOptions{}); err != nil {
 				fmt.Printf("helper daemon failed: %v\n", err)
 				os.Exit(1)
 			}
@@ -94,6 +118,7 @@ func main() {
 
 	rootCmd.Flags().StringVar(&kubeConfigPath, "kubeconfig", "", "Path to kubeconfig file")
 	rootCmd.Flags().StringVar(&listenAddress, "listen", "", "Daemon listen address")
+	rootCmd.Flags().BoolVar(&serviceFlag, "service", false, "Run as system service (used by systemd ExecStart)")
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)
@@ -101,15 +126,31 @@ func main() {
 	}
 }
 
-func startHelperDaemon(listenAddress string, kubeConfigPath string) error {
+func startHelperDaemon(listenAddress string, kubeConfigPath string, opts daemonOptions) error {
+	addr, err := resolveHelperListenAddress(listenAddress)
+	if err != nil {
+		return err
+	}
+
+	if err := initializeHelperDependencies(kubeConfigPath); err != nil {
+		return err
+	}
+
+	return startHelperServer(addr, opts)
+}
+
+func resolveHelperListenAddress(listenAddress string) (string, error) {
 	addr := strings.TrimSpace(listenAddress)
 	if addr == "" {
 		addr = defaultHelperListenAddress
 	}
 	if err := validateLoopbackAddress(addr); err != nil {
-		return err
+		return "", err
 	}
+	return addr, nil
+}
 
+func initializeHelperDependencies(kubeConfigPath string) error {
 	registry, err := newPortForwardRegistry(kubeConfigPath)
 	if err != nil {
 		return fmt.Errorf("failed to initialize port-forward registry: %w", err)
@@ -120,15 +161,11 @@ func startHelperDaemon(listenAddress string, kubeConfigPath string) error {
 	if err != nil {
 		return fmt.Errorf("invalid manager forward address %q: %w", defaultManagerForwardAddress, err)
 	}
-	if err := portForwardRegistry.Upsert(managerAPIForwardSessionKey, []contracts.PortForward{
-		{
-			Namespace:  defaultManagerForwardNamespace,
-			Service:    defaultManagerForwardServiceName,
-			LocalPort:  managerForwardPort,
-			RemotePort: defaultManagerForwardRemotePort,
-		},
-	}); err != nil {
-		return fmt.Errorf("failed to initialize manager api port-forward: %w", err)
+
+	managerForwardBootstrapRequired = false
+	if err := ensureManagerAPIForward(managerForwardPort); err != nil {
+		managerForwardBootstrapRequired = true
+		fmt.Printf("warning: manager api port-forward is not ready yet: %v\n", err)
 	}
 
 	streamRegistry = newStreamRegistry("http://" + defaultManagerForwardAddress)
@@ -138,38 +175,45 @@ func startHelperDaemon(listenAddress string, kubeConfigPath string) error {
 		return fmt.Errorf("failed to initialize manager session client: %w", err)
 	}
 	managerSessionClient = managerClient
+	return nil
+}
 
+func startHelperServer(addr string, opts daemonOptions) error {
 	shutdownCh := make(chan struct{}, 1)
-
 	server := &http.Server{
-		Addr:    addr,
-		Handler: newHandler(shutdownCh),
+		Handler:           newHandler(shutdownCh),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", addr, err)
 	}
 	fmt.Printf("krun-helper listening on %s\n", addr)
 
+	if opts.onReady != nil {
+		opts.onReady()
+	}
+
 	serverErrCh := make(chan error, 1)
 	go func() {
-		serverErrCh <- server.ListenAndServe()
+		serverErrCh <- server.Serve(listener)
 	}()
 
 	signalCh := make(chan os.Signal, 1)
 	signal.Notify(signalCh, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signalCh)
 
-	doShutdown := func(reason string) error {
-		fmt.Printf("%s, shutting down krun-helper\n", reason)
+	return waitForHelperShutdown(server, serverErrCh, signalCh, shutdownCh, opts.externalShutdown)
+}
 
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("shutdown helper server: %w", err)
-		}
-		if err := <-serverErrCh; err != nil && err != http.ErrServerClosed {
-			return err
-		}
-		return cleanupHelperState()
-	}
-
+func waitForHelperShutdown(
+	server *http.Server,
+	serverErrCh <-chan error,
+	signalCh <-chan os.Signal,
+	shutdownCh <-chan struct{},
+	externalShutdown <-chan struct{},
+) error {
 	select {
 	case err := <-serverErrCh:
 		if err == http.ErrServerClosed {
@@ -177,10 +221,26 @@ func startHelperDaemon(listenAddress string, kubeConfigPath string) error {
 		}
 		return err
 	case sig := <-signalCh:
-		return doShutdown(fmt.Sprintf("received %s", sig))
+		return shutdownHelperServer(server, serverErrCh, fmt.Sprintf("received %s", sig))
 	case <-shutdownCh:
-		return doShutdown("shutdown requested via API")
+		return shutdownHelperServer(server, serverErrCh, "shutdown requested via API")
+	case <-externalShutdown:
+		return shutdownHelperServer(server, serverErrCh, "service stop requested")
 	}
+}
+
+func shutdownHelperServer(server *http.Server, serverErrCh <-chan error, reason string) error {
+	fmt.Printf("%s, shutting down krun-helper\n", reason)
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		return fmt.Errorf("shutdown helper server: %w", err)
+	}
+	if err := <-serverErrCh; err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	return cleanupHelperState()
 }
 
 func newHandler(shutdownCh chan<- struct{}) http.Handler {
@@ -298,11 +358,23 @@ func handleDebugEnable(w http.ResponseWriter, r *http.Request) {
 		return portForwardRegistry.Remove(sessionKey)
 	})
 
+	if managerForwardBootstrapRequired {
+		managerForwardPort, portErr := parsePortFromAddress(defaultManagerForwardAddress)
+		if portErr != nil {
+			fail(w, "manager api port-forward failed", fmt.Errorf("invalid manager forward address %q: %w", defaultManagerForwardAddress, portErr))
+			return
+		}
+		if err := ensureManagerAPIForward(managerForwardPort); err != nil {
+			fail(w, "manager api port-forward failed", err)
+			return
+		}
+		managerForwardBootstrapRequired = false
+	}
+
 	// 3. clean up previous manager session if one exists for this key
-	if previousManagerSessionID, ok := managerSessionsRegistry.Get(sessionKey); ok {
-		_ = streamRegistry.Remove(sessionKey)
-		_ = managerSessionClient.DeleteSession(previousManagerSessionID)
-		managerSessionsRegistry.Remove(sessionKey)
+	if err := cleanupPreviousManagerSession(sessionKey); err != nil {
+		fail(w, "previous manager session cleanup failed", err)
+		return
 	}
 
 	// 4. create manager session
@@ -452,7 +524,24 @@ func writeJSON(w http.ResponseWriter, code int, response contracts.HelperRespons
 func writeJSONAny(w http.ResponseWriter, code int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(payload)
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
+		fmt.Printf("warning: failed to write helper response: %v\n", err)
+	}
+}
+
+func cleanupPreviousManagerSession(sessionKey string) error {
+	previousManagerSessionID, ok := managerSessionsRegistry.Get(sessionKey)
+	if !ok {
+		return nil
+	}
+	if err := streamRegistry.Remove(sessionKey); err != nil {
+		return fmt.Errorf("detach previous stream: %w", err)
+	}
+	if err := managerSessionClient.DeleteSession(previousManagerSessionID); err != nil {
+		return fmt.Errorf("delete previous manager session: %w", err)
+	}
+	managerSessionsRegistry.Remove(sessionKey)
+	return nil
 }
 
 func cleanupHelperState() error {
@@ -518,6 +607,17 @@ func parsePortFromAddress(address string) (int, error) {
 		return 0, fmt.Errorf("port out of range")
 	}
 	return port, nil
+}
+
+func ensureManagerAPIForward(managerForwardPort int) error {
+	return portForwardRegistry.Upsert(managerAPIForwardSessionKey, []contracts.PortForward{
+		{
+			Namespace:  defaultManagerForwardNamespace,
+			Service:    defaultManagerForwardServiceName,
+			LocalPort:  managerForwardPort,
+			RemotePort: defaultManagerForwardRemotePort,
+		},
+	})
 }
 
 func parseDebugCommandRequest(r *http.Request) (contracts.DebugSessionCommandRequest, string, error) {

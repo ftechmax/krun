@@ -27,7 +27,6 @@ var (
 
 	configMapGVR = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}
 	deployGVR    = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
-	stsGVR       = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "statefulsets"}
 )
 
 func TestResolveOverlayPathsDefault(t *testing.T) {
@@ -156,7 +155,7 @@ metadata:
 
 func TestReplaceRegistryInObjects(t *testing.T) {
 	objs := []*unstructured.Unstructured{
-		newDeployment("default", "api", "registry:5000/my-api:latest"),
+		newDeployment("registry:5000/my-api:latest"),
 	}
 
 	replaceRegistryInObjects(objs, "registry:5000", "remote-registry:5001")
@@ -179,8 +178,8 @@ func TestReplaceRegistryInObjects(t *testing.T) {
 
 func TestCollectRestartTargets(t *testing.T) {
 	objs := []*unstructured.Unstructured{
-		newDeployment("default", "api", "registry:5000/api:latest"),
-		newDeployment("default", "api", "registry:5000/api:latest"),
+		newDeployment("registry:5000/api:latest"),
+		newDeployment("registry:5000/api:latest"),
 		newStatefulSet("default", "db"),
 		{
 			Object: map[string]any{
@@ -272,6 +271,7 @@ spec:
 	}
 	if deployment == nil {
 		t.Fatalf("expected rendered deployment object")
+		return
 	}
 
 	containers, found, err := unstructured.NestedSlice(deployment.Object, "spec", "template", "spec", "containers")
@@ -338,7 +338,7 @@ metadata:
 }
 
 func TestRestartWorkloadsSkipsMissingAndPatchesExisting(t *testing.T) {
-	existing := newDeployment("default", "api", "remote-registry/api:latest")
+	existing := newDeployment("remote-registry/api:latest")
 	if err := unstructured.SetNestedStringMap(existing.Object, map[string]string{
 		"existing": "true",
 	}, "spec", "template", "metadata", "annotations"); err != nil {
@@ -398,14 +398,14 @@ func newFakeKubeClient(objects ...runtime.Object) *kube.Client {
 	}
 }
 
-func newDeployment(namespace, name, image string) *unstructured.Unstructured {
+func newDeployment(image string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "apps/v1",
 			"kind":       "Deployment",
 			"metadata": map[string]any{
-				"name":      name,
-				"namespace": namespace,
+				"name":      "api",
+				"namespace": "default",
 			},
 			"spec": map[string]any{
 				"template": map[string]any{
@@ -420,24 +420,6 @@ func newDeployment(namespace, name, image string) *unstructured.Unstructured {
 					},
 				},
 			},
-		},
-	}
-}
-
-func newConfigMap(namespace, name string, data map[string]string) *unstructured.Unstructured {
-	dataMap := map[string]any{}
-	for k, v := range data {
-		dataMap[k] = v
-	}
-	return &unstructured.Unstructured{
-		Object: map[string]any{
-			"apiVersion": "v1",
-			"kind":       "ConfigMap",
-			"metadata": map[string]any{
-				"name":      name,
-				"namespace": namespace,
-			},
-			"data": dataMap,
 		},
 	}
 }

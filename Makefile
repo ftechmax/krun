@@ -19,7 +19,7 @@ WINDOWS_HELPER_BIN ?= krun-helper.exe
 LINUX_HELPER_BIN ?= krun-helper
 
 
-.PHONY: build-all build-windows build-linux clean \
+.PHONY: build-all build-windows build-linux clean lint lint-fix \
 	build-krun-windows build-krun-linux build-krun-cross \
 	build-helper-windows build-helper-linux build-helper-cross patch-helper-windows-uac
 
@@ -50,3 +50,9 @@ patch-helper-windows-uac: build-helper-windows
 
 clean:
 	-rm -f $(WINDOWS_KRUN_BIN) $(LINUX_KRUN_BIN) $(WINDOWS_HELPER_BIN) $(LINUX_HELPER_BIN)
+
+lint:
+	golangci-lint run --timeout=5m
+
+lint-fix:
+	golangci-lint run --fix --timeout=5m

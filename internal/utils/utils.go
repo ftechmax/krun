@@ -21,7 +21,6 @@ var (
 	colorMagenta = "\033[35m"
 	colorCyan    = "\033[36m"
 	colorGray    = "\033[37m"
-	colorWhite   = "\033[97m"
 )
 
 type Color int
@@ -81,7 +80,7 @@ func GetExecutablePath() (string, error) {
 
 func RunCmd(name string, args ...string) error {
 	var stderr bytes.Buffer
-	cmd := exec.Command(name, args...)
+	cmd := exec.Command(name, args...) //nolint:gosec // Generic utility used with trusted call sites.
 	cmd.Stdout = log.Writer()
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -94,7 +93,7 @@ func RunCmd(name string, args ...string) error {
 
 func RunCmdStdin(stdin string, name string, args ...string) error {
 	var stderr bytes.Buffer
-	cmd := exec.Command(name, args...)
+	cmd := exec.Command(name, args...) //nolint:gosec // Generic utility used with trusted call sites.
 	cmd.Stdin = strings.NewReader(stdin)
 	cmd.Stdout = log.Writer()
 	cmd.Stderr = &stderr
@@ -112,7 +111,11 @@ func GetFreePort() (port int, err error) {
 		var l *net.TCPListener
 		if l, err = net.ListenTCP("tcp", a); err == nil {
 			defer l.Close()
-			return l.Addr().(*net.TCPAddr).Port, nil
+			tcpAddr, ok := l.Addr().(*net.TCPAddr)
+			if !ok {
+				return 0, fmt.Errorf("unexpected listener address type %T", l.Addr())
+			}
+			return tcpAddr.Port, nil
 		}
 	}
 	return

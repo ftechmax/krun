@@ -1,0 +1,66 @@
+version: "2"
+run:
+  tests: true
+linters:
+  enable:
+    - govet
+    - gocyclo
+    - misspell
+    - unconvert
+    - unparam
+    - staticcheck
+    - errcheck
+    - ineffassign
+    - unused
+    - gosec
+    - revive
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+      exclude-use-default: true
+      exclude-functions:
+        - io.Copy
+        - fmt.Fprintf
+        - fmt.Fprint
+        - (*os.File).Close
+        - (io.Closer).Close
+        - (*github.com/spf13/pflag.FlagSet).GetBool
+        - (*github.com/spf13/pflag.FlagSet).GetString
+        - (*github.com/gorilla/websocket.Conn).SetWriteDeadline
+    gocyclo:
+      min-complexity: 15
+    revive:
+      severity: warning
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+      - scripts$
+      - docs$
+    rules:
+      - path: _test\.go$
+        linters:
+          - gocyclo
+          - errcheck
+          - gosec
+      - linters:
+          - errcheck
+        source: ^\s*defer\s+.*\.Close\(\)\s*$
+      - linters:
+          - errcheck
+        source: ^\s*_\s*=\s*.*\.Close\(\)\s*$
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+      - scripts$
+      - docs$

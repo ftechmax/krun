@@ -67,3 +67,57 @@ func TestBuildLinuxLaunchSpecErrorsWithoutElevationTool(t *testing.T) {
 		t.Fatalf("expected error without sudo or pkexec")
 	}
 }
+
+func TestBuildLinuxRunSpecUsesForegroundBinaryForRoot(t *testing.T) {
+	spec, err := buildLinuxRunSpec("/tmp/krun", []string{"debug", "helper", "install"}, 0, "/usr/bin/sudo", "/usr/bin/pkexec")
+	if err != nil {
+		t.Fatalf("build run spec: %v", err)
+	}
+
+	if spec.path != "/tmp/krun" {
+		t.Fatalf("expected krun binary path, got %q", spec.path)
+	}
+	if spec.detached {
+		t.Fatalf("expected foreground run for root")
+	}
+
+	wantArgs := []string{"debug", "helper", "install"}
+	if !reflect.DeepEqual(spec.args, wantArgs) {
+		t.Fatalf("unexpected args: want %v, got %v", wantArgs, spec.args)
+	}
+}
+
+func TestBuildLinuxRunSpecPrefersSudo(t *testing.T) {
+	spec, err := buildLinuxRunSpec("/tmp/krun", []string{"debug", "helper", "install"}, 1000, "/usr/bin/sudo", "/usr/bin/pkexec")
+	if err != nil {
+		t.Fatalf("build run spec: %v", err)
+	}
+
+	if spec.path != "/usr/bin/sudo" {
+		t.Fatalf("expected sudo launcher, got %q", spec.path)
+	}
+	if spec.detached {
+		t.Fatalf("expected foreground sudo command")
+	}
+
+	wantArgs := []string{"--", "/tmp/krun", "debug", "helper", "install"}
+	if !reflect.DeepEqual(spec.args, wantArgs) {
+		t.Fatalf("unexpected args: want %v, got %v", wantArgs, spec.args)
+	}
+}
+
+func TestBuildLinuxRunSpecFallsBackToPkexec(t *testing.T) {
+	spec, err := buildLinuxRunSpec("/tmp/krun", []string{"debug", "helper", "uninstall"}, 1000, "", "/usr/bin/pkexec")
+	if err != nil {
+		t.Fatalf("build run spec: %v", err)
+	}
+
+	if spec.path != "/usr/bin/pkexec" {
+		t.Fatalf("expected pkexec launcher, got %q", spec.path)
+	}
+
+	wantArgs := []string{"/tmp/krun", "debug", "helper", "uninstall"}
+	if !reflect.DeepEqual(spec.args, wantArgs) {
+		t.Fatalf("unexpected args: want %v, got %v", wantArgs, spec.args)
+	}
+}

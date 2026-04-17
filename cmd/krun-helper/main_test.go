@@ -364,6 +364,98 @@ func TestDebugEnableHandlerCleansUpPreviousSession(t *testing.T) {
 	}
 }
 
+func TestDebugEnableHandlerEnsuresManagerForwardWhenBootstrapPending(t *testing.T) {
+	resetHelperGlobals(t)
+
+	managerForwardBootstrapRequired = true
+
+	fakeRegistry := &fakePortForwardRegistry{}
+	portForwardRegistry = fakeRegistry
+	fakeManager := &fakeManagerSessionClient{createSessionID: "mgr-session-1"}
+	managerSessionClient = fakeManager
+	fakeStreams := &fakeStreamRegistry{}
+	streamRegistry = fakeStreams
+
+	hostfileUpdate = func(entries []contracts.HostsEntry) error { return nil }
+	t.Cleanup(func() { hostfileUpdate = hostfile.Update })
+
+	handler := newHandler(make(chan struct{}, 1))
+	body, _ := json.Marshal(contracts.DebugSessionCommandRequest{
+		Context: contracts.DebugServiceContext{
+			Project:       "proj-a",
+			ServiceName:   "svc-a",
+			ContainerPort: 8080,
+			InterceptPort: 5001,
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/debug/enable", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+	if fakeRegistry.upsertCalls != 2 {
+		t.Fatalf("expected 2 upsert calls (service + manager api), got %d", fakeRegistry.upsertCalls)
+	}
+	if len(fakeRegistry.upsertSessionKeys) != 2 {
+		t.Fatalf("expected 2 upsert keys, got %+v", fakeRegistry.upsertSessionKeys)
+	}
+	if fakeRegistry.upsertSessionKeys[1] != managerAPIForwardSessionKey {
+		t.Fatalf("expected second upsert key to be %q, got %q", managerAPIForwardSessionKey, fakeRegistry.upsertSessionKeys[1])
+	}
+	if managerForwardBootstrapRequired {
+		t.Fatalf("expected manager forward bootstrap flag to clear after successful ensure")
+	}
+}
+
+func TestDebugEnableHandlerFailsWhenManagerForwardEnsureFails(t *testing.T) {
+	resetHelperGlobals(t)
+
+	managerForwardBootstrapRequired = true
+
+	fakeRegistry := &fakePortForwardRegistry{
+		upsertErrByKey: map[string]error{
+			managerAPIForwardSessionKey: errors.New("manager unreachable"),
+		},
+	}
+	portForwardRegistry = fakeRegistry
+	fakeManager := &fakeManagerSessionClient{createSessionID: "mgr-session-1"}
+	managerSessionClient = fakeManager
+	streamRegistry = &fakeStreamRegistry{}
+
+	hostfileUpdate = func(entries []contracts.HostsEntry) error { return nil }
+	t.Cleanup(func() { hostfileUpdate = hostfile.Update })
+
+	handler := newHandler(make(chan struct{}, 1))
+	body, _ := json.Marshal(contracts.DebugSessionCommandRequest{
+		Context: contracts.DebugServiceContext{
+			Project:       "proj-a",
+			ServiceName:   "svc-a",
+			ContainerPort: 8080,
+			InterceptPort: 5001,
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/debug/enable", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", rec.Code)
+	}
+	if fakeManager.createCalls != 0 {
+		t.Fatalf("expected manager create not to run when manager forward ensure fails, got %d calls", fakeManager.createCalls)
+	}
+	if fakeRegistry.removeCalls != 1 {
+		t.Fatalf("expected rollback remove call, got %d", fakeRegistry.removeCalls)
+	}
+	if !managerForwardBootstrapRequired {
+		t.Fatalf("expected manager forward bootstrap flag to remain set")
+	}
+}
+
 func TestDebugSessionsListMethodNotAllowed(t *testing.T) {
 	resetHelperGlobals(t)
 	handler := newHandler(make(chan struct{}, 1))
@@ -385,20 +477,27 @@ func resetHelperGlobals(t *testing.T) {
 	portForwardRegistry = noopPortForwardRegistry{}
 	streamRegistry = noopStreamRegistry{}
 	managerSessionClient = managerclient.NoopSessionClient{}
+	managerForwardBootstrapRequired = false
 }
 
 type fakePortForwardRegistry struct {
-	upsertCalls    int
-	removeCalls    int
-	clearCalls     int
-	lastSessionKey string
-	lastForwards   []contracts.PortForward
+	upsertCalls       int
+	removeCalls       int
+	clearCalls        int
+	lastSessionKey    string
+	lastForwards      []contracts.PortForward
+	upsertSessionKeys []string
+	upsertErrByKey    map[string]error
 }
 
 func (f *fakePortForwardRegistry) Upsert(sessionKey string, forwards []contracts.PortForward) error {
 	f.upsertCalls++
 	f.lastSessionKey = sessionKey
 	f.lastForwards = append([]contracts.PortForward(nil), forwards...)
+	f.upsertSessionKeys = append(f.upsertSessionKeys, sessionKey)
+	if err, ok := f.upsertErrByKey[sessionKey]; ok {
+		return err
+	}
 	return nil
 }
 

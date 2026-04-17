@@ -221,10 +221,12 @@ func (a *sessionAttachment) handleInboundEnvelope(ctx context.Context, envelope 
 	case contracts.StreamTypeClose, contracts.StreamTypeError:
 		a.closeLocalConn(connectionID)
 	case contracts.StreamTypePing:
-		a.enqueueOutbound(ctx, contracts.StreamEnvelope{
+		if err := a.enqueueOutbound(ctx, contracts.StreamEnvelope{
 			Type:      contracts.StreamTypePing,
 			SessionID: a.sessionID,
-		})
+		}); err != nil {
+			log.Printf("enqueue ping envelope failed (session_id=%s): %v", a.sessionID, err)
+		}
 	}
 }
 
@@ -235,17 +237,21 @@ func (a *sessionAttachment) handleOpen(ctx context.Context, connectionID string)
 
 	localConn, err := net.DialTimeout("tcp", a.interceptURL, localDialTimeout)
 	if err != nil {
-		a.enqueueOutbound(ctx, contracts.StreamEnvelope{
+		if enqueueErr := a.enqueueOutbound(ctx, contracts.StreamEnvelope{
 			Type:         contracts.StreamTypeError,
 			SessionID:    a.sessionID,
 			ConnectionID: connectionID,
 			Message:      err.Error(),
-		})
-		a.enqueueOutbound(ctx, contracts.StreamEnvelope{
+		}); enqueueErr != nil {
+			log.Printf("enqueue open-error envelope failed (session_id=%s connection_id=%s): %v", a.sessionID, connectionID, enqueueErr)
+		}
+		if enqueueErr := a.enqueueOutbound(ctx, contracts.StreamEnvelope{
 			Type:         contracts.StreamTypeClose,
 			SessionID:    a.sessionID,
 			ConnectionID: connectionID,
-		})
+		}); enqueueErr != nil {
+			log.Printf("enqueue open-close envelope failed (session_id=%s connection_id=%s): %v", a.sessionID, connectionID, enqueueErr)
+		}
 		return
 	}
 
@@ -270,17 +276,21 @@ func (a *sessionAttachment) handleData(connectionID string, payload []byte) {
 	if _, err := localConn.Write(payload); err != nil {
 		_ = localConn.Close()
 		a.closeLocalConn(connectionID)
-		a.enqueueOutbound(context.Background(), contracts.StreamEnvelope{
+		if enqueueErr := a.enqueueOutbound(context.Background(), contracts.StreamEnvelope{
 			Type:         contracts.StreamTypeError,
 			SessionID:    a.sessionID,
 			ConnectionID: connectionID,
 			Message:      err.Error(),
-		})
-		a.enqueueOutbound(context.Background(), contracts.StreamEnvelope{
+		}); enqueueErr != nil {
+			log.Printf("enqueue write-error envelope failed (session_id=%s connection_id=%s): %v", a.sessionID, connectionID, enqueueErr)
+		}
+		if enqueueErr := a.enqueueOutbound(context.Background(), contracts.StreamEnvelope{
 			Type:         contracts.StreamTypeClose,
 			SessionID:    a.sessionID,
 			ConnectionID: connectionID,
-		})
+		}); enqueueErr != nil {
+			log.Printf("enqueue write-close envelope failed (session_id=%s connection_id=%s): %v", a.sessionID, connectionID, enqueueErr)
+		}
 	}
 }
 
@@ -307,28 +317,34 @@ func (a *sessionAttachment) pumpLocalConnection(ctx context.Context, connectionI
 			continue
 		}
 		if errors.Is(readErr, io.EOF) {
-			_ = a.enqueueOutbound(ctx, contracts.StreamEnvelope{
+			if err := a.enqueueOutbound(ctx, contracts.StreamEnvelope{
 				Type:         contracts.StreamTypeClose,
 				SessionID:    a.sessionID,
 				ConnectionID: connectionID,
-			})
+			}); err != nil {
+				log.Printf("enqueue eof-close envelope failed (session_id=%s connection_id=%s): %v", a.sessionID, connectionID, err)
+			}
 			return
 		}
 		if errors.Is(readErr, net.ErrClosed) {
 			return
 		}
 
-		_ = a.enqueueOutbound(ctx, contracts.StreamEnvelope{
+		if err := a.enqueueOutbound(ctx, contracts.StreamEnvelope{
 			Type:         contracts.StreamTypeError,
 			SessionID:    a.sessionID,
 			ConnectionID: connectionID,
 			Message:      readErr.Error(),
-		})
-		_ = a.enqueueOutbound(ctx, contracts.StreamEnvelope{
+		}); err != nil {
+			log.Printf("enqueue read-error envelope failed (session_id=%s connection_id=%s): %v", a.sessionID, connectionID, err)
+		}
+		if err := a.enqueueOutbound(ctx, contracts.StreamEnvelope{
 			Type:         contracts.StreamTypeClose,
 			SessionID:    a.sessionID,
 			ConnectionID: connectionID,
-		})
+		}); err != nil {
+			log.Printf("enqueue read-close envelope failed (session_id=%s connection_id=%s): %v", a.sessionID, connectionID, err)
+		}
 		return
 	}
 }

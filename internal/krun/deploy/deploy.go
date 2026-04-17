@@ -105,7 +105,7 @@ func resolveOverlayPaths(config cfg.Config, projectName string) ([]string, error
 		}
 	}
 
-	servicePath := filepath.Join(config.KrunSourceConfig.Path, projectRelPath)
+	servicePath := filepath.Join(config.Path, projectRelPath)
 	k8sPath := filepath.Join(servicePath, "k8s")
 	k8sCloudPath := filepath.Join(k8sPath, "cloud")
 	k8sEdgePath := filepath.Join(k8sPath, "edge")
@@ -195,7 +195,12 @@ func replaceRegistryInObjects(objs []*unstructured.Unstructured, from, to string
 	}
 
 	for _, obj := range objs {
-		obj.Object = replaceRegistryInValue(obj.Object, from, to).(map[string]any)
+		replaced := replaceRegistryInValue(obj.Object, from, to)
+		typedObject, ok := replaced.(map[string]any)
+		if !ok {
+			continue
+		}
+		obj.Object = typedObject
 	}
 }
 

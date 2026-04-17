@@ -47,8 +47,8 @@ func (s *startTracker) count() int {
 	return len(s.calls)
 }
 
-func makeForward(ns, svc string, port int) contracts.PortForward {
-	return contracts.PortForward{Namespace: ns, Service: svc, LocalPort: port, RemotePort: port}
+func makeForward(svc string, port int) contracts.PortForward {
+	return contracts.PortForward{Namespace: defaultNamespace, Service: svc, LocalPort: port, RemotePort: port}
 }
 
 func TestSelectPodForPortForwardPrefersReadyRunning(t *testing.T) {
@@ -135,7 +135,7 @@ func TestResolveServiceTargetPortFallsBackToRequestedPort(t *testing.T) {
 
 func TestUpsertSharesForwardAcrossSessions(t *testing.T) {
 	r, tracker := newTestRegistry()
-	redis := []contracts.PortForward{makeForward("default", "redis", 6379)}
+	redis := []contracts.PortForward{makeForward("redis", 6379)}
 
 	if err := r.Upsert("session-a", redis); err != nil {
 		t.Fatalf("upsert session-a: %v", err)
@@ -154,7 +154,7 @@ func TestUpsertSharesForwardAcrossSessions(t *testing.T) {
 
 func TestRemoveOneSessionKeepsSharedForward(t *testing.T) {
 	r, _ := newTestRegistry()
-	redis := []contracts.PortForward{makeForward("default", "redis", 6379)}
+	redis := []contracts.PortForward{makeForward("redis", 6379)}
 
 	r.Upsert("session-a", redis)
 	r.Upsert("session-b", redis)
@@ -175,7 +175,7 @@ func TestRemoveOneSessionKeepsSharedForward(t *testing.T) {
 
 func TestRemoveLastSessionStopsSharedForward(t *testing.T) {
 	r, _ := newTestRegistry()
-	redis := []contracts.PortForward{makeForward("default", "redis", 6379)}
+	redis := []contracts.PortForward{makeForward("redis", 6379)}
 
 	r.Upsert("session-a", redis)
 	r.Upsert("session-b", redis)
@@ -189,10 +189,10 @@ func TestRemoveLastSessionStopsSharedForward(t *testing.T) {
 
 func TestClearStopsAllSharedForwards(t *testing.T) {
 	r, _ := newTestRegistry()
-	redis := []contracts.PortForward{makeForward("default", "redis", 6379)}
+	redis := []contracts.PortForward{makeForward("redis", 6379)}
 	rabbit := []contracts.PortForward{
-		makeForward("default", "redis", 6379),
-		makeForward("default", "rabbitmq", 5672),
+		makeForward("redis", 6379),
+		makeForward("rabbitmq", 5672),
 	}
 
 	r.Upsert("session-a", redis)
@@ -212,8 +212,8 @@ func TestClearStopsAllSharedForwards(t *testing.T) {
 
 func TestUpsertRollsBackSharedRefsOnStartFailure(t *testing.T) {
 	r, _ := newTestRegistry()
-	redis := makeForward("default", "redis", 6379)
-	bad := makeForward("default", "badservice", 9999)
+	redis := makeForward("redis", 6379)
+	bad := makeForward("badservice", 9999)
 
 	// Session A owns redis.
 	r.Upsert("session-a", []contracts.PortForward{redis})
@@ -248,8 +248,8 @@ func TestUpsertRollsBackSharedRefsOnStartFailure(t *testing.T) {
 
 func TestUpsertReplacingForwardsReleasesOldShared(t *testing.T) {
 	r, _ := newTestRegistry()
-	redis := []contracts.PortForward{makeForward("default", "redis", 6379)}
-	rabbit := []contracts.PortForward{makeForward("default", "rabbitmq", 5672)}
+	redis := []contracts.PortForward{makeForward("redis", 6379)}
+	rabbit := []contracts.PortForward{makeForward("rabbitmq", 5672)}
 
 	r.Upsert("session-a", redis)
 	// Replace session-a's forwards: drop redis, add rabbitmq.

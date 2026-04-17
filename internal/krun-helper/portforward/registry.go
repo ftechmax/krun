@@ -73,7 +73,8 @@ func (r *SessionRegistry) Upsert(sessionKey string, forwards []contracts.PortFor
 	key := sessionkey.Normalize(sessionKey)
 	normalized := normalizePortForwards(forwards)
 	if len(normalized) == 0 {
-		return r.removeLocked(key)
+		r.removeLocked(key)
+		return nil
 	}
 
 	existing := r.sessions[key]
@@ -128,16 +129,18 @@ func (r *SessionRegistry) Upsert(sessionKey string, forwards []contracts.PortFor
 func (r *SessionRegistry) Remove(sessionKey string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.removeLocked(sessionKey)
+	r.removeLocked(sessionKey)
+	return nil
 }
 
 func (r *SessionRegistry) Clear() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.removeLocked("")
+	r.removeLocked("")
+	return nil
 }
 
-func (r *SessionRegistry) removeLocked(sessionKey string) error {
+func (r *SessionRegistry) removeLocked(sessionKey string) {
 	if sessionkey.IsBlank(sessionKey) {
 		for _, handles := range r.sessions {
 			for forwardKey, handle := range handles {
@@ -146,20 +149,19 @@ func (r *SessionRegistry) removeLocked(sessionKey string) error {
 			}
 		}
 		r.sessions = map[string]map[string]*forwardHandle{}
-		return nil
+		return
 	}
 
 	key := sessionkey.Normalize(sessionKey)
 	handles, ok := r.sessions[key]
 	if !ok {
-		return nil
+		return
 	}
 	for forwardKey, handle := range handles {
 		fmt.Printf("Stopping port-forward %s/%s:%d -> 127.0.0.1:%d\n", handle.spec.Namespace, handle.spec.Service, handle.spec.RemotePort, handle.spec.LocalPort)
 		r.releaseSharedLocked(forwardKey)
 	}
 	delete(r.sessions, key)
-	return nil
 }
 
 // releaseSharedLocked decrements the reference count for a shared forward
@@ -183,7 +185,7 @@ func (r *SessionRegistry) startForward(forward contracts.PortForward) (*forwardH
 		return nil, err
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background()) //nolint:gosec // Cancel func is stored on the handle and called by stop().
 	supervisedDone := make(chan struct{})
 
 	h := &forwardHandle{
@@ -384,7 +386,7 @@ func resolveServiceTargetPort(service corev1.Service, pod corev1.Pod, requestedR
 		case intstr.Int:
 			target := servicePort.TargetPort.IntValue()
 			if target > 0 {
-				return int(target), nil
+				return target, nil
 			}
 		case intstr.String:
 			targetName := strings.TrimSpace(servicePort.TargetPort.StrVal)

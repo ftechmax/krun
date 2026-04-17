@@ -45,7 +45,7 @@ const (
 	streamSessionIDQuery     = "session_id"
 	streamSessionTokenQuery  = "session_token"
 	streamSessionIDHeader    = "X-Krun-Session-ID"
-	streamSessionTokenHeader = "X-Krun-Session-Token"
+	streamSessionTokenHeader = "X-Krun-Session-Token" //nolint:gosec // Header key name only; not a secret value.
 )
 
 func main() {
@@ -67,8 +67,9 @@ func run() error {
 	}
 
 	server := &http.Server{
-		Addr:    defaultListenAddress,
-		Handler: newHandler(),
+		Addr:              defaultListenAddress,
+		Handler:           newHandler(),
+		ReadHeaderTimeout: 5 * time.Second,
 	}
 	log.Printf("krun traffic-manager listening on %s", defaultListenAddress)
 	log.Printf("version: %s", version)
@@ -268,16 +269,24 @@ func resolveStreamSession(r *http.Request) (contracts.DebugSession, error) {
 }
 
 func writeError(w http.ResponseWriter, code int, message string) {
-	log.Printf("http error status=%d message=%q", code, message)
+	log.Printf("http error status=%d message=%q", code, sanitizeLogValue(message)) //nolint:gosec // Value is normalized for logs.
 	writeJSON(w, code, map[string]string{
 		"message": message,
 	})
 }
 
+func sanitizeLogValue(value string) string {
+	value = strings.ReplaceAll(value, "\r", "\\r")
+	value = strings.ReplaceAll(value, "\n", "\\n")
+	return value
+}
+
 func writeJSON(w http.ResponseWriter, code int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(payload)
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
+		log.Printf("failed to write json response: %v", err)
+	}
 }
 
 func initializeInjector() error {

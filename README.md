@@ -30,11 +30,13 @@ This tool pairs perfectly with services made with my [msa-templates](https://git
 
 4. Place a `krun.json` file in the root of your project repository to define your services. See the [krun.json](#krunjson) section for details.
 
-5. Install the runtime components in your cluster
+5. Install the helper service and in-cluster runtime
 
    ```sh
-   krun debug runtime install
+   krun install
    ```
+
+   This installs both the local `krun-helper` system service and the in-cluster traffic manager. Re-running the command upgrades both.
 
    You can also apply the release manifest directly if you prefer:
 
@@ -60,10 +62,10 @@ krun debug enable <service>
 krun debug list
 ```
 
-3. Check local helper daemon status (without starting it):
+3. Check helper and runtime status (without starting them):
 
 ```sh
-krun debug helper status
+krun status
 ```
 
 4. Disable debug mode when finished:
@@ -157,39 +159,32 @@ krun [global options] <command> [command options] <service>
   krun debug disable awesome-app-api
   ```
 
-- `debug helper status`
-  Check whether the local elevated `krun-helper` daemon is currently running.
+- `install`
+  Install or upgrade both the local `krun-helper` system service and the in-cluster debug runtime. Idempotent — re-run to upgrade.
 
   ```sh
-  krun debug helper status
+  krun install
+  ```
+
+- `uninstall`
+  Remove the local `krun-helper` system service and the in-cluster debug runtime.
+
+  ```sh
+  krun uninstall
+  ```
+
+- `status`
+  Report health and version of the local `krun-helper` service and the in-cluster runtime. Does not start the helper.
+
+  ```sh
+  krun status
   ```
 
 - `debug helper stop`
-  Stop the local `krun-helper` daemon.
+  Stop the running `krun-helper` daemon (does not uninstall the service).
 
   ```sh
   krun debug helper stop
-  ```
-
-- `debug runtime install`  
-  Install or upgrade the in-cluster debug runtime resources.
-
-  ```sh
-  krun debug runtime install
-  ```
-
-- `debug runtime status`  
-  Check if the in-cluster debug runtime is healthy and version-aligned.
-
-  ```sh
-  krun debug runtime status
-  ```
-
-- `debug runtime uninstall`  
-  Remove the in-cluster debug runtime resources.
-
-  ```sh
-  krun debug runtime uninstall
   ```
 
 ## krun-config.json
@@ -314,10 +309,10 @@ Ensure your project launches as a console application (which is the default prof
 
 Debug mode requires **elevated privileges** because the `krun-helper` daemon modifies your hosts file and sets up port-forwards. On Windows you will see a UAC prompt, on Linux/macOS the helper is started with `sudo`.
 
-Install the runtime components once per cluster:
+Install the helper service and runtime components once per machine/cluster:
 
 ```sh
-krun debug runtime install
+krun install
 ```
 
 ### Enabling Debug Mode
