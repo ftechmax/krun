@@ -38,12 +38,6 @@ This tool pairs perfectly with services made with my [msa-templates](https://git
 
    This installs both the local `krun-helper` system service and the in-cluster traffic manager. Re-running the command upgrades both.
 
-   You can also apply the release manifest directly if you prefer:
-
-   ```sh
-   kubectl apply -f https://github.com/ftechmax/krun/releases/latest/download/krun-traffic-manager.yaml
-   ```
-
 6. Follow the [debugging instructions](#debugging-with-krun-runtime) to set up your project for debugging with the krun runtime.
 
 ## Quick Start
@@ -389,3 +383,24 @@ require('dotenv').config({ path: '../.env' })
 ```
 
 > **Note:** The `.env` file path is relative to your application's working directory. Since krun writes the file to the service directory (the `path` from `krun.json`), you typically need `../.env` when your app runs from a subdirectory.
+
+
+## krun-helper API
+
+`krun-helper` exposes the same local HTTP API that the `krun` CLI uses for workspace operations and debug session management. That makes it a good fit for editor integrations, shell scripts, and other developer-machine automation.
+
+By default the helper listens on `http://127.0.0.1:47831` and only accepts loopback addresses. Install it with `krun install`, then point scripts or editor integrations at that local endpoint.
+
+The full API spec, payload examples, and SSE details live in [docs/krun-helper-api.md](docs/krun-helper-api.md).
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/healthz` | Lightweight health check. Returns `{"success":true,"message":"ok"}` when the daemon is ready. |
+| `GET` | `/v1/services` | Discover projects and services from the current `krun-config.json` workspace. |
+| `POST` | `/v1/build` | Build a project or a single service. Response is an SSE stream. |
+| `POST` | `/v1/deploy` | Deploy a project. The `target` can be either the project name or any service in that project. Response is an SSE stream. |
+| `POST` | `/v1/delete` | Delete a project. The `target` can be either the project name or any service in that project. Response is an SSE stream. |
+| `GET` | `/v1/debug/sessions` | List the active debug sessions currently tracked by the local helper. |
+| `POST` | `/v1/debug/enable` | Enable a local debug session: hosts file entries, dependency port-forwards, and traffic-manager session. |
+| `POST` | `/v1/debug/disable` | Disable a local debug session and clean up local state. |
+| `POST` | `/v1/shutdown` | Stop the running helper daemon. |
