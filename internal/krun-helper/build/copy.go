@@ -48,13 +48,17 @@ var excludedDirectories = map[string]struct{}{
 	"docs":         {},
 }
 
-func copySource(kubeConfig string, projectName string, projectPath string, skipWeb bool) (bool, error) {
+func copySource(ctx context.Context, out io.Writer, kubeConfig string, projectName string, projectPath string, skipWeb bool) (bool, error) {
+	if out == nil {
+		out = io.Discard
+	}
+
 	startTime := time.Now()
 	plusSym := utils.Colorize("+", utils.Green)
 	minusSym := utils.Colorize("-", utils.Red)
 	squigglySym := utils.Colorize("~", utils.Yellow)
 
-	fmt.Printf("Copying project %s to remote server\n", projectName)
+	fmt.Fprintf(out, "Copying project %s to remote server\n", projectName)
 
 	projectRelPath := projectName
 	if projectPath != "" {
@@ -68,7 +72,6 @@ func copySource(kubeConfig string, projectName string, projectPath string, skipW
 		return false, fmt.Errorf("create kube client: %w", err)
 	}
 
-	ctx := context.Background()
 	remoteFiles, err := listRemoteFiles(ctx, client, remoteRoot)
 	if err != nil {
 		return false, err
@@ -81,43 +84,60 @@ func copySource(kubeConfig string, projectName string, projectPath string, skipW
 
 	plan := buildSyncPlan(localFiles, remoteFiles)
 
-	filesAdded := 0
-	filesUpdated := 0
-	for _, f := range plan.toUpload {
-		if _, existed := remoteFiles[f.relPath]; existed {
-			filesUpdated++
-			fmt.Printf("%s %s\n", squigglySym, f.relPath)
-		} else {
-			filesAdded++
-			fmt.Printf("%s %s\n", plusSym, f.relPath)
+	filesAdded, filesUpdated := reportUploadChanges(out, plan.toUpload, remoteFiles, plusSym, squigglySym)
+	filesDeleted := reportDeletedChanges(out, plan.toDelete, minusSym)
+
+	if err := applySyncPlan(ctx, client, projectName, remoteRoot, plan); err != nil {
+		return false, err
+	}
+
+	return summarizeSyncResult(out, startTime, filesAdded, filesUpdated, filesDeleted), nil
+}
+
+func reportUploadChanges(out io.Writer, uploadFiles []localFile, remoteFiles map[string]remoteEntry, addSymbol string, updateSymbol string) (added int, updated int) {
+	for _, file := range uploadFiles {
+		if _, existed := remoteFiles[file.relPath]; existed {
+			updated++
+			fmt.Fprintf(out, "%s %s\n", updateSymbol, file.relPath)
+			continue
 		}
+		added++
+		fmt.Fprintf(out, "%s %s\n", addSymbol, file.relPath)
 	}
+	return added, updated
+}
 
-	filesDeleted := len(plan.toDelete)
-	for _, rel := range plan.toDelete {
-		fmt.Printf("%s %s\n", minusSym, rel)
+func reportDeletedChanges(out io.Writer, deletedFiles []string, deleteSymbol string) int {
+	for _, relPath := range deletedFiles {
+		fmt.Fprintf(out, "%s %s\n", deleteSymbol, relPath)
 	}
+	return len(deletedFiles)
+}
 
+func applySyncPlan(ctx context.Context, client *kube.Client, projectName string, remoteRoot string, plan syncPlan) error {
 	if len(plan.toUpload) > 0 {
 		if err := streamTarUpload(ctx, client, projectName, plan.toUpload); err != nil {
-			return false, err
+			return err
 		}
 	}
 	if len(plan.toDelete) > 0 {
 		if err := deleteRemoteFiles(ctx, client, remoteRoot, plan.toDelete); err != nil {
-			return false, err
+			return err
 		}
 	}
+	return nil
+}
 
+func summarizeSyncResult(out io.Writer, startTime time.Time, filesAdded int, filesUpdated int, filesDeleted int) bool {
 	elapsed := time.Since(startTime)
 	shortDur := elapsed.Truncate(10 * time.Millisecond)
 	if filesAdded == 0 && filesUpdated == 0 && filesDeleted == 0 {
-		fmt.Printf("%s | %s %s\n",
+		fmt.Fprintf(out, "%s | %s %s\n",
 			utils.Colorize("No changes - project up to date", utils.Gray),
 			utils.Colorize("Completed sync in", utils.Gray),
 			utils.Colorize(shortDur.String(), utils.Gray),
 		)
-		return false, nil
+		return false
 	}
 
 	addedStr := utils.Colorize(fmt.Sprintf("Added: %d", filesAdded), utils.Green)
@@ -126,9 +146,8 @@ func copySource(kubeConfig string, projectName string, projectPath string, skipW
 	timeLabel := utils.Colorize("Completed sync in", utils.Gray)
 	timeVal := utils.Colorize(shortDur.String(), utils.Gray)
 
-	fmt.Printf("Sync summary: %s  %s  %s  | %s %s\n", addedStr, updatedStr, deletedStr, timeLabel, timeVal)
-
-	return true, nil
+	fmt.Fprintf(out, "Sync summary: %s  %s  %s  | %s %s\n", addedStr, updatedStr, deletedStr, timeLabel, timeVal)
+	return true
 }
 
 func listRemoteFiles(ctx context.Context, client *kube.Client, remoteRoot string) (map[string]remoteEntry, error) {

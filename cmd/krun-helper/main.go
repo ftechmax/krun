@@ -4,16 +4,22 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	cfg "github.com/ftechmax/krun/internal/config"
 	"github.com/ftechmax/krun/internal/contracts"
+	workspacebuild "github.com/ftechmax/krun/internal/krun-helper/build"
+	workspacedeploy "github.com/ftechmax/krun/internal/krun-helper/deploy"
 	"github.com/ftechmax/krun/internal/krun-helper/hostfile"
 	managerclient "github.com/ftechmax/krun/internal/krun-helper/manager-client"
 	helperportforward "github.com/ftechmax/krun/internal/krun-helper/portforward"
@@ -69,6 +75,14 @@ var (
 	newPortForwardRegistry          = newHelperPortForwardRegistry
 	newManagerClient                = managerclient.NewSessionClient
 	newStreamRegistry               = newHelperStreamRegistry
+	discoverServices                = cfg.DiscoverServices
+	runWorkspaceBuild               = workspacebuild.Build
+	runWorkspaceDeploy              = workspacedeploy.Deploy
+	runWorkspaceDelete              = workspacedeploy.Delete
+	helperKrunConfig                cfg.KrunConfig
+	helperKrunConfigLoaded          bool
+	helperKubeConfigPath            string
+	helperWorkspacePath             string
 )
 
 func newHelperPortForwardRegistry(kubeConfigPath string) (sessionPortForwardRegistry, error) {
@@ -87,7 +101,7 @@ type daemonOptions struct {
 // startHelperDaemonForService adapts startHelperDaemon to the service.StartDaemonFunc
 // signature so the service runner can call it without importing main.
 func startHelperDaemonForService(listenAddress, kubeConfigPath string, opts service.DaemonOptions) error {
-	return startHelperDaemon(listenAddress, kubeConfigPath, daemonOptions{
+	return startHelperDaemon(listenAddress, kubeConfigPath, "", daemonOptions{
 		externalShutdown: opts.ExternalShutdown,
 		onReady:          opts.OnReady,
 	})
@@ -96,6 +110,7 @@ func startHelperDaemonForService(listenAddress, kubeConfigPath string, opts serv
 func main() {
 	var kubeConfigPath string
 	var listenAddress string
+	var workspacePath string
 	var serviceFlag bool
 
 	rootCmd := &cobra.Command{
@@ -109,7 +124,7 @@ func main() {
 				}
 				return
 			}
-			if err := startHelperDaemon(listenAddress, kubeConfigPath, daemonOptions{}); err != nil {
+			if err := startHelperDaemon(listenAddress, kubeConfigPath, workspacePath, daemonOptions{}); err != nil {
 				fmt.Printf("helper daemon failed: %v\n", err)
 				os.Exit(1)
 			}
@@ -118,6 +133,7 @@ func main() {
 
 	rootCmd.Flags().StringVar(&kubeConfigPath, "kubeconfig", "", "Path to kubeconfig file")
 	rootCmd.Flags().StringVar(&listenAddress, "listen", "", "Daemon listen address")
+	rootCmd.Flags().StringVar(&workspacePath, "workspace", "", "Path to a workspace containing krun-config.json")
 	rootCmd.Flags().BoolVar(&serviceFlag, "service", false, "Run as system service (used by systemd ExecStart)")
 
 	if err := rootCmd.Execute(); err != nil {
@@ -126,13 +142,13 @@ func main() {
 	}
 }
 
-func startHelperDaemon(listenAddress string, kubeConfigPath string, opts daemonOptions) error {
+func startHelperDaemon(listenAddress string, kubeConfigPath string, workspacePath string, opts daemonOptions) error {
 	addr, err := resolveHelperListenAddress(listenAddress)
 	if err != nil {
 		return err
 	}
 
-	if err := initializeHelperDependencies(kubeConfigPath); err != nil {
+	if err := initializeHelperDependencies(kubeConfigPath, workspacePath); err != nil {
 		return err
 	}
 
@@ -150,7 +166,20 @@ func resolveHelperListenAddress(listenAddress string) (string, error) {
 	return addr, nil
 }
 
-func initializeHelperDependencies(kubeConfigPath string) error {
+func initializeHelperDependencies(kubeConfigPath string, workspacePath string) error {
+	helperKubeConfigPath = strings.TrimSpace(kubeConfigPath)
+	helperWorkspacePath = strings.TrimSpace(workspacePath)
+	helperKrunConfigLoaded = false
+	helperKrunConfig = cfg.KrunConfig{}
+
+	loadedConfig, err := loadHelperKrunConfig(helperWorkspacePath)
+	if err != nil {
+		fmt.Printf("warning: cannot load krun-config.json: %v\n", err)
+	} else {
+		helperKrunConfig = loadedConfig
+		helperKrunConfigLoaded = true
+	}
+
 	registry, err := newPortForwardRegistry(kubeConfigPath)
 	if err != nil {
 		return fmt.Errorf("failed to initialize port-forward registry: %w", err)
@@ -246,6 +275,10 @@ func shutdownHelperServer(server *http.Server, serverErrCh <-chan error, reason 
 func newHandler(shutdownCh chan<- struct{}) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", handleHealthz)
+	mux.HandleFunc("/v1/services", handleServicesList)
+	mux.HandleFunc("/v1/build", handleBuild)
+	mux.HandleFunc("/v1/deploy", handleDeploy)
+	mux.HandleFunc("/v1/delete", handleDelete)
 	mux.HandleFunc("/v1/debug/sessions", handleDebugSessionsList)
 	mux.HandleFunc("/v1/debug/enable", handleDebugEnable)
 	mux.HandleFunc("/v1/debug/disable", handleDebugDisable)
@@ -285,6 +318,366 @@ func handleShutdown(shutdownCh chan<- struct{}) http.HandlerFunc {
 		default:
 		}
 	}
+}
+
+func handleServicesList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, contracts.HelperResponse{
+			Success: false,
+			Message: "method not allowed",
+		})
+		return
+	}
+
+	_, services, err := buildConfig()
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, contracts.HelperResponse{
+			Success: false,
+			Message: err.Error(),
+		})
+		return
+	}
+
+	projectsMap := make(map[string]struct{}, len(services))
+	for _, service := range services {
+		if strings.TrimSpace(service.Project) != "" {
+			projectsMap[service.Project] = struct{}{}
+		}
+	}
+
+	projects := make([]string, 0, len(projectsMap))
+	for project := range projectsMap {
+		projects = append(projects, project)
+	}
+	sort.Strings(projects)
+
+	writeJSONAny(w, http.StatusOK, contracts.ServiceListResponse{
+		Services: services,
+		Projects: projects,
+	})
+}
+
+func handleBuild(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, contracts.HelperResponse{
+			Success: false,
+			Message: "method not allowed",
+		})
+		return
+	}
+
+	var req contracts.BuildRequest
+	if err := decodeStrict(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, contracts.HelperResponse{
+			Success: false,
+			Message: err.Error(),
+		})
+		return
+	}
+	if strings.TrimSpace(req.Target) == "" {
+		writeJSON(w, http.StatusBadRequest, contracts.HelperResponse{
+			Success: false,
+			Message: "invalid payload: target is required",
+		})
+		return
+	}
+
+	conf, services, err := buildConfig()
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, contracts.HelperResponse{
+			Success: false,
+			Message: err.Error(),
+		})
+		return
+	}
+
+	serviceName, projectName, err := resolveTarget(req.Target, services)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, contracts.HelperResponse{
+			Success: false,
+			Message: err.Error(),
+		})
+		return
+	}
+	conf.Registry = conf.LocalRegistry
+	servicesToBuild := filterServicesForBuild(serviceName, projectName, services)
+
+	streamSSE(w, r, func(ctx context.Context, out io.Writer) error {
+		return runWorkspaceBuild(ctx, out, projectName, servicesToBuild, req.SkipWeb, req.Force, req.Flush, conf)
+	})
+}
+
+func handleDeploy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, contracts.HelperResponse{
+			Success: false,
+			Message: "method not allowed",
+		})
+		return
+	}
+
+	var req contracts.DeployRequest
+	if err := decodeStrict(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, contracts.HelperResponse{
+			Success: false,
+			Message: err.Error(),
+		})
+		return
+	}
+	if strings.TrimSpace(req.Target) == "" {
+		writeJSON(w, http.StatusBadRequest, contracts.HelperResponse{
+			Success: false,
+			Message: "invalid payload: target is required",
+		})
+		return
+	}
+
+	conf, services, err := buildConfig()
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, contracts.HelperResponse{
+			Success: false,
+			Message: err.Error(),
+		})
+		return
+	}
+
+	_, projectName, err := resolveTarget(req.Target, services)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, contracts.HelperResponse{
+			Success: false,
+			Message: err.Error(),
+		})
+		return
+	}
+
+	conf.Registry = conf.LocalRegistry
+	if req.UseRemoteRegistry {
+		conf.Registry = conf.RemoteRegistry
+	}
+
+	streamSSE(w, r, func(ctx context.Context, out io.Writer) error {
+		return runWorkspaceDeploy(ctx, out, projectName, conf, !req.NoRestart)
+	})
+}
+
+func handleDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, contracts.HelperResponse{
+			Success: false,
+			Message: "method not allowed",
+		})
+		return
+	}
+
+	var req contracts.DeleteRequest
+	if err := decodeStrict(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, contracts.HelperResponse{
+			Success: false,
+			Message: err.Error(),
+		})
+		return
+	}
+	if strings.TrimSpace(req.Target) == "" {
+		writeJSON(w, http.StatusBadRequest, contracts.HelperResponse{
+			Success: false,
+			Message: "invalid payload: target is required",
+		})
+		return
+	}
+
+	conf, services, err := buildConfig()
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, contracts.HelperResponse{
+			Success: false,
+			Message: err.Error(),
+		})
+		return
+	}
+
+	_, projectName, err := resolveTarget(req.Target, services)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, contracts.HelperResponse{
+			Success: false,
+			Message: err.Error(),
+		})
+		return
+	}
+
+	streamSSE(w, r, func(ctx context.Context, out io.Writer) error {
+		return runWorkspaceDelete(ctx, out, projectName, conf)
+	})
+}
+
+type sseWriter struct {
+	ctx     context.Context
+	writer  http.ResponseWriter
+	flusher http.Flusher
+}
+
+func (s *sseWriter) Write(payload []byte) (int, error) {
+	chunks := strings.SplitAfter(string(payload), "\n")
+	if len(chunks) > 0 && chunks[len(chunks)-1] == "" {
+		chunks = chunks[:len(chunks)-1]
+	}
+
+	for _, chunk := range chunks {
+		if err := s.emit("log", contracts.StreamLogEvent{
+			Stream: "stdout",
+			Text:   chunk,
+		}); err != nil {
+			return 0, err
+		}
+	}
+
+	return len(payload), nil
+}
+
+func (s *sseWriter) emit(event string, payload any) error {
+	select {
+	case <-s.ctx.Done():
+		return s.ctx.Err()
+	default:
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal sse payload: %w", err)
+	}
+
+	if _, err := fmt.Fprintf(s.writer, "event: %s\ndata: %s\n\n", event, data); err != nil {
+		return err
+	}
+	s.flusher.Flush()
+	return nil
+}
+
+func streamSSE(w http.ResponseWriter, r *http.Request, run func(ctx context.Context, out io.Writer) error) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, contracts.HelperResponse{
+			Success: false,
+			Message: "streaming not supported",
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	writer := &sseWriter{
+		ctx:     r.Context(),
+		writer:  w,
+		flusher: flusher,
+	}
+
+	runErr := run(r.Context(), writer)
+	done := contracts.StreamDoneEvent{Ok: runErr == nil}
+	if runErr != nil {
+		done.Error = runErr.Error()
+	}
+	if emitErr := writer.emit("done", done); emitErr != nil {
+		fmt.Printf("failed to emit done event: %v\n", emitErr)
+	}
+}
+
+func decodeStrict(r *http.Request, target any) error {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return fmt.Errorf("invalid payload: %w", err)
+	}
+
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return fmt.Errorf("invalid payload: multiple JSON values are not allowed")
+	}
+	return nil
+}
+
+func loadHelperKrunConfig(workspacePath string) (cfg.KrunConfig, error) {
+	trimmed := strings.TrimSpace(workspacePath)
+	if trimmed == "" {
+		return cfg.ParseKrunConfig()
+	}
+
+	if strings.EqualFold(filepath.Base(trimmed), "krun-config.json") {
+		trimmed = filepath.Dir(trimmed)
+	}
+
+	absWorkspacePath, err := filepath.Abs(trimmed)
+	if err != nil {
+		return cfg.KrunConfig{}, fmt.Errorf("resolve workspace path %q: %w", workspacePath, err)
+	}
+
+	return cfg.ParseKrunConfigFromDir(absWorkspacePath)
+}
+
+func buildConfig() (cfg.Config, []cfg.Service, error) {
+	if !helperKrunConfigLoaded {
+		loadedConfig, err := loadHelperKrunConfig(helperWorkspacePath)
+		if err != nil {
+			return cfg.Config{}, nil, fmt.Errorf("krun-config.json is not available: %w", err)
+		}
+		helperKrunConfig = loadedConfig
+		helperKrunConfigLoaded = true
+	}
+
+	sourcePath := cfg.ExpandPath(helperKrunConfig.Path)
+	services, projectPaths, err := discoverServices(sourcePath, helperKrunConfig.SearchDepth)
+	if err != nil {
+		return cfg.Config{}, nil, fmt.Errorf("discover services: %w", err)
+	}
+
+	configWithExpandedPath := helperKrunConfig
+	configWithExpandedPath.Path = sourcePath
+
+	return cfg.Config{
+		KrunConfig:   configWithExpandedPath,
+		KubeConfig:   helperKubeConfigPath,
+		Registry:     configWithExpandedPath.LocalRegistry,
+		ProjectPaths: projectPaths,
+	}, services, nil
+}
+
+func resolveTarget(name string, services []cfg.Service) (string, string, error) {
+	serviceName := ""
+	projectName := ""
+	for _, s := range services {
+		if s.Name == name {
+			serviceName = s.Name
+			projectName = s.Project
+			break
+		}
+		if s.Project == name {
+			projectName = s.Project
+		}
+	}
+
+	if serviceName == "" && projectName == "" {
+		return "", "", fmt.Errorf("service or project '%s' not found", name)
+	}
+
+	return serviceName, projectName, nil
+}
+
+func filterServicesForBuild(serviceName string, projectName string, services []cfg.Service) []cfg.Service {
+	filtered := make([]cfg.Service, 0, len(services))
+	for _, service := range services {
+		if serviceName != "" {
+			if service.Name == serviceName {
+				filtered = append(filtered, service)
+				break
+			}
+			continue
+		}
+
+		if service.Project == projectName {
+			filtered = append(filtered, service)
+		}
+	}
+	return filtered
 }
 
 func handleDebugEnable(w http.ResponseWriter, r *http.Request) {

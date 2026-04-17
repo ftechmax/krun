@@ -1,6 +1,6 @@
 //go:build windows
 
-package debug
+package helper
 
 import (
 	"fmt"
@@ -13,7 +13,7 @@ import (
 
 const serviceName = "krun-helper"
 
-func installHelperService(binaryPath, kubeConfigPath string) error {
+func installHelperService(binaryPath, kubeConfigPath, _ string) error {
 	m, err := mgr.Connect()
 	if err != nil {
 		return fmt.Errorf("connect to service manager: %w", err)

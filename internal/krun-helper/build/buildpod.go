@@ -71,13 +71,13 @@ spec:
           path: registries.conf
 `
 
-func buildPodExists(kubeConfig string) (bool, error) {
+func buildPodExists(ctx context.Context, kubeConfig string) (bool, error) {
 	client, err := kube.NewClient(kubeConfig)
 	if err != nil {
 		return false, fmt.Errorf("create kube client: %w", err)
 	}
 
-	pod, err := client.Clientset.CoreV1().Pods("default").Get(context.Background(), buildPodName, metav1.GetOptions{})
+	pod, err := client.Clientset.CoreV1().Pods("default").Get(ctx, buildPodName, metav1.GetOptions{})
 	if k8serrors.IsNotFound(err) {
 		return false, nil
 	}
@@ -88,13 +88,13 @@ func buildPodExists(kubeConfig string) (bool, error) {
 	return pod.Status.Phase == corev1.PodRunning, nil
 }
 
-func createBuildPod(kubeConfig string) error {
+func createBuildPod(ctx context.Context, out io.Writer, kubeConfig string) error {
 	client, err := kube.NewClient(kubeConfig)
 	if err != nil {
 		return fmt.Errorf("create kube client: %w", err)
 	}
 
-	exists, err := buildPodExists(kubeConfig)
+	exists, err := buildPodExists(ctx, kubeConfig)
 	if err != nil {
 		return fmt.Errorf("failed to check if build pod exists: %w", err)
 	}
@@ -102,30 +102,30 @@ func createBuildPod(kubeConfig string) error {
 		return nil
 	}
 
-	fmt.Println("\033[32mCreating build container\033[0m")
-	if err := applyManifest(context.Background(), client, manifest); err != nil {
+	fmt.Fprintln(out, "\033[32mCreating build container\033[0m")
+	if err := applyManifest(ctx, client, manifest); err != nil {
 		return fmt.Errorf("failed to create build pod: %w", err)
 	}
 
-	if err := waitForBuildPodReady(client, 90*time.Second); err != nil {
+	if err := waitForBuildPodReady(ctx, client, 90*time.Second); err != nil {
 		return fmt.Errorf("failed to wait for build pod to be ready: %w", err)
 	}
 
 	return nil
 }
 
-func deleteBuildPod(kubeConfig string) error {
+func deleteBuildPod(ctx context.Context, kubeConfig string) error {
 	client, err := kube.NewClient(kubeConfig)
 	if err != nil {
 		return fmt.Errorf("create kube client: %w", err)
 	}
-	if err := deleteManifest(context.Background(), client, manifest); err != nil {
+	if err := deleteManifest(ctx, client, manifest); err != nil {
 		return fmt.Errorf("failed to initiate build pod deletion: %w", err)
 	}
 	return nil
 }
 
-func waitForBuildPodReady(client *kube.Client, timeout time.Duration) error {
+func waitForBuildPodReady(ctx context.Context, client *kube.Client, timeout time.Duration) error {
 	lw := cache.NewListWatchFromClient(
 		client.Clientset.CoreV1().RESTClient(),
 		"pods",
@@ -133,7 +133,7 @@ func waitForBuildPodReady(client *kube.Client, timeout time.Duration) error {
 		fields.OneTermEqualSelector("metadata.name", buildPodName),
 	)
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	_, err := watchtools.UntilWithSync(ctx, lw, &corev1.Pod{}, nil, func(e watch.Event) (bool, error) {

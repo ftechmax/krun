@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 
@@ -55,8 +56,12 @@ func ParseKrunConfig() (KrunConfig, error) {
 		return KrunConfig{}, fmt.Errorf("failed to get executable path: %w", err)
 	}
 
-	configPath := filepath.Join(filepath.Dir(exePath), "krun-config.json")
-	file, err := os.Open(configPath) //nolint:gosec // Path is derived from the executable directory and fixed filename.
+	return ParseKrunConfigFromDir(filepath.Dir(exePath))
+}
+
+func ParseKrunConfigFromDir(configDir string) (KrunConfig, error) {
+	configPath := filepath.Join(configDir, "krun-config.json")
+	file, err := os.Open(configPath) //nolint:gosec // Path is derived from a trusted config directory and fixed filename.
 	if err != nil {
 		return KrunConfig{}, fmt.Errorf("failed to open file: %w", err)
 	}
@@ -72,9 +77,13 @@ func ParseKrunConfig() (KrunConfig, error) {
 		return KrunConfig{}, fmt.Errorf("failed to unmarshal JSON: %w", err)
 	}
 
-	config.Path = expandHomePath(config.Path)
+	config.Path = ExpandPath(config.Path)
 
 	return config, nil
+}
+
+func ExpandPath(path string) string {
+	return expandHomePath(os.ExpandEnv(path))
 }
 
 func expandHomePath(path string) string {
@@ -83,25 +92,65 @@ func expandHomePath(path string) string {
 		return path
 	}
 
+	home := resolvePreferredHomeDir()
+	if home == "" {
+		return path
+	}
+
 	if trimmed == "~" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return path
-		}
 		return home
 	}
 
 	if strings.HasPrefix(trimmed, "~/") || strings.HasPrefix(trimmed, "~\\") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return path
-		}
 		suffix := strings.TrimPrefix(trimmed, "~/")
 		suffix = strings.TrimPrefix(suffix, "~\\")
 		return filepath.Join(home, suffix)
 	}
 
 	return path
+}
+
+func resolvePreferredHomeDir() string {
+	if home := strings.TrimSpace(os.Getenv("KRUN_HOME")); home != "" {
+		return home
+	}
+	if home := lookupHomeByUsername(strings.TrimSpace(os.Getenv("SUDO_USER"))); home != "" {
+		return home
+	}
+	if home := lookupHomeByUID(strings.TrimSpace(os.Getenv("PKEXEC_UID"))); home != "" {
+		return home
+	}
+	if home := lookupHomeByUID(strings.TrimSpace(os.Getenv("SUDO_UID"))); home != "" {
+		return home
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(home)
+}
+
+func lookupHomeByUsername(username string) string {
+	if username == "" {
+		return ""
+	}
+	record, err := user.Lookup(username)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(record.HomeDir)
+}
+
+func lookupHomeByUID(uid string) string {
+	if uid == "" {
+		return ""
+	}
+	record, err := user.LookupId(uid)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(record.HomeDir)
 }
 
 func DiscoverServices(sourceDir string, searchDepth int) ([]Service, map[string]string, error) {

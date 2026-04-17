@@ -3,6 +3,7 @@ kind: Service
 metadata:
   name: smoke-app
 spec:
+  type: ClusterIP
   selector:
     app: smoke-app
   ports:

@@ -1,5 +1,7 @@
 package contracts
 
+import cfg "github.com/ftechmax/krun/internal/config"
+
 // krun-helper contracts
 type DebugSession struct {
 	SessionID       string `json:"session_id"`
@@ -73,6 +75,38 @@ type HelperDebugSessionsResponse struct {
 type HelperResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
+}
+
+type ServiceListResponse struct {
+	Services []cfg.Service `json:"services"`
+	Projects []string      `json:"projects"`
+}
+
+type BuildRequest struct {
+	Target  string `json:"target"`
+	SkipWeb bool   `json:"skip_web,omitempty"`
+	Force   bool   `json:"force,omitempty"`
+	Flush   bool   `json:"flush,omitempty"`
+}
+
+type DeployRequest struct {
+	Target            string `json:"target"`
+	UseRemoteRegistry bool   `json:"use_remote_registry,omitempty"`
+	NoRestart         bool   `json:"no_restart,omitempty"`
+}
+
+type DeleteRequest struct {
+	Target string `json:"target"`
+}
+
+type StreamLogEvent struct {
+	Stream string `json:"stream"`
+	Text   string `json:"text"`
+}
+
+type StreamDoneEvent struct {
+	Ok    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
 }
 
 const (

@@ -9,7 +9,10 @@ import (
 	"slices"
 	"testing"
 
+	cfg "github.com/ftechmax/krun/internal/config"
 	"github.com/ftechmax/krun/internal/contracts"
+	workspacebuild "github.com/ftechmax/krun/internal/krun-helper/build"
+	workspacedeploy "github.com/ftechmax/krun/internal/krun-helper/deploy"
 	"github.com/ftechmax/krun/internal/krun-helper/hostfile"
 	managerclient "github.com/ftechmax/krun/internal/krun-helper/manager-client"
 	"github.com/ftechmax/krun/internal/krun-helper/session"
@@ -478,6 +481,14 @@ func resetHelperGlobals(t *testing.T) {
 	streamRegistry = noopStreamRegistry{}
 	managerSessionClient = managerclient.NoopSessionClient{}
 	managerForwardBootstrapRequired = false
+	discoverServices = cfg.DiscoverServices
+	runWorkspaceBuild = workspacebuild.Build
+	runWorkspaceDeploy = workspacedeploy.Deploy
+	runWorkspaceDelete = workspacedeploy.Delete
+	helperKrunConfig = cfg.KrunConfig{}
+	helperKrunConfigLoaded = false
+	helperKubeConfigPath = ""
+	helperWorkspacePath = ""
 }
 
 type fakePortForwardRegistry struct {

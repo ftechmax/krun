@@ -28,9 +28,12 @@ jobs:
 
       - name: Install linters
         run: |
-          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
-          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          make install-linters
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Run tests
+        run: |
+          go test -v ./...
 
       - name: Run linter
         run: make lint
@@ -39,7 +42,7 @@ jobs:
         run: |
           sudo mkdir -p /etc/rancher/k3s
           sudo cp test/smoke/k3s-registries.yaml /etc/rancher/k3s/registries.yaml
-          curl -sfL https://get.k3s.io | sudo sh -s - --write-kubeconfig-mode 644 --disable=traefik
+          curl -sfL https://get.k3s.io | sudo sh -s - --write-kubeconfig-mode 644 --disable=traefik --disable=helm-controller --disable=servicelb --disable=local-storage --disable=metrics-server
 
       - name: Configure kubectl
         run: |
@@ -121,6 +124,76 @@ jobs:
           echo "$output"
           echo "$output" | grep -q "debug"
 
+      - name: Test krun install
+        env:
+          KRUN_AGENT_IMAGE: registry:5000/krun-traffic-agent:latest
+        run: |
+          python3 -m http.server 8000 --directory /tmp &
+          HTTP_PID=$!
+          trap "kill $HTTP_PID 2>/dev/null" EXIT
+          for i in $(seq 1 20); do nc -z 127.0.0.1 8000 2>/dev/null && break; sleep 0.5; done
+
+          export KRUN_MANIFEST_URL="http://localhost:8000/krun-runtime.yaml"
+          output=$(krun install)
+          echo "$output"
+          echo "$output" | grep -q "traffic manager installed"
+          echo "$output" | grep -q "helper service installed"
+
+      - name: Debug krun install failure
+        if: ${{ failure() }}
+        run: |
+          echo "[debug] runtime namespace"
+          kubectl get namespace krun-system || true
+          echo "[debug] runtime resources"
+          kubectl get all -n krun-system || true
+          echo "[debug] runtime deployment"
+          kubectl get deployment krun-traffic-manager -n krun-system -o wide || true
+          echo "[debug] runtime pod descriptions"
+          kubectl describe pods -n krun-system || true
+          echo "[debug] runtime pod logs"
+          kubectl logs -n krun-system -l app.kubernetes.io/name=krun-traffic-manager --all-containers=true --tail=200 || true
+
+      - name: Test krun-helper service availability
+        run: |
+          for i in $(seq 1 20); do
+            if nc -z 127.0.0.1 47831 2>/dev/null; then
+              echo "krun-helper daemon is ready"
+              break
+            fi
+            sleep 0.5
+          done
+          nc -z 127.0.0.1 47831 || { echo "krun-helper daemon failed to start"; exit 1; }
+          systemctl is-active krun-helper
+
+      - name: Test krun status
+        run: |
+          output=$(krun status)
+          echo "$output"
+
+          check_section() {
+            local section=$1
+            local block
+            block=$(echo "$output" | awk -v s="$section" '
+              $0 == s { found = 1; next }
+              found && /^-+$/ { next }
+              found && !/:/ { exit }
+              found { print }
+            ')
+            if ! echo "$block" | grep -Eq "service: .*installed"; then
+              echo "ERROR: ${section} service is not 'installed'"
+              exit 1
+            fi
+            if ! echo "$block" | grep -Eq "health: .*ok"; then
+              echo "ERROR: ${section} health is not 'ok'"
+              exit 1
+            fi
+          }
+
+          check_section "krun-helper"
+          check_section "traffic-manager"
+
+          echo "All checks passed for krun-helper and traffic-manager"
+
       - name: Test krun list
         run: |
           output=$(krun list)
@@ -139,7 +212,7 @@ jobs:
           echo "$output" | grep -q "Deploying"
           kubectl wait --for=condition=Available deployment/smoke-app --timeout=120s
 
-      - name: Debug smoke-app deploy (on failure)
+      - name: Debug smoke-app deploy failure
         if: ${{ failure() }}
         run: |
           echo "[debug] deployment summary"
@@ -150,55 +223,6 @@ jobs:
           kubectl describe pods -l app=smoke-app || true
           echo "[debug] pod logs"
           kubectl logs -l app=smoke-app --all-containers=true --tail=200 || true
-
-      - name: Test krun install
-        env:
-          KRUN_AGENT_IMAGE: registry:5000/krun-traffic-agent:latest
-        run: |
-          python3 -m http.server 8000 --directory /tmp &
-          HTTP_PID=$!
-          trap "kill $HTTP_PID 2>/dev/null" EXIT
-          for i in $(seq 1 20); do nc -z 127.0.0.1 8000 2>/dev/null && break; sleep 0.5; done
-
-          export KRUN_MANIFEST_URL="http://localhost:8000/krun-runtime.yaml"
-          output=$(krun install)
-          echo "$output"
-          echo "$output" | grep -q "traffic manager installed"
-          echo "$output" | grep -q "helper service installed"
-
-      - name: Debug runtime install (on failure)
-        if: ${{ failure() }}
-        run: |
-          echo "[debug] runtime namespace"
-          kubectl get namespace krun-system || true
-          echo "[debug] runtime resources"
-          kubectl get all -n krun-system || true
-          echo "[debug] runtime deployment"
-          kubectl get deployment krun-traffic-manager -n krun-system -o wide || true
-          echo "[debug] runtime pod descriptions"
-          kubectl describe pods -n krun-system || true
-          echo "[debug] runtime pod logs"
-          kubectl logs -n krun-system -l app.kubernetes.io/name=krun-traffic-manager --all-containers=true --tail=200 || true
-
-      - name: Test krun status
-        run: |
-          output=$(krun status)
-          echo "$output"
-          runtime_output=$(echo "$output" | sed -n '/^traffic-manager$/,$p')
-          echo "$runtime_output" | grep -Eq "service: .*installed"
-          echo "$runtime_output" | grep -Eq "health: .*ok"
-
-      - name: Wait for krun-helper service
-        run: |
-          for i in $(seq 1 20); do
-            if nc -z 127.0.0.1 47831 2>/dev/null; then
-              echo "krun-helper daemon is ready"
-              break
-            fi
-            sleep 0.5
-          done
-          nc -z 127.0.0.1 47831 || { echo "krun-helper daemon failed to start"; exit 1; }
-          systemctl is-active krun-helper
 
       - name: Test krun debug enable
         run: |
@@ -243,6 +267,58 @@ jobs:
           echo "$output" | grep -q "Active debug sessions"
           echo "$output" | grep -q "smoke-app"
 
+      - name: Test debug communication
+        run: |
+          LOG=$(mktemp)
+          python3 -m http.server 5000 --directory test/smoke/app >"$LOG" 2>&1 &
+          INTERCEPT_PID=$!
+          trap "kill $INTERCEPT_PID 2>/dev/null" EXIT
+          for i in $(seq 1 20); do nc -z 127.0.0.1 5000 2>/dev/null && break; sleep 0.5; done
+
+          kubectl run curl-smoke --rm -i --restart=Never --image=curlimages/curl:latest \
+            --command -- curl -sS --max-time 30 http://smoke-app.default.svc.cluster.local/ || true
+
+          for i in $(seq 1 20); do
+            grep -q '"GET / HTTP' "$LOG" && break
+            sleep 0.5
+          done
+
+          echo "--- listener log ---"
+          cat "$LOG"
+          grep -q '"GET / HTTP' "$LOG" || { echo "ERROR: GET did not arrive on port 5000"; exit 1; }
+
+      - name: Debug communication failure
+        if: ${{ failure() }}
+        run: |
+          echo "[debug] smoke-app pods"
+          kubectl get pods -l app=smoke-app -o wide || true
+          POD=$(kubectl get pod -l app=smoke-app -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+          POD_IP=$(kubectl get pod -l app=smoke-app -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || true)
+          echo "[debug] pod=$POD ip=$POD_IP"
+
+          echo "[debug] iptables -t nat -L PREROUTING in sidecar"
+          kubectl exec "$POD" -c krun-traffic-agent -- iptables -t nat -L PREROUTING -n -v || true
+          echo "[debug] iptables-save (nat) in sidecar"
+          kubectl exec "$POD" -c krun-traffic-agent -- iptables-save -t nat || true
+          echo "[debug] listening sockets in sidecar netns"
+          kubectl exec "$POD" -c krun-traffic-agent -- sh -c 'ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null' || true
+
+          echo "[debug] curl pod IP directly (:80)"
+          curl -sSi --max-time 10 "http://${POD_IP}:80/" || true
+          echo "[debug] curl pod IP on agent port (:8081)"
+          curl -sSi --max-time 10 "http://${POD_IP}:8081/" || true
+
+          echo "[debug] traffic-agent logs"
+          kubectl logs -l app=smoke-app -c krun-traffic-agent --tail=200 || true
+          echo "[debug] traffic-manager logs"
+          kubectl logs -n krun-system -l app.kubernetes.io/name=krun-traffic-manager --tail=200 || true
+          echo "[debug] krun-helper status"
+          systemctl status krun-helper --no-pager || true
+          echo "[debug] krun-helper journal"
+          journalctl -u krun-helper --no-pager --since "5 minutes ago" || true
+          echo "[debug] active debug sessions"
+          krun debug list || true
+
       - name: Test krun debug disable
         run: |
           output=$(krun debug disable smoke-app)
@@ -258,6 +334,13 @@ jobs:
           done
           test "$(kubectl get deployment smoke-app -o jsonpath='{.spec.template.spec.containers[*].name}' 2>/dev/null | wc -w)" = "1" || true
 
+      - name: Test krun delete
+        run: |
+          output=$(krun delete smoke-app)
+          echo "$output"
+          echo "$output" | grep -q "Deleting smoke-app"
+          kubectl wait --for=delete deployment/smoke-app --timeout=120s || true
+
       - name: Test krun uninstall
         env:
           KRUN_MANIFEST_URL: http://localhost:8000/krun-runtime.yaml
@@ -269,15 +352,8 @@ jobs:
 
           output=$(krun uninstall)
           echo "$output"
-          echo "$output" | grep -q "Traffic manager uninstalled successfully"
+          echo "$output" | grep -q "traffic manager uninstalled"
           echo "$output" | grep -q "helper service uninstalled"
           kubectl wait --for=delete deployment/krun-traffic-manager -n krun-system --timeout=120s || true
           kubectl wait --for=delete namespace/krun-system --timeout=120s || true
           ! systemctl is-active krun-helper 2>/dev/null
-
-      - name: Test krun delete
-        run: |
-          output=$(krun delete smoke-app)
-          echo "$output"
-          echo "$output" | grep -q "Deleting smoke-app"
-          kubectl wait --for=delete deployment/smoke-app --timeout=120s || true

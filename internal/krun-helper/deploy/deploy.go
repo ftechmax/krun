@@ -13,7 +13,6 @@ import (
 
 	cfg "github.com/ftechmax/krun/internal/config"
 	"github.com/ftechmax/krun/internal/kube"
-	"github.com/ftechmax/krun/internal/utils"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,39 +31,48 @@ const (
 	restartedAtAnnotation = "kubectl.kubernetes.io/restartedAt"
 )
 
-func Deploy(projectName string, config cfg.Config, restart bool) {
-	fmt.Printf("Deploying %s (use remote registry: %v)\n", projectName, config.Registry == config.RemoteRegistry)
+func Deploy(ctx context.Context, out io.Writer, projectName string, config cfg.Config, restart bool) error {
+	if out == nil {
+		out = io.Discard
+	}
+
+	fmt.Fprintf(out, "Deploying %s (use remote registry: %v)\n", projectName, config.Registry == config.RemoteRegistry)
 
 	client, err := kube.NewClient(config.KubeConfig)
 	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to create Kubernetes client: %s", err.Error()), utils.Red))
-		return
+		return fmt.Errorf("failed to create kubernetes client: %w", err)
 	}
 
-	targets, err := handle(context.Background(), client, config, projectName, false)
+	targets, err := handle(ctx, client, config, projectName, false)
 	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Deploy failed: %s", err.Error()), utils.Red))
-		return
+		return fmt.Errorf("deploy failed: %w", err)
 	}
 
 	if restart && len(targets) > 0 {
-		if err := restartWorkloads(context.Background(), client, targets); err != nil {
-			fmt.Println(utils.Colorize(fmt.Sprintf("Restart failed: %s", err.Error()), utils.Red))
+		if err := restartWorkloads(ctx, client, targets); err != nil {
+			return fmt.Errorf("restart failed: %w", err)
 		}
 	}
+
+	return nil
 }
 
-func Delete(projectName string, config cfg.Config) {
-	fmt.Printf("Deleting %s\n", projectName)
-	client, err := kube.NewClient(config.KubeConfig)
-	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to create Kubernetes client: %s", err.Error()), utils.Red))
-		return
+func Delete(ctx context.Context, out io.Writer, projectName string, config cfg.Config) error {
+	if out == nil {
+		out = io.Discard
 	}
 
-	if _, err := handle(context.Background(), client, config, projectName, true); err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Delete failed: %s", err.Error()), utils.Red))
+	fmt.Fprintf(out, "Deleting %s\n", projectName)
+	client, err := kube.NewClient(config.KubeConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create kubernetes client: %w", err)
 	}
+
+	if _, err := handle(ctx, client, config, projectName, true); err != nil {
+		return fmt.Errorf("delete failed: %w", err)
+	}
+
+	return nil
 }
 
 func handle(ctx context.Context, client *kube.Client, config cfg.Config, projectName string, deleteMode bool) ([]restartTarget, error) {

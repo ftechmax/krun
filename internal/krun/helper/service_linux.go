@@ -1,6 +1,6 @@
 //go:build linux
 
-package debug
+package helper
 
 import (
 	"fmt"
@@ -20,6 +20,7 @@ After=network.target
 
 [Service]
 Type=notify
+%s
 ExecStart=%s --service --kubeconfig %s
 Restart=on-failure
 RestartSec=5
@@ -28,7 +29,7 @@ RestartSec=5
 WantedBy=multi-user.target
 `
 
-func installHelperService(binaryPath, kubeConfigPath string) error {
+func installHelperService(binaryPath, kubeConfigPath, userHome string) error {
 	// If already installed, stop and remove first for a clean update.
 	if isHelperServiceInstalled() {
 		if err := runSystemctl("stop", unitName); err != nil {
@@ -36,7 +37,14 @@ func installHelperService(binaryPath, kubeConfigPath string) error {
 		}
 	}
 
-	content := fmt.Sprintf(unitTemplate, binaryPath, kubeConfigPath)
+	environmentLine := ""
+	if trimmedUserHome := strings.TrimSpace(userHome); trimmedUserHome != "" {
+		escapedUserHome := strings.ReplaceAll(trimmedUserHome, "\\", "\\\\")
+		escapedUserHome = strings.ReplaceAll(escapedUserHome, "\"", "\\\"")
+		environmentLine = fmt.Sprintf("Environment=\"KRUN_HOME=%s\"\n", escapedUserHome)
+	}
+
+	content := fmt.Sprintf(unitTemplate, environmentLine, binaryPath, kubeConfigPath)
 	if err := os.WriteFile(unitPath, []byte(content), 0o600); err != nil {
 		return fmt.Errorf("write unit file: %w", err)
 	}

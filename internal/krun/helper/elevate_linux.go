@@ -1,6 +1,6 @@
 //go:build linux
 
-package debug
+package helper
 
 import (
 	"fmt"

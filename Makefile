@@ -19,7 +19,7 @@ WINDOWS_HELPER_BIN ?= krun-helper.exe
 LINUX_HELPER_BIN ?= krun-helper
 
 
-.PHONY: build-all build-windows build-linux clean lint lint-fix \
+.PHONY: build-all build-windows build-linux clean lint lint-fix install-linters \
 	build-krun-windows build-krun-linux build-krun-cross \
 	build-helper-windows build-helper-linux build-helper-cross patch-helper-windows-uac
 
@@ -56,3 +56,7 @@ lint:
 
 lint-fix:
 	golangci-lint run --fix --timeout=5m
+
+install-linters:
+	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+	go install github.com/securego/gosec/v2/cmd/gosec@latest

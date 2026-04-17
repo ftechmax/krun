@@ -4,12 +4,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"strings"
 
 	cfg "github.com/ftechmax/krun/internal/config"
-	"github.com/ftechmax/krun/internal/krun/build"
-	"github.com/ftechmax/krun/internal/krun/debug"
-	"github.com/ftechmax/krun/internal/krun/deploy"
+	"github.com/ftechmax/krun/internal/contracts"
+	deploy "github.com/ftechmax/krun/internal/krun-helper/deploy"
+	"github.com/ftechmax/krun/internal/krun/helper"
+	"github.com/ftechmax/krun/internal/krun/helperclient"
+	krunruntime "github.com/ftechmax/krun/internal/krun/runtime"
 	"github.com/ftechmax/krun/internal/utils"
 	"github.com/spf13/cobra"
 )
@@ -41,7 +43,7 @@ func main() {
 		&cobra.Command{
 			Use:     "list",
 			Short:   "List all services or projects",
-			PreRun:  preRunInit,
+			PreRun:  preRunKubeConfigOnly,
 			Run:     handleList,
 			Example: "krun list",
 		},
@@ -51,7 +53,7 @@ func main() {
 		Use:    "build <project|service>",
 		Short:  "Build a project or specific service",
 		Args:   cobra.MinimumNArgs(1),
-		PreRun: preRunInit,
+		PreRun: preRunKubeConfigOnly,
 		Run:    handleBuild,
 	}
 	buildCmd.Flags().Bool("skip-web", false, "Skip building the web component")
@@ -63,7 +65,7 @@ func main() {
 		Use:    "deploy <project>",
 		Short:  "Deploy a project",
 		Args:   cobra.MinimumNArgs(1),
-		PreRun: preRunInit,
+		PreRun: preRunKubeConfigOnly,
 		Run:    handleDeploy,
 	}
 	deployCmd.Flags().Bool("use-remote-registry", false, "Use remote registry for deploy")
@@ -74,7 +76,7 @@ func main() {
 		Use:     "delete <project>",
 		Short:   "Delete a project",
 		Args:    cobra.MinimumNArgs(1),
-		PreRun:  preRunInit,
+		PreRun:  preRunKubeConfigOnly,
 		Run:     handleDelete,
 		Example: "krun delete myproject",
 	}
@@ -109,13 +111,13 @@ func main() {
 			Hidden:           true,
 			Args:             cobra.NoArgs,
 			PersistentPreRun: preRunKubeConfigOnly,
-			Run:              func(cmd *cobra.Command, args []string) { debug.HelperInstall(config) },
+			Run:              func(cmd *cobra.Command, args []string) { helper.HelperInstall(config) },
 		},
 		&cobra.Command{
 			Use:    "__helper-uninstall",
 			Hidden: true,
 			Args:   cobra.NoArgs,
-			Run:    func(cmd *cobra.Command, args []string) { debug.HelperUninstall() },
+			Run:    func(cmd *cobra.Command, args []string) { helper.HelperUninstall() },
 		},
 	)
 
@@ -212,34 +214,27 @@ func initializeKubeConfig(optKubeConfig string) {
 }
 
 func handleList(cmd *cobra.Command, args []string) {
-	if len(services) == 0 {
+	response, err := helperclient.WorkspaceList(config)
+	if err != nil {
+		fmt.Println(utils.Colorize(err.Error(), utils.Red))
+		os.Exit(1)
+	}
+
+	if len(response.Services) == 0 {
 		fmt.Println(utils.Colorize("No services found", utils.Yellow))
 		return
 	}
 
 	fmt.Println("Services")
 	fmt.Println("--------")
-	for _, service := range services {
+	for _, service := range response.Services {
 		fmt.Println(service.Name)
 	}
 	fmt.Println("")
 
-	projects := make(map[string]bool)
-	for _, service := range services {
-		if service.Project != "" {
-			projects[service.Project] = true
-		}
-	}
-
-	projectNames := make([]string, 0, len(projects))
-	for project := range projects {
-		projectNames = append(projectNames, project)
-	}
-	sort.Strings(projectNames)
-
 	fmt.Println("Projects")
 	fmt.Println("--------")
-	for _, project := range projectNames {
+	for _, project := range response.Projects {
 		fmt.Println(project)
 	}
 	fmt.Println("")
@@ -249,55 +244,91 @@ func handleBuild(cmd *cobra.Command, args []string) {
 	skipWeb, _ := cmd.Flags().GetBool("skip-web")
 	forceBuild, _ := cmd.Flags().GetBool("force")
 	flush, _ := cmd.Flags().GetBool("flush")
-	argServiceName := args[0]
-	serviceName, projectName, err := getServiceNameAndProject(argServiceName)
+
+	err := helperclient.WorkspaceBuild(config, contracts.BuildRequest{
+		Target:  args[0],
+		SkipWeb: skipWeb,
+		Force:   forceBuild,
+		Flush:   flush,
+	}, os.Stdout)
 	if err != nil {
 		fmt.Println(utils.Colorize(err.Error(), utils.Red))
-		return
+		os.Exit(1)
 	}
-	servicesToBuild := []cfg.Service{}
-	for _, s := range services {
-		if serviceName != "" {
-			if s.Name == serviceName {
-				servicesToBuild = append(servicesToBuild, s)
-				break
-			}
-		} else if projectName != "" {
-			if s.Project == projectName {
-				servicesToBuild = append(servicesToBuild, s)
-			}
-		}
-	}
-	build.Build(projectName, servicesToBuild, skipWeb, forceBuild, flush, config)
 }
 
 func handleDeploy(cmd *cobra.Command, args []string) {
 	useRemote, _ := cmd.Flags().GetBool("use-remote-registry")
 	noRestart, _ := cmd.Flags().GetBool("no-restart")
-	argServiceName := args[0]
-	if useRemote {
-		config.Registry = config.RemoteRegistry
-	}
-	_, projectName, err := getServiceNameAndProject(argServiceName)
+
+	err := helperclient.WorkspaceDeploy(config, contracts.DeployRequest{
+		Target:            args[0],
+		UseRemoteRegistry: useRemote,
+		NoRestart:         noRestart,
+	}, os.Stdout)
 	if err != nil {
 		fmt.Println(utils.Colorize(err.Error(), utils.Red))
-		return
+		os.Exit(1)
 	}
-	deploy.Deploy(projectName, config, !noRestart)
 }
 
 func handleDelete(cmd *cobra.Command, args []string) {
-	argServiceName := args[0]
-	_, projectName, err := getServiceNameAndProject(argServiceName)
+	err := helperclient.WorkspaceDelete(config, contracts.DeleteRequest{
+		Target: args[0],
+	}, os.Stdout)
 	if err != nil {
 		fmt.Println(utils.Colorize(err.Error(), utils.Red))
-		return
+		os.Exit(1)
 	}
-	deploy.Delete(projectName, config)
 }
 
 func handleDebugList(cmd *cobra.Command, args []string) {
-	debug.List(config)
+	sessions, err := helperclient.HelperDebugSessionsList(config)
+	if err != nil {
+		fmt.Println(utils.Colorize(fmt.Sprintf("cannot list debug sessions via helper: %v", err), utils.Red))
+		return
+	}
+
+	if len(sessions) == 0 {
+		fmt.Println(utils.Colorize("No active debug sessions", utils.Yellow))
+		return
+	}
+
+	fmt.Println("Active debug sessions")
+	fmt.Println("---------------------")
+	for _, session := range sessions {
+		serviceName := strings.TrimSpace(session.Context.ServiceName)
+		namespace := strings.TrimSpace(session.Context.Namespace)
+		if namespace == "" {
+			namespace = "default"
+		}
+
+		fmt.Printf("Service: %s (namespace: %s)\n", serviceName, namespace)
+		fmt.Printf("Intercept port: %d\n", session.Context.InterceptPort)
+		fmt.Println("Service dependencies:")
+
+		if len(session.Context.ServiceDependencies) == 0 {
+			fmt.Println("  (none)")
+		} else {
+			for _, dependency := range session.Context.ServiceDependencies {
+				host := strings.TrimSpace(dependency.Host)
+				if host == "" {
+					service := strings.TrimSpace(dependency.Service)
+					dependencyNamespace := strings.TrimSpace(dependency.Namespace)
+					if dependencyNamespace == "" {
+						dependencyNamespace = "default"
+					}
+					if service == "" {
+						host = "(unknown)"
+					} else {
+						host = fmt.Sprintf("%s.%s.svc", service, dependencyNamespace)
+					}
+				}
+				fmt.Printf("  - %s:%d\n", host, dependency.Port)
+			}
+		}
+		fmt.Println("")
+	}
 }
 
 func handleDebugEnable(cmd *cobra.Command, args []string) {
@@ -316,7 +347,22 @@ func handleDebugEnable(cmd *cobra.Command, args []string) {
 		return
 	}
 	fmt.Printf("Enabling debug mode for service %s\n", argServiceName)
-	debug.Enable(service, config, containerName)
+
+	response, err := helperclient.HelperDebugEnable(config, buildDebugServiceContext(service))
+	if err != nil {
+		fmt.Println(utils.Colorize(fmt.Sprintf("cannot apply debug enable via helper: %v", err), utils.Red))
+		return
+	}
+	if !response.Success {
+		fmt.Println(utils.Colorize(fmt.Sprintf("helper refused debug enable: %s", response.Message), utils.Red))
+		return
+	}
+
+	fmt.Println(utils.Colorize("Session created", utils.Green))
+
+	if err := deploy.CreateEnvFile(service, config, containerName); err != nil {
+		fmt.Println(utils.Colorize(fmt.Sprintf("warning: could not create env file: %v", err), utils.Yellow))
+	}
 }
 
 func handleDebugDisable(cmd *cobra.Command, args []string) {
@@ -333,51 +379,69 @@ func handleDebugDisable(cmd *cobra.Command, args []string) {
 		return
 	}
 	fmt.Printf("Disabling debug mode for service %s\n", argServiceName)
-	debug.Disable(service, config)
+
+	response, err := helperclient.HelperDebugDisable(config, buildDebugServiceContext(service))
+	if err != nil {
+		fmt.Println(utils.Colorize(fmt.Sprintf("cannot apply debug disable via helper: %v", err), utils.Red))
+		return
+	}
+	if !response.Success {
+		fmt.Println(utils.Colorize(fmt.Sprintf("helper refused debug disable: %s", response.Message), utils.Red))
+		return
+	}
+
+	if response.Message == "no active session" {
+		fmt.Println(utils.Colorize("No active debug session found", utils.Yellow))
+	} else {
+		fmt.Println(utils.Colorize("Session removed", utils.Green))
+		if err := deploy.RemoveEnvFile(service, config); err != nil {
+			fmt.Println(utils.Colorize(fmt.Sprintf("warning: could not remove env file: %v", err), utils.Yellow))
+		}
+	}
 }
 
 func handleDebugHelperStop(cmd *cobra.Command, args []string) {
-	debug.HelperStop()
+	helper.HelperStop()
 }
 
 func handleInstall(cmd *cobra.Command, args []string) {
-	debug.HelperInstall(config)
-	debug.RuntimeInstall(config, version)
+	helper.HelperInstall(config)
+	krunruntime.RuntimeInstall(config, version)
 }
 
 func handleUninstall(cmd *cobra.Command, args []string) {
-	debug.RuntimeUninstall(config, version)
-	debug.HelperUninstall()
+	krunruntime.RuntimeUninstall(config, version)
+	helper.HelperUninstall()
 }
 
 func handleStatus(cmd *cobra.Command, args []string) {
 	fmt.Println("krun-helper")
 	fmt.Println("-----------")
-	debug.HelperStatus(config)
+	helper.HelperStatus(config)
 	fmt.Println("")
 	fmt.Println("traffic-manager")
 	fmt.Println("---------------")
-	debug.RuntimeStatus(config)
+	krunruntime.RuntimeStatus(config)
 }
 
-func getServiceNameAndProject(name string) (string, string, error) {
-	serviceName := ""
-	projectName := ""
-	for _, s := range services {
-		if s.Name == name {
-			serviceName = s.Name
-			projectName = s.Project
-			break
-		}
-		if s.Project == name {
-			projectName = s.Project
-			break
-		}
+func buildDebugServiceContext(service cfg.Service) contracts.DebugServiceContext {
+	dependencies := make([]contracts.DebugServiceDependencyContext, 0, len(service.ServiceDependencies))
+	for _, dependency := range service.ServiceDependencies {
+		dependencies = append(dependencies, contracts.DebugServiceDependencyContext{
+			Host:      dependency.Host,
+			Namespace: dependency.Namespace,
+			Service:   dependency.Service,
+			Port:      dependency.Port,
+			Aliases:   dependency.Aliases,
+		})
 	}
 
-	if serviceName == "" && projectName == "" {
-		return "", "", fmt.Errorf("service or project '%s' not found\nrun krun list to show available options", name)
+	return contracts.DebugServiceContext{
+		Project:             service.Project,
+		ServiceName:         service.Name,
+		Namespace:           service.Namespace,
+		ContainerPort:       service.ContainerPort,
+		InterceptPort:       service.InterceptPort,
+		ServiceDependencies: dependencies,
 	}
-
-	return serviceName, projectName, nil
 }

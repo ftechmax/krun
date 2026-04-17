@@ -23,6 +23,7 @@ linters:
         - io.Copy
         - fmt.Fprintf
         - fmt.Fprint
+        - fmt.Fprintln
         - (*os.File).Close
         - (io.Closer).Close
         - (*github.com/spf13/pflag.FlagSet).GetBool
