@@ -6,18 +6,22 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os/user"
+	"strings"
 
 	cfg "github.com/ftechmax/krun/internal/config"
 	"github.com/ftechmax/krun/internal/contracts"
 	"github.com/ftechmax/krun/internal/krun/helper"
 )
 
+var lookupCurrentUser = user.Current
+
 func HelperDebugSessionsList(config cfg.Config) ([]contracts.HelperDebugSession, error) {
 	return helperDebugSessionsList(config)
 }
 
-func HelperDebugEnable(config cfg.Config, context contracts.DebugServiceContext) (contracts.HelperResponse, error) {
-	return helperDebugEnable(config, context)
+func HelperDebugEnable(config cfg.Config, context contracts.DebugServiceContext, containerName string) (contracts.HelperResponse, error) {
+	return helperDebugEnable(config, context, containerName)
 }
 
 func HelperDebugDisable(config cfg.Config, context contracts.DebugServiceContext) (contracts.HelperResponse, error) {
@@ -36,12 +40,16 @@ func helperDebugSessionsList(config cfg.Config) ([]contracts.HelperDebugSession,
 	return response.Sessions, nil
 }
 
-func helperDebugEnable(config cfg.Config, context contracts.DebugServiceContext) (contracts.HelperResponse, error) {
+func helperDebugEnable(config cfg.Config, context contracts.DebugServiceContext, containerName string) (contracts.HelperResponse, error) {
 	if err := helper.EnsureStarted(config); err != nil {
 		return contracts.HelperResponse{}, fmt.Errorf("helper unreachable: %w", err)
 	}
 
-	request := contracts.DebugSessionCommandRequest{Context: context}
+	request := contracts.DebugSessionCommandRequest{
+		Context:       context,
+		ContainerName: containerName,
+		User:          resolveDebugSessionUser(),
+	}
 	var response contracts.HelperResponse
 	err := helperJSONRequest(http.MethodPost, "/v1/debug/enable", request, &response)
 	return response, err
@@ -52,7 +60,7 @@ func helperDebugDisable(config cfg.Config, context contracts.DebugServiceContext
 		return contracts.HelperResponse{}, fmt.Errorf("helper unreachable: %w", err)
 	}
 
-	request := contracts.DebugSessionCommandRequest{Context: context}
+	request := contracts.DebugSessionCommandRequest{Context: context, User: resolveDebugSessionUser()}
 	var response contracts.HelperResponse
 	err := helperJSONRequest(http.MethodPost, "/v1/debug/disable", request, &response)
 	return response, err
@@ -97,4 +105,16 @@ func helperJSONRequest(method string, path string, payload any, responseTarget a
 	}
 
 	return nil
+}
+
+func resolveDebugSessionUser() contracts.DebugSessionUser {
+	record, err := lookupCurrentUser()
+	if err != nil {
+		return contracts.DebugSessionUser{}
+	}
+
+	return contracts.DebugSessionUser{
+		UID: strings.TrimSpace(record.Uid),
+		GID: strings.TrimSpace(record.Gid),
+	}
 }

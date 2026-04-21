@@ -459,6 +459,208 @@ func TestDebugEnableHandlerFailsWhenManagerForwardEnsureFails(t *testing.T) {
 	}
 }
 
+func TestDebugEnableHandlerWritesEnvFileWithContainerName(t *testing.T) {
+	resetHelperGlobals(t)
+
+	helperKrunConfigLoaded = true
+	helperKrunConfig = cfg.KrunConfig{
+		KrunSourceConfig: cfg.KrunSourceConfig{Path: "/workspace", SearchDepth: 1},
+	}
+	discoverServices = func(_ string, _ int) ([]cfg.Service, map[string]string, error) {
+		return []cfg.Service{
+			{Name: "svc-a", Project: "proj-a", Path: "services/a"},
+			{Name: "other", Project: "proj-b"},
+		}, map[string]string{"proj-a": "apps/proj-a"}, nil
+	}
+
+	portForwardRegistry = &fakePortForwardRegistry{}
+	managerSessionClient = &fakeManagerSessionClient{createSessionID: "mgr-session-1"}
+	streamRegistry = &fakeStreamRegistry{}
+
+	hostfileUpdate = func(entries []contracts.HostsEntry) error { return nil }
+	t.Cleanup(func() { hostfileUpdate = hostfile.Update })
+
+	var gotService cfg.Service
+	var gotConfig cfg.Config
+	var gotContainer string
+	var gotUser contracts.DebugSessionUser
+	envFileCalls := 0
+	createEnvFile = func(service cfg.Service, config cfg.Config, containerName string, requestUser contracts.DebugSessionUser) error {
+		envFileCalls++
+		gotService = service
+		gotConfig = config
+		gotContainer = containerName
+		gotUser = requestUser
+		return nil
+	}
+
+	handler := newHandler(make(chan struct{}, 1))
+	body, _ := json.Marshal(contracts.DebugSessionCommandRequest{
+		ContainerName: "custom-container",
+		User: contracts.DebugSessionUser{
+			UID: "1000",
+			GID: "1001",
+		},
+		Context: contracts.DebugServiceContext{
+			Project:       "proj-a",
+			ServiceName:   "svc-a",
+			ContainerPort: 8080,
+			InterceptPort: 5001,
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/debug/enable", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+	if envFileCalls != 1 {
+		t.Fatalf("expected createEnvFile to be called once, got %d", envFileCalls)
+	}
+	if gotService.Name != "svc-a" || gotService.Project != "proj-a" || gotService.Path != "services/a" {
+		t.Fatalf("unexpected service passed to createEnvFile: %+v", gotService)
+	}
+	if gotContainer != "custom-container" {
+		t.Fatalf("expected container name %q, got %q", "custom-container", gotContainer)
+	}
+	if gotUser.UID != "1000" || gotUser.GID != "1001" {
+		t.Fatalf("unexpected user passed to createEnvFile: %+v", gotUser)
+	}
+	if gotConfig.ProjectPaths["proj-a"] != "apps/proj-a" {
+		t.Fatalf("expected project paths to be forwarded, got %+v", gotConfig.ProjectPaths)
+	}
+}
+
+func TestDebugEnableHandlerSucceedsWhenEnvFileFails(t *testing.T) {
+	resetHelperGlobals(t)
+
+	helperKrunConfigLoaded = true
+	helperKrunConfig = cfg.KrunConfig{
+		KrunSourceConfig: cfg.KrunSourceConfig{Path: "/workspace", SearchDepth: 1},
+	}
+	discoverServices = func(_ string, _ int) ([]cfg.Service, map[string]string, error) {
+		return []cfg.Service{{Name: "svc-a", Project: "proj-a"}}, nil, nil
+	}
+
+	portForwardRegistry = &fakePortForwardRegistry{}
+	managerSessionClient = &fakeManagerSessionClient{createSessionID: "mgr-session-1"}
+	streamRegistry = &fakeStreamRegistry{}
+
+	hostfileUpdate = func(entries []contracts.HostsEntry) error { return nil }
+	t.Cleanup(func() { hostfileUpdate = hostfile.Update })
+
+	createEnvFile = func(_ cfg.Service, _ cfg.Config, _ string, _ contracts.DebugSessionUser) error {
+		return errors.New("pod not running")
+	}
+
+	handler := newHandler(make(chan struct{}, 1))
+	body, _ := json.Marshal(contracts.DebugSessionCommandRequest{
+		Context: contracts.DebugServiceContext{
+			Project:       "proj-a",
+			ServiceName:   "svc-a",
+			ContainerPort: 8080,
+			InterceptPort: 5001,
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/debug/enable", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected env file failure to be best-effort, got status %d", rec.Code)
+	}
+	if _, ok := managerSessionsRegistry.Get("proj-a/svc-a"); !ok {
+		t.Fatalf("expected session to remain registered after env file failure")
+	}
+}
+
+func TestDebugDisableHandlerRemovesEnvFile(t *testing.T) {
+	resetHelperGlobals(t)
+
+	helperKrunConfigLoaded = true
+	helperKrunConfig = cfg.KrunConfig{
+		KrunSourceConfig: cfg.KrunSourceConfig{Path: "/workspace", SearchDepth: 1},
+	}
+	discoverServices = func(_ string, _ int) ([]cfg.Service, map[string]string, error) {
+		return []cfg.Service{{Name: "svc-a", Project: "proj-a", Path: "services/a"}}, nil, nil
+	}
+
+	portForwardRegistry = &fakePortForwardRegistry{}
+	managerSessionClient = &fakeManagerSessionClient{}
+	streamRegistry = &fakeStreamRegistry{}
+
+	managerSessionsRegistry.Upsert("proj-a/svc-a", "mgr-session-1")
+	sessionsRegistry.Upsert("proj-a/svc-a", contracts.DebugServiceContext{
+		Project:     "proj-a",
+		ServiceName: "svc-a",
+	})
+
+	hostfileUpdate = func(entries []contracts.HostsEntry) error { return nil }
+	t.Cleanup(func() { hostfileUpdate = hostfile.Update })
+
+	var gotService cfg.Service
+	removeCalls := 0
+	removeEnvFile = func(service cfg.Service, _ cfg.Config) error {
+		removeCalls++
+		gotService = service
+		return nil
+	}
+
+	handler := newHandler(make(chan struct{}, 1))
+	body, _ := json.Marshal(contracts.DebugSessionCommandRequest{
+		Context: contracts.DebugServiceContext{
+			Project:     "proj-a",
+			ServiceName: "svc-a",
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/debug/disable", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+	if removeCalls != 1 {
+		t.Fatalf("expected removeEnvFile to be called once, got %d", removeCalls)
+	}
+	if gotService.Name != "svc-a" || gotService.Path != "services/a" {
+		t.Fatalf("unexpected service passed to removeEnvFile: %+v", gotService)
+	}
+}
+
+func TestDebugDisableHandlerSkipsEnvFileWhenNoActiveSession(t *testing.T) {
+	resetHelperGlobals(t)
+
+	removeCalls := 0
+	removeEnvFile = func(_ cfg.Service, _ cfg.Config) error {
+		removeCalls++
+		return nil
+	}
+
+	handler := newHandler(make(chan struct{}, 1))
+	body, _ := json.Marshal(contracts.DebugSessionCommandRequest{
+		Context: contracts.DebugServiceContext{
+			Project:     "proj-a",
+			ServiceName: "svc-a",
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/debug/disable", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+	if removeCalls != 0 {
+		t.Fatalf("expected removeEnvFile not to be called without an active session, got %d", removeCalls)
+	}
+}
+
 func TestDebugSessionsListMethodNotAllowed(t *testing.T) {
 	resetHelperGlobals(t)
 	handler := newHandler(make(chan struct{}, 1))
@@ -485,6 +687,8 @@ func resetHelperGlobals(t *testing.T) {
 	runWorkspaceBuild = workspacebuild.Build
 	runWorkspaceDeploy = workspacedeploy.Deploy
 	runWorkspaceDelete = workspacedeploy.Delete
+	createEnvFile = func(_ cfg.Service, _ cfg.Config, _ string, _ contracts.DebugSessionUser) error { return nil }
+	removeEnvFile = func(_ cfg.Service, _ cfg.Config) error { return nil }
 	helperKrunConfig = cfg.KrunConfig{}
 	helperKrunConfigLoaded = false
 	helperKubeConfigPath = ""

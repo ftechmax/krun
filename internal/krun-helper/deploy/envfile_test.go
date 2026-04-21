@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	cfg "github.com/ftechmax/krun/internal/config"
+	"github.com/ftechmax/krun/internal/contracts"
 )
 
 func TestServiceDirBasic(t *testing.T) {
@@ -231,7 +232,7 @@ func TestWriteDotEnv(t *testing.T) {
 		{Key: "KEY2", Value: "value2"},
 	}
 
-	if err := writeDotEnv(dir, vars); err != nil {
+	if err := writeDotEnv(dir, vars, contracts.DebugSessionUser{}); err != nil {
 		t.Fatalf("writeDotEnv: %v", err)
 	}
 

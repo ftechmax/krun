@@ -10,6 +10,7 @@ import (
 	"time"
 
 	cfg "github.com/ftechmax/krun/internal/config"
+	"github.com/ftechmax/krun/internal/contracts"
 	"github.com/ftechmax/krun/internal/kube"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,7 +39,7 @@ type envVar struct {
 	Value string
 }
 
-func CreateEnvFile(service cfg.Service, config cfg.Config, containerName string) error {
+func CreateEnvFile(service cfg.Service, config cfg.Config, containerName string, requestUser contracts.DebugSessionUser) error {
 	dir, err := serviceDir(service, config)
 	if err != nil {
 		return err
@@ -70,7 +71,7 @@ func CreateEnvFile(service cfg.Service, config cfg.Config, containerName string)
 	}
 
 	vars := filterEnvVars(parseEnvVars(envOutput))
-	return writeDotEnv(dir, vars)
+	return writeDotEnv(dir, vars, requestUser)
 }
 
 func RemoveEnvFile(service cfg.Service, config cfg.Config) error {
@@ -127,12 +128,20 @@ func filterEnvVars(vars []envVar) []envVar {
 	return filtered
 }
 
-func writeDotEnv(dir string, vars []envVar) error {
+func writeDotEnv(dir string, vars []envVar, requestUser contracts.DebugSessionUser) error {
 	var buf strings.Builder
 	for _, v := range vars {
 		fmt.Fprintf(&buf, "%s=%s\n", v.Key, v.Value)
 	}
-	return os.WriteFile(filepath.Join(dir, ".env"), []byte(buf.String()), 0o600)
+
+	path := filepath.Join(dir, ".env")
+	if err := os.WriteFile(path, []byte(buf.String()), 0o600); err != nil {
+		return err
+	}
+	if err := assignFileOwnership(path, requestUser); err != nil {
+		return err
+	}
+	return nil
 }
 
 func serviceDir(service cfg.Service, config cfg.Config) (string, error) {

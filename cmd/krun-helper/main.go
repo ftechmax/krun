@@ -79,6 +79,8 @@ var (
 	runWorkspaceBuild               = workspacebuild.Build
 	runWorkspaceDeploy              = workspacedeploy.Deploy
 	runWorkspaceDelete              = workspacedeploy.Delete
+	createEnvFile                   = workspacedeploy.CreateEnvFile
+	removeEnvFile                   = workspacedeploy.RemoveEnvFile
 	helperKrunConfig                cfg.KrunConfig
 	helperKrunConfigLoaded          bool
 	helperKubeConfigPath            string
@@ -790,6 +792,8 @@ func handleDebugEnable(w http.ResponseWriter, r *http.Request) {
 	managerSessionsRegistry.Upsert(sessionKey, managerSession.SessionID)
 	sessionsRegistry.Upsert(sessionKey, req.Context)
 
+	createServiceEnvFile(req.Context.ServiceName, req.ContainerName, req.User)
+
 	writeJSON(w, http.StatusOK, contracts.HelperResponse{
 		Success: true,
 		Message: "debug enable applied",
@@ -876,10 +880,55 @@ func handleDebugDisable(w http.ResponseWriter, r *http.Request) {
 		managerSessionsRegistry.Remove(sessionKey)
 	}
 
+	removeServiceEnvFile(req.Context.ServiceName)
+
 	writeJSON(w, http.StatusOK, contracts.HelperResponse{
 		Success: true,
 		Message: "debug disable applied",
 	})
+}
+
+func createServiceEnvFile(serviceName, containerName string, user contracts.DebugSessionUser) {
+	conf, services, err := buildConfig()
+	if err != nil {
+		fmt.Printf("warning: could not load services for env file: %v\n", err)
+		return
+	}
+	service, ok := findServiceByName(services, serviceName)
+	if !ok {
+		return
+	}
+	if err := createEnvFile(service, conf, containerName, user); err != nil {
+		fmt.Printf("warning: could not create env file: %v\n", err)
+	}
+}
+
+func removeServiceEnvFile(serviceName string) {
+	conf, services, err := buildConfig()
+	if err != nil {
+		fmt.Printf("warning: could not load services for env file removal: %v\n", err)
+		return
+	}
+	service, ok := findServiceByName(services, serviceName)
+	if !ok {
+		return
+	}
+	if err := removeEnvFile(service, conf); err != nil {
+		fmt.Printf("warning: could not remove env file: %v\n", err)
+	}
+}
+
+func findServiceByName(services []cfg.Service, name string) (cfg.Service, bool) {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return cfg.Service{}, false
+	}
+	for _, s := range services {
+		if s.Name == trimmed {
+			return s, true
+		}
+	}
+	return cfg.Service{}, false
 }
 
 func handleDebugSessionsList(w http.ResponseWriter, r *http.Request) {

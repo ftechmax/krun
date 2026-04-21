@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	osuser "os/user"
 	"strings"
 	"testing"
 
@@ -13,6 +14,15 @@ import (
 )
 
 func TestHelperDebugEnableSendsRequestAndParsesResponse(t *testing.T) {
+	originalLookupCurrentUser := lookupCurrentUser
+	lookupCurrentUser = func() (*osuser.User, error) {
+		return &osuser.User{
+			Uid: "1000",
+			Gid: "1001",
+		}, nil
+	}
+	t.Cleanup(func() { lookupCurrentUser = originalLookupCurrentUser })
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/healthz":
@@ -30,7 +40,12 @@ func TestHelperDebugEnableSendsRequestAndParsesResponse(t *testing.T) {
 			if request.Context.ServiceName != "svc-a" {
 				t.Fatalf("unexpected service name %q", request.Context.ServiceName)
 			}
-
+			if request.ContainerName != "custom-container" {
+				t.Fatalf("unexpected container name %q", request.ContainerName)
+			}
+			if request.User.UID != "1000" || request.User.GID != "1001" {
+				t.Fatalf("unexpected uid/gid in request user: %+v", request.User)
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"success":true,"message":"debug enable applied"}`))
 		default:
@@ -43,7 +58,7 @@ func TestHelperDebugEnableSendsRequestAndParsesResponse(t *testing.T) {
 	helper.BaseURL = server.URL
 	t.Cleanup(func() { helper.BaseURL = originalBaseURL })
 
-	response, err := helperDebugEnable(cfg.Config{}, contracts.DebugServiceContext{ServiceName: "svc-a"})
+	response, err := helperDebugEnable(cfg.Config{}, contracts.DebugServiceContext{ServiceName: "svc-a"}, "custom-container")
 	if err != nil {
 		t.Fatalf("helperDebugEnable returned error: %v", err)
 	}

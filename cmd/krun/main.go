@@ -8,7 +8,6 @@ import (
 
 	cfg "github.com/ftechmax/krun/internal/config"
 	"github.com/ftechmax/krun/internal/contracts"
-	deploy "github.com/ftechmax/krun/internal/krun-helper/deploy"
 	"github.com/ftechmax/krun/internal/krun/helper"
 	"github.com/ftechmax/krun/internal/krun/helperclient"
 	krunruntime "github.com/ftechmax/krun/internal/krun/runtime"
@@ -348,7 +347,7 @@ func handleDebugEnable(cmd *cobra.Command, args []string) {
 	}
 	fmt.Printf("Enabling debug mode for service %s\n", argServiceName)
 
-	response, err := helperclient.HelperDebugEnable(config, buildDebugServiceContext(service))
+	response, err := helperclient.HelperDebugEnable(config, buildDebugServiceContext(service), containerName)
 	if err != nil {
 		fmt.Println(utils.Colorize(fmt.Sprintf("cannot apply debug enable via helper: %v", err), utils.Red))
 		return
@@ -359,10 +358,6 @@ func handleDebugEnable(cmd *cobra.Command, args []string) {
 	}
 
 	fmt.Println(utils.Colorize("Session created", utils.Green))
-
-	if err := deploy.CreateEnvFile(service, config, containerName); err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("warning: could not create env file: %v", err), utils.Yellow))
-	}
 }
 
 func handleDebugDisable(cmd *cobra.Command, args []string) {
@@ -394,9 +389,6 @@ func handleDebugDisable(cmd *cobra.Command, args []string) {
 		fmt.Println(utils.Colorize("No active debug session found", utils.Yellow))
 	} else {
 		fmt.Println(utils.Colorize("Session removed", utils.Green))
-		if err := deploy.RemoveEnvFile(service, config); err != nil {
-			fmt.Println(utils.Colorize(fmt.Sprintf("warning: could not remove env file: %v", err), utils.Yellow))
-		}
 	}
 }
 

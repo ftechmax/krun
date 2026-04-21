@@ -59,8 +59,15 @@ type DebugServiceContext struct {
 }
 
 type DebugSessionCommandRequest struct {
-	SessionKey string              `json:"session_key,omitempty"`
-	Context    DebugServiceContext `json:"context"`
+	SessionKey    string              `json:"session_key,omitempty"`
+	ContainerName string              `json:"container_name,omitempty"`
+	User          DebugSessionUser    `json:"user,omitempty"`
+	Context       DebugServiceContext `json:"context"`
+}
+
+type DebugSessionUser struct {
+	UID string `json:"uid,omitempty"`
+	GID string `json:"gid,omitempty"`
 }
 
 type HelperDebugSession struct {
