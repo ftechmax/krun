@@ -1,12 +1,8 @@
 package utils
 
 import (
-	"bytes"
 	"fmt"
-	"log"
-	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -78,45 +74,45 @@ func GetExecutablePath() (string, error) {
 	return exePath, nil
 }
 
-func RunCmd(name string, args ...string) error {
-	var stderr bytes.Buffer
-	cmd := exec.Command(name, args...) //nolint:gosec // Generic utility used with trusted call sites.
-	cmd.Stdout = log.Writer()
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		log.Printf("command failed\n%v", Colorize(stderr.String(), Red))
-		return err
-	}
+// func RunCmd(name string, args ...string) error {
+// 	var stderr bytes.Buffer
+// 	cmd := exec.Command(name, args...) //nolint:gosec // Generic utility used with trusted call sites.
+// 	cmd.Stdout = log.Writer()
+// 	cmd.Stderr = &stderr
+// 	if err := cmd.Run(); err != nil {
+// 		log.Printf("command failed\n%v", Colorize(stderr.String(), Red))
+// 		return err
+// 	}
 
-	return nil
-}
+// 	return nil
+// }
 
-func RunCmdStdin(stdin string, name string, args ...string) error {
-	var stderr bytes.Buffer
-	cmd := exec.Command(name, args...) //nolint:gosec // Generic utility used with trusted call sites.
-	cmd.Stdin = strings.NewReader(stdin)
-	cmd.Stdout = log.Writer()
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		log.Printf("command failed\n%v", Colorize(stderr.String(), Red))
-		return err
-	}
+// func RunCmdStdin(stdin string, name string, args ...string) error {
+// 	var stderr bytes.Buffer
+// 	cmd := exec.Command(name, args...) //nolint:gosec // Generic utility used with trusted call sites.
+// 	cmd.Stdin = strings.NewReader(stdin)
+// 	cmd.Stdout = log.Writer()
+// 	cmd.Stderr = &stderr
+// 	if err := cmd.Run(); err != nil {
+// 		log.Printf("command failed\n%v", Colorize(stderr.String(), Red))
+// 		return err
+// 	}
 
-	return nil
-}
+// 	return nil
+// }
 
-func GetFreePort() (port int, err error) {
-	var a *net.TCPAddr
-	if a, err = net.ResolveTCPAddr("tcp", "localhost:0"); err == nil {
-		var l *net.TCPListener
-		if l, err = net.ListenTCP("tcp", a); err == nil {
-			defer l.Close()
-			tcpAddr, ok := l.Addr().(*net.TCPAddr)
-			if !ok {
-				return 0, fmt.Errorf("unexpected listener address type %T", l.Addr())
-			}
-			return tcpAddr.Port, nil
-		}
-	}
-	return
-}
+// func GetFreePort() (port int, err error) {
+// 	var a *net.TCPAddr
+// 	if a, err = net.ResolveTCPAddr("tcp", "localhost:0"); err == nil {
+// 		var l *net.TCPListener
+// 		if l, err = net.ListenTCP("tcp", a); err == nil {
+// 			defer l.Close()
+// 			tcpAddr, ok := l.Addr().(*net.TCPAddr)
+// 			if !ok {
+// 				return 0, fmt.Errorf("unexpected listener address type %T", l.Addr())
+// 			}
+// 			return tcpAddr.Port, nil
+// 		}
+// 	}
+// 	return
+// }

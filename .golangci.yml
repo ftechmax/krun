@@ -52,7 +52,7 @@ linters:
         source: ^\s*defer\s+.*\.Close\(\)\s*$
       - linters:
           - errcheck
-        source: ^\s*_\s*=\s*.*\.Close\(\)\s*$
+        source: ^\s*_\s*=\s*.*\.Close\(.*\)\s*$
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0

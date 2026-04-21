@@ -46,6 +46,7 @@ var excludedDirectories = map[string]struct{}{
 	"node_modules": {},
 	"k8s":          {},
 	"docs":         {},
+	".claude":      {},
 }
 
 func copySource(ctx context.Context, out io.Writer, kubeConfig string, projectName string, projectPath string, skipWeb bool) (bool, error) {

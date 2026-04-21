@@ -1,11 +1,9 @@
-//go:build !linux && !windows
+//go:build !windows
 
 package main
 
-func shouldRunAsService(_ bool) bool {
-	return false
-}
-
-func runAsService(_, _ string) error {
-	return nil
+func runAsService(listenAddress, krunConfigPath string) error {
+	return startHelperServer(listenAddress, krunConfigPath, daemonOptions{
+		externalShutdown: make(chan struct{}),
+	})
 }

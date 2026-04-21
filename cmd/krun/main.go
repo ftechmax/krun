@@ -8,21 +8,19 @@ import (
 
 	cfg "github.com/ftechmax/krun/internal/config"
 	"github.com/ftechmax/krun/internal/contracts"
-	deploy "github.com/ftechmax/krun/internal/krun-helper/deploy"
-	"github.com/ftechmax/krun/internal/krun/helper"
 	"github.com/ftechmax/krun/internal/krun/helperclient"
-	krunruntime "github.com/ftechmax/krun/internal/krun/runtime"
 	"github.com/ftechmax/krun/internal/utils"
 	"github.com/spf13/cobra"
 )
 
 var (
-	config   = cfg.Config{}
-	version  = "debug"         // will be set by the build system
-	services = []cfg.Service{} // map of service name to service struct
+	version = "debug" // will be set by the build system
+	config  = cfg.Config{}
 )
 
-var kubeConfigPath string
+var (
+	kubeConfigPath string
+)
 
 func main() {
 	rootCmd := &cobra.Command{
@@ -43,9 +41,15 @@ func main() {
 		&cobra.Command{
 			Use:     "list",
 			Short:   "List all services or projects",
-			PreRun:  preRunKubeConfigOnly,
+			PreRun:  preRunInit,
 			Run:     handleList,
 			Example: "krun list",
+		},
+		&cobra.Command{
+			Use:     "status",
+			Short:   "Show status of daemon and traffic-manager",
+			Run:     handleStatus,
+			Example: "krun status",
 		},
 	)
 
@@ -53,7 +57,7 @@ func main() {
 		Use:    "build <project|service>",
 		Short:  "Build a project or specific service",
 		Args:   cobra.MinimumNArgs(1),
-		PreRun: preRunKubeConfigOnly,
+		PreRun: preRunInit,
 		Run:    handleBuild,
 	}
 	buildCmd.Flags().Bool("skip-web", false, "Skip building the web component")
@@ -65,7 +69,7 @@ func main() {
 		Use:    "deploy <project>",
 		Short:  "Deploy a project",
 		Args:   cobra.MinimumNArgs(1),
-		PreRun: preRunKubeConfigOnly,
+		PreRun: preRunInit,
 		Run:    handleDeploy,
 	}
 	deployCmd.Flags().Bool("use-remote-registry", false, "Use remote registry for deploy")
@@ -76,50 +80,11 @@ func main() {
 		Use:     "delete <project>",
 		Short:   "Delete a project",
 		Args:    cobra.MinimumNArgs(1),
-		PreRun:  preRunKubeConfigOnly,
+		PreRun:  preRunInit,
 		Run:     handleDelete,
 		Example: "krun delete myproject",
 	}
 	rootCmd.AddCommand(deleteCmd)
-
-	installCmd := &cobra.Command{
-		Use:              "install",
-		Short:            "Install or update krun-helper service and in-cluster runtime",
-		Args:             cobra.NoArgs,
-		PersistentPreRun: preRunKubeConfigOnly,
-		Run:              handleInstall,
-	}
-	uninstallCmd := &cobra.Command{
-		Use:              "uninstall",
-		Short:            "Uninstall krun-helper service and in-cluster runtime",
-		Args:             cobra.NoArgs,
-		PersistentPreRun: preRunKubeConfigOnly,
-		Run:              handleUninstall,
-	}
-	statusCmd := &cobra.Command{
-		Use:              "status",
-		Short:            "Show health and version of krun-helper and in-cluster runtime",
-		Args:             cobra.NoArgs,
-		PersistentPreRun: preRunKubeConfigOnly,
-		Run:              handleStatus,
-	}
-	rootCmd.AddCommand(installCmd, uninstallCmd, statusCmd)
-
-	rootCmd.AddCommand(
-		&cobra.Command{
-			Use:              "__helper-install",
-			Hidden:           true,
-			Args:             cobra.NoArgs,
-			PersistentPreRun: preRunKubeConfigOnly,
-			Run:              func(cmd *cobra.Command, args []string) { helper.HelperInstall(config) },
-		},
-		&cobra.Command{
-			Use:    "__helper-uninstall",
-			Hidden: true,
-			Args:   cobra.NoArgs,
-			Run:    func(cmd *cobra.Command, args []string) { helper.HelperUninstall() },
-		},
-	)
 
 	debugCmd := &cobra.Command{
 		Use:              "debug",
@@ -148,14 +113,7 @@ func main() {
 		Use:   "helper",
 		Short: "Inspect local debug helper daemon",
 	}
-	debugHelperStopCmd := &cobra.Command{
-		Use:              "stop",
-		Short:            "Stop the local debug helper daemon",
-		Args:             cobra.NoArgs,
-		PersistentPreRun: func(cmd *cobra.Command, args []string) {},
-		Run:              handleDebugHelperStop,
-	}
-	debugHelperCmd.AddCommand(debugHelperStopCmd)
+
 	debugCmd.AddCommand(debugListCmd, debugEnableCmd, debugDisableCmd, debugHelperCmd)
 	rootCmd.AddCommand(debugCmd)
 
@@ -166,75 +124,65 @@ func main() {
 }
 
 func preRunInit(cmd *cobra.Command, args []string) {
-	initialize(cmd, kubeConfigPath)
+	initialize(kubeConfigPath)
 }
 
-func preRunKubeConfigOnly(cmd *cobra.Command, args []string) {
-	initializeKubeConfig(kubeConfigPath)
-}
+func initialize(optKubeConfig string) {
+	if optKubeConfig != "" {
+		config.KubeConfig = filepath.ToSlash(optKubeConfig)
+	} else {
+		dirname, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Println(utils.Colorize(fmt.Sprintf("Error getting user home directory: %s", err), utils.Red))
+			os.Exit(0)
+		}
+		config.KubeConfig = filepath.ToSlash(dirname + "/.kube/config")
+	}
 
-func initialize(_ *cobra.Command, optKubeConfig string) {
-	initializeKubeConfig(optKubeConfig)
-
-	krunConfig, err := cfg.ParseKrunConfig()
+	krunConfig, err := cfg.LoadKrunConfig()
 	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Error parsing krun-config.json: %s", err), utils.Red))
+		fmt.Println(utils.Colorize(fmt.Sprintf("Error parsing config.json: %s", err), utils.Red))
+		os.Exit(1)
+	}
+
+	token, err := cfg.LoadToken()
+	if err != nil {
+		fmt.Println(utils.Colorize(fmt.Sprintf("Error loading auth token: %s", err), utils.Red))
 		os.Exit(1)
 	}
 
 	config.KrunConfig = krunConfig
-
 	config.Registry = config.LocalRegistry
+	config.AuthToken = token
 
-	var projectPaths map[string]string
-	services, projectPaths, err = cfg.DiscoverServices(krunConfig.Path, krunConfig.SearchDepth)
-	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Error discovering services: %s", err), utils.Red))
-		os.Exit(0)
-	}
-	config.ProjectPaths = projectPaths
 }
 
-func initializeKubeConfig(optKubeConfig string) {
-	config = cfg.Config{}
+func handleStatus(cmd *cobra.Command, args []string) {
 
-	if optKubeConfig != "" {
-		config.KubeConfig = filepath.ToSlash(optKubeConfig)
-		return
-	}
-
-	dirname, err := os.UserHomeDir()
-	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Error getting user home directory: %s", err), utils.Red))
-		os.Exit(0)
-	}
-
-	// set default kubeconfig path
-	config.KubeConfig = filepath.ToSlash(dirname + "/.kube/config")
 }
 
 func handleList(cmd *cobra.Command, args []string) {
-	response, err := helperclient.WorkspaceList(config)
+	services, projects, err := helperclient.List(config)
 	if err != nil {
 		fmt.Println(utils.Colorize(err.Error(), utils.Red))
 		os.Exit(1)
 	}
 
-	if len(response.Services) == 0 {
+	if len(services) == 0 {
 		fmt.Println(utils.Colorize("No services found", utils.Yellow))
 		return
 	}
 
 	fmt.Println("Services")
 	fmt.Println("--------")
-	for _, service := range response.Services {
-		fmt.Println(service.Name)
+	for _, service := range services {
+		fmt.Println(service)
 	}
 	fmt.Println("")
 
 	fmt.Println("Projects")
 	fmt.Println("--------")
-	for _, project := range response.Projects {
+	for _, project := range projects {
 		fmt.Println(project)
 	}
 	fmt.Println("")
@@ -245,11 +193,12 @@ func handleBuild(cmd *cobra.Command, args []string) {
 	forceBuild, _ := cmd.Flags().GetBool("force")
 	flush, _ := cmd.Flags().GetBool("flush")
 
-	err := helperclient.WorkspaceBuild(config, contracts.BuildRequest{
-		Target:  args[0],
-		SkipWeb: skipWeb,
-		Force:   forceBuild,
-		Flush:   flush,
+	err := helperclient.Build(config, contracts.BuildRequest{
+		KubeConfig: config.KubeConfig,
+		Target:     args[0],
+		SkipWeb:    skipWeb,
+		Force:      forceBuild,
+		Flush:      flush,
 	}, os.Stdout)
 	if err != nil {
 		fmt.Println(utils.Colorize(err.Error(), utils.Red))
@@ -261,7 +210,8 @@ func handleDeploy(cmd *cobra.Command, args []string) {
 	useRemote, _ := cmd.Flags().GetBool("use-remote-registry")
 	noRestart, _ := cmd.Flags().GetBool("no-restart")
 
-	err := helperclient.WorkspaceDeploy(config, contracts.DeployRequest{
+	err := helperclient.Deploy(config, contracts.DeployRequest{
+		KubeConfig:        config.KubeConfig,
 		Target:            args[0],
 		UseRemoteRegistry: useRemote,
 		NoRestart:         noRestart,
@@ -273,8 +223,9 @@ func handleDeploy(cmd *cobra.Command, args []string) {
 }
 
 func handleDelete(cmd *cobra.Command, args []string) {
-	err := helperclient.WorkspaceDelete(config, contracts.DeleteRequest{
-		Target: args[0],
+	err := helperclient.Delete(config, contracts.DeleteRequest{
+		KubeConfig: config.KubeConfig,
+		Target:     args[0],
 	}, os.Stdout)
 	if err != nil {
 		fmt.Println(utils.Colorize(err.Error(), utils.Red))
@@ -283,7 +234,7 @@ func handleDelete(cmd *cobra.Command, args []string) {
 }
 
 func handleDebugList(cmd *cobra.Command, args []string) {
-	sessions, err := helperclient.HelperDebugSessionsList(config)
+	sessions, err := helperclient.DebugSessionsList(config)
 	if err != nil {
 		fmt.Println(utils.Colorize(fmt.Sprintf("cannot list debug sessions via helper: %v", err), utils.Red))
 		return
@@ -334,21 +285,15 @@ func handleDebugList(cmd *cobra.Command, args []string) {
 func handleDebugEnable(cmd *cobra.Command, args []string) {
 	containerName, _ := cmd.Flags().GetString("container")
 
-	argServiceName := args[0]
-	service := cfg.Service{}
-	for _, s := range services {
-		if s.Name == argServiceName {
-			service = s
-			break
-		}
-	}
-	if service.Name == "" {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Service not found: %s", argServiceName), utils.Red))
+	service, err := helperclient.GetServiceByName(config, args[0])
+	if err != nil {
+		fmt.Println(utils.Colorize(fmt.Sprintf("service not found: %s", args[0]), utils.Red))
 		return
 	}
-	fmt.Printf("Enabling debug mode for service %s\n", argServiceName)
 
-	response, err := helperclient.HelperDebugEnable(config, buildDebugServiceContext(service))
+	fmt.Printf("Enabling debug mode for service %s\n", service.Name)
+
+	response, err := helperclient.DebugEnable(config, service, containerName)
 	if err != nil {
 		fmt.Println(utils.Colorize(fmt.Sprintf("cannot apply debug enable via helper: %v", err), utils.Red))
 		return
@@ -360,27 +305,23 @@ func handleDebugEnable(cmd *cobra.Command, args []string) {
 
 	fmt.Println(utils.Colorize("Session created", utils.Green))
 
-	if err := deploy.CreateEnvFile(service, config, containerName); err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("warning: could not create env file: %v", err), utils.Yellow))
-	}
+	// TODO: move to krun-helper
+	// if err := deploy.CreateEnvFile(service, config, containerName); err != nil {
+	// 	fmt.Println(utils.Colorize(fmt.Sprintf("warning: could not create env file: %v", err), utils.Yellow))
+	// }
 }
 
 func handleDebugDisable(cmd *cobra.Command, args []string) {
-	argServiceName := args[0]
-	service := cfg.Service{}
-	for _, s := range services {
-		if s.Name == argServiceName {
-			service = s
-			break
-		}
-	}
-	if service.Name == "" {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Service not found: %s", argServiceName), utils.Red))
+
+	service, err := helperclient.GetServiceByName(config, args[0])
+	if err != nil {
+		fmt.Println(utils.Colorize(fmt.Sprintf("service not found: %s", args[0]), utils.Red))
 		return
 	}
-	fmt.Printf("Disabling debug mode for service %s\n", argServiceName)
 
-	response, err := helperclient.HelperDebugDisable(config, buildDebugServiceContext(service))
+	fmt.Printf("Disabling debug mode for service %s\n", service.Name)
+
+	response, err := helperclient.DebugDisable(config, service)
 	if err != nil {
 		fmt.Println(utils.Colorize(fmt.Sprintf("cannot apply debug disable via helper: %v", err), utils.Red))
 		return
@@ -394,54 +335,10 @@ func handleDebugDisable(cmd *cobra.Command, args []string) {
 		fmt.Println(utils.Colorize("No active debug session found", utils.Yellow))
 	} else {
 		fmt.Println(utils.Colorize("Session removed", utils.Green))
-		if err := deploy.RemoveEnvFile(service, config); err != nil {
-			fmt.Println(utils.Colorize(fmt.Sprintf("warning: could not remove env file: %v", err), utils.Yellow))
-		}
-	}
-}
 
-func handleDebugHelperStop(cmd *cobra.Command, args []string) {
-	helper.HelperStop()
-}
-
-func handleInstall(cmd *cobra.Command, args []string) {
-	helper.HelperInstall(config)
-	krunruntime.RuntimeInstall(config, version)
-}
-
-func handleUninstall(cmd *cobra.Command, args []string) {
-	krunruntime.RuntimeUninstall(config, version)
-	helper.HelperUninstall()
-}
-
-func handleStatus(cmd *cobra.Command, args []string) {
-	fmt.Println("krun-helper")
-	fmt.Println("-----------")
-	helper.HelperStatus(config)
-	fmt.Println("")
-	fmt.Println("traffic-manager")
-	fmt.Println("---------------")
-	krunruntime.RuntimeStatus(config)
-}
-
-func buildDebugServiceContext(service cfg.Service) contracts.DebugServiceContext {
-	dependencies := make([]contracts.DebugServiceDependencyContext, 0, len(service.ServiceDependencies))
-	for _, dependency := range service.ServiceDependencies {
-		dependencies = append(dependencies, contracts.DebugServiceDependencyContext{
-			Host:      dependency.Host,
-			Namespace: dependency.Namespace,
-			Service:   dependency.Service,
-			Port:      dependency.Port,
-			Aliases:   dependency.Aliases,
-		})
-	}
-
-	return contracts.DebugServiceContext{
-		Project:             service.Project,
-		ServiceName:         service.Name,
-		Namespace:           service.Namespace,
-		ContainerPort:       service.ContainerPort,
-		InterceptPort:       service.InterceptPort,
-		ServiceDependencies: dependencies,
+		// TODO: move to krun-helper
+		// if err := deploy.RemoveEnvFile(service, config); err != nil {
+		// 	fmt.Println(utils.Colorize(fmt.Sprintf("warning: could not remove env file: %v", err), utils.Yellow))
+		// }
 	}
 }

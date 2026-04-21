@@ -26,7 +26,7 @@ This tool pairs perfectly with services made with my [msa-templates](https://git
 
 2. Unzip the downloaded file to a directory in your `PATH`, or add the directory to your `PATH`.
 
-3. Place a `krun-config.json` file **next to the `krun` binary** to configure your source directory and Docker registries. See the [krun-config.json](#krun-configjson) section for details.
+3. Configure your source directory and Docker registries in `$HOME/.krun/config.json` on Linux, or `%USERPROFILE%\.krun\config.json` on Windows. The install scripts create a default file if one does not exist. See the [config.json](#configjson) section for details.
 
 4. Place a `krun.json` file in the root of your project repository to define your services. See the [krun.json](#krunjson) section for details.
 
@@ -107,7 +107,7 @@ krun [global options] <command> [command options] <service>
 
 - `deploy [--use-remote-registry, --no-restart] <project>`  
   Deploy a project.  
-  Use `--use-remote-registry` to deploy using the remote Docker registry defined in `krun-config.json`. If not specified, it will use the local Docker registry. Use `--no-restart` to skip the rollout restart after applying manifests.
+  Use `--use-remote-registry` to deploy using the remote Docker registry defined in `config.json`. If not specified, it will use the local Docker registry. Use `--no-restart` to skip the rollout restart after applying manifests.
 
   ```sh
   krun deploy awesome-app
@@ -174,16 +174,9 @@ krun [global options] <command> [command options] <service>
   krun status
   ```
 
-- `debug helper stop`
-  Stop the running `krun-helper` daemon (does not uninstall the service).
+## config.json
 
-  ```sh
-  krun debug helper stop
-  ```
-
-## krun-config.json
-
-The [krun-config.json](https://github.com/ftechmax/krun/blob/main/krun-config.json) file configures how `krun` interacts with your Kubernetes environment, Docker registries, and source code. This file must be placed **next to the `krun` binary**. Below is a description of each field:
+The `config.json` file configures how `krun` interacts with your Kubernetes environment, Docker registries, and source code. This file must be placed in `$HOME/.krun/config.json` on Linux, or `%USERPROFILE%\.krun\config.json` on Windows. The install scripts create a default file if one does not already exist. Below is a description of each field:
 
 ### Example
 
@@ -317,20 +310,6 @@ To enable debug mode for a service, use the following command:
 krun debug enable <service>
 ```
 
-### Optional: Enable traffic-agent diagnostics
-
-To log iptables rules and redirect counters from the traffic-agent, set an env var on the traffic-manager deployment:
-
-```sh
-kubectl -n krun-system set env deployment/krun-traffic-manager KRUN_AGENT_DIAGNOSTICS=true
-```
-
-Unset it when you are done:
-
-```sh
-kubectl -n krun-system unset env deployment/krun-traffic-manager KRUN_AGENT_DIAGNOSTICS
-```
-
 ### Disabling Debug Mode
 
 To disable debug mode for a service, use the following command:
@@ -396,11 +375,11 @@ The full API spec, payload examples, and SSE details live in [docs/krun-helper-a
 | Method | Path | Description |
 | --- | --- | --- |
 | `GET` | `/healthz` | Lightweight health check. Returns `{"success":true,"message":"ok"}` when the daemon is ready. |
-| `GET` | `/v1/services` | Discover projects and services from the current `krun-config.json` workspace. |
-| `POST` | `/v1/build` | Build a project or a single service. Response is an SSE stream. |
-| `POST` | `/v1/deploy` | Deploy a project. The `target` can be either the project name or any service in that project. Response is an SSE stream. |
-| `POST` | `/v1/delete` | Delete a project. The `target` can be either the project name or any service in that project. Response is an SSE stream. |
+| `GET` | `/v1/workspace/services` | Discover projects and services from the workspaces defined in `config.json`. |
+| `GET` | `/v1/workspace/service/{serviceName}` | Fetch a single service definition by name. |
+| `POST` | `/v1/workspace/build` | Build a project or a single service. Response is an SSE stream. |
+| `POST` | `/v1/workspace/deploy` | Deploy a project. The `target` can be either the project name or any service in that project. Response is an SSE stream. |
+| `POST` | `/v1/workspace/delete` | Delete a project. The `target` can be either the project name or any service in that project. Response is an SSE stream. |
 | `GET` | `/v1/debug/sessions` | List the active debug sessions currently tracked by the local helper. |
 | `POST` | `/v1/debug/enable` | Enable a local debug session: hosts file entries, dependency port-forwards, and traffic-manager session. |
 | `POST` | `/v1/debug/disable` | Disable a local debug session and clean up local state. |
-| `POST` | `/v1/shutdown` | Stop the running helper daemon. |

@@ -8,7 +8,6 @@ on:
       - 'cmd/**'
       - 'deploy/**'
       - 'internal/**'
-      - 'krun-config.json'
       - '**/*.mod'
       - '**/*.sum'
 

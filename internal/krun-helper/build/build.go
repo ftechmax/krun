@@ -82,7 +82,7 @@ func buildServices(ctx context.Context, out io.Writer, servicesToBuild []cfg.Ser
 		if skipWeb && filepath.Base(service.Path) == "web" {
 			continue
 		}
-		if err := buildAndPushImagesBuildah(ctx, out, service, registry, kubeConfig); err != nil {
+		if err := buildAndPushImages(ctx, out, service, registry, kubeConfig); err != nil {
 			return err
 		}
 	}
@@ -119,12 +119,12 @@ func startBuildContainer(ctx context.Context, out io.Writer, kubeConfig string) 
 	return fmt.Errorf("build pod did not become ready in time")
 }
 
-func buildAndPushImagesBuildah(ctx context.Context, out io.Writer, service cfg.Service, registry string, kubeConfig string) error {
+func buildAndPushImages(ctx context.Context, out io.Writer, service cfg.Service, registry string, kubeConfig string) error {
 	contextPath := filepath.ToSlash(filepath.Join(workspacePath, service.Project, service.Context))
 	dockerfilePath := filepath.ToSlash(filepath.Join(workspacePath, service.Project, service.Path, service.Dockerfile, "Dockerfile"))
 
 	cmd := fmt.Sprintf(
-		"buildah bud -t %s/%s -f %s %s && buildah push %s/%s:latest docker://%s/%s:latest",
+		"buildah bud --layers=true -t %s/%s -f %s %s && buildah push %s/%s:latest docker://%s/%s:latest",
 		registry, service.Name, dockerfilePath, contextPath, registry, service.Name, registry, service.Name,
 	)
 

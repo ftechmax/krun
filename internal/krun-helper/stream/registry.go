@@ -5,55 +5,49 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
-	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/ftechmax/krun/internal/contracts"
-	"github.com/ftechmax/krun/internal/sessionkey"
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
+	"github.com/hashicorp/yamux"
 )
 
 const (
-	defaultStreamPath    = "/v1/stream/client"
-	connectTimeout       = 5 * time.Second
-	writeTimeout         = 10 * time.Second
-	initialBackoff       = time.Second
-	maxBackoff           = 10 * time.Second
-	sendQueueSize        = 2048
-	localDialTimeout     = 2 * time.Second
-	connectionReadBuffer = 32 * 1024
+	streamPath       = "/v1/stream/client"
+	connectTimeout   = 5 * time.Second
+	initialBackoff   = time.Second
+	maxBackoff       = 10 * time.Second
+	localDialTimeout = 2 * time.Second
 )
 
 type SessionRegistry struct {
 	mu             sync.Mutex
 	managerAddress string
-	attachments    map[string]*sessionAttachment
+	attachments    map[string]*attachment
 }
 
-func NewSessionRegistry(managerAddress string) *SessionRegistry {
+func NewRegistry(managerAddress string) *SessionRegistry {
 	return &SessionRegistry{
 		managerAddress: strings.TrimSpace(managerAddress),
-		attachments:    map[string]*sessionAttachment{},
+		attachments:    map[string]*attachment{},
 	}
 }
 
-func (r *SessionRegistry) Upsert(sessionKey string, sessionID string, sessionToken string, interceptPort int) error {
-	key := sessionkey.Normalize(sessionKey)
-	attachment, err := newSessionAttachment(r.managerAddress, sessionID, sessionToken, interceptPort)
+func (r *SessionRegistry) Upsert(sessionKey, sessionID, sessionToken string, interceptPort int) error {
+	a, err := newAttachment(r.managerAddress, sessionID, sessionToken, interceptPort)
 	if err != nil {
 		return err
 	}
-	attachment.start()
+	a.start()
 
 	r.mu.Lock()
-	previous := r.attachments[key]
-	r.attachments[key] = attachment
+	previous := r.attachments[sessionKey]
+	r.attachments[sessionKey] = a
 	r.mu.Unlock()
 
 	if previous != nil {
@@ -63,384 +57,190 @@ func (r *SessionRegistry) Upsert(sessionKey string, sessionID string, sessionTok
 }
 
 func (r *SessionRegistry) Remove(sessionKey string) error {
-	key := sessionkey.Normalize(sessionKey)
-
 	r.mu.Lock()
-	attachment, ok := r.attachments[key]
+	a, ok := r.attachments[sessionKey]
 	if ok {
-		delete(r.attachments, key)
+		delete(r.attachments, sessionKey)
 	}
 	r.mu.Unlock()
 
 	if ok {
-		attachment.stop()
+		a.stop()
 	}
 	return nil
 }
 
 func (r *SessionRegistry) Clear() error {
 	r.mu.Lock()
-	attachments := make([]*sessionAttachment, 0, len(r.attachments))
-	for _, attachment := range r.attachments {
-		attachments = append(attachments, attachment)
+	all := make([]*attachment, 0, len(r.attachments))
+	for _, a := range r.attachments {
+		all = append(all, a)
 	}
-	r.attachments = map[string]*sessionAttachment{}
+	r.attachments = map[string]*attachment{}
 	r.mu.Unlock()
 
-	for _, attachment := range attachments {
-		attachment.stop()
+	for _, a := range all {
+		a.stop()
 	}
 	return nil
 }
 
-type sessionAttachment struct {
+type attachment struct {
 	sessionID    string
-	interceptURL string
 	streamURL    string
+	interceptURL string
 
 	cancel context.CancelFunc
 	doneCh chan struct{}
-	sendCh chan contracts.StreamEnvelope
-
-	connMu sync.Mutex
-	conns  map[string]net.Conn
 }
 
-func newSessionAttachment(managerAddress string, sessionID string, sessionToken string, interceptPort int) (*sessionAttachment, error) {
-	trimmedSessionID := strings.TrimSpace(sessionID)
-	if trimmedSessionID == "" {
+func newAttachment(managerAddress, sessionID, sessionToken string, interceptPort int) (*attachment, error) {
+	id := strings.TrimSpace(sessionID)
+	if id == "" {
 		return nil, errors.New("stream session id is required")
 	}
 	if interceptPort < 1 || interceptPort > 65535 {
 		return nil, fmt.Errorf("invalid intercept port %d", interceptPort)
 	}
-
-	streamURL, err := buildStreamURL(managerAddress, trimmedSessionID, sessionToken)
+	streamURL, err := buildStreamURL(managerAddress, id, sessionToken)
 	if err != nil {
 		return nil, err
 	}
-
-	return &sessionAttachment{
-		sessionID:    trimmedSessionID,
-		interceptURL: net.JoinHostPort("127.0.0.1", strconv.Itoa(interceptPort)),
+	return &attachment{
+		sessionID:    id,
 		streamURL:    streamURL,
+		interceptURL: net.JoinHostPort("127.0.0.1", strconv.Itoa(interceptPort)),
 		doneCh:       make(chan struct{}),
-		sendCh:       make(chan contracts.StreamEnvelope, sendQueueSize),
-		conns:        map[string]net.Conn{},
 	}, nil
 }
 
-func (a *sessionAttachment) start() {
+func (a *attachment) start() {
 	ctx, cancel := context.WithCancel(context.Background())
 	a.cancel = cancel
 	go a.run(ctx)
 }
 
-func (a *sessionAttachment) stop() {
+func (a *attachment) stop() {
 	if a.cancel != nil {
 		a.cancel()
 	}
 	<-a.doneCh
 }
 
-func (a *sessionAttachment) run(ctx context.Context) {
+func (a *attachment) run(ctx context.Context) {
 	defer close(a.doneCh)
-	defer a.closeAllLocalConns()
 
 	backoff := initialBackoff
 	for {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return
-		default:
 		}
 
 		dialCtx, cancel := context.WithTimeout(ctx, connectTimeout)
-		conn, _, err := websocket.DefaultDialer.DialContext(dialCtx, a.streamURL, http.Header{})
+		ws, _, err := websocket.Dial(dialCtx, a.streamURL, nil)
 		cancel()
 		if err != nil {
-			log.Printf("helper stream connect failed (session_id=%s): %v", a.sessionID, err)
-			if !sleepWithContext(ctx, backoff) {
+			slog.Error("helper stream connect failed", "session_id", a.sessionID, "err", err)
+			if !sleep(ctx, backoff) {
 				return
 			}
 			backoff = nextBackoff(backoff)
 			continue
 		}
 
-		log.Printf("helper stream connected (session_id=%s)", a.sessionID)
-		backoff = initialBackoff
-		if err := a.pumpConnection(ctx, conn); err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("helper stream disconnected (session_id=%s): %v", a.sessionID, err)
+		mux, err := yamux.Server(websocket.NetConn(ctx, ws, websocket.MessageBinary), yamuxConfig())
+		if err != nil {
+			slog.Error("yamux server init failed", "session_id", a.sessionID, "err", err)
+			_ = ws.Close(websocket.StatusInternalError, "")
+			if !sleep(ctx, backoff) {
+				return
+			}
+			backoff = nextBackoff(backoff)
+			continue
 		}
+
+		slog.Info("helper stream connected", "session_id", a.sessionID)
+		backoff = initialBackoff
+		a.serve(ctx, mux)
+		slog.Info("helper stream disconnected", "session_id", a.sessionID)
 	}
 }
 
-func (a *sessionAttachment) pumpConnection(ctx context.Context, conn *websocket.Conn) error {
-	defer conn.Close()
-
-	readErrCh := make(chan error, 1)
-	envelopeCh := make(chan contracts.StreamEnvelope, 128)
+func (a *attachment) serve(ctx context.Context, mux *yamux.Session) {
+	defer mux.Close()
 	go func() {
-		for {
-			var envelope contracts.StreamEnvelope
-			if err := conn.ReadJSON(&envelope); err != nil {
-				readErrCh <- err
-				return
-			}
-			envelopeCh <- envelope
-		}
+		<-ctx.Done()
+		_ = mux.Close()
 	}()
 
 	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case readErr := <-readErrCh:
-			return readErr
-		case envelope := <-envelopeCh:
-			a.handleInboundEnvelope(ctx, envelope)
-		case outbound := <-a.sendCh:
-			_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-			if err := conn.WriteJSON(outbound); err != nil {
-				return err
-			}
+		stream, err := mux.AcceptStream()
+		if err != nil {
+			return
 		}
+		go a.handleStream(stream)
 	}
 }
 
-func (a *sessionAttachment) handleInboundEnvelope(ctx context.Context, envelope contracts.StreamEnvelope) {
-	connectionID := strings.TrimSpace(envelope.ConnectionID)
-	envelope.ConnectionID = connectionID
-	envelope.SessionID = a.sessionID
-
-	switch envelope.Type {
-	case contracts.StreamTypeOpen:
-		a.handleOpen(ctx, connectionID)
-	case contracts.StreamTypeData:
-		a.handleData(connectionID, envelope.Data)
-	case contracts.StreamTypeClose, contracts.StreamTypeError:
-		a.closeLocalConn(connectionID)
-	case contracts.StreamTypePing:
-		if err := a.enqueueOutbound(ctx, contracts.StreamEnvelope{
-			Type:      contracts.StreamTypePing,
-			SessionID: a.sessionID,
-		}); err != nil {
-			log.Printf("enqueue ping envelope failed (session_id=%s): %v", a.sessionID, err)
-		}
-	}
-}
-
-func (a *sessionAttachment) handleOpen(ctx context.Context, connectionID string) {
-	if connectionID == "" {
-		return
-	}
-
-	localConn, err := net.DialTimeout("tcp", a.interceptURL, localDialTimeout)
+func (a *attachment) handleStream(stream net.Conn) {
+	defer stream.Close()
+	local, err := net.DialTimeout("tcp", a.interceptURL, localDialTimeout)
 	if err != nil {
-		if enqueueErr := a.enqueueOutbound(ctx, contracts.StreamEnvelope{
-			Type:         contracts.StreamTypeError,
-			SessionID:    a.sessionID,
-			ConnectionID: connectionID,
-			Message:      err.Error(),
-		}); enqueueErr != nil {
-			log.Printf("enqueue open-error envelope failed (session_id=%s connection_id=%s): %v", a.sessionID, connectionID, enqueueErr)
-		}
-		if enqueueErr := a.enqueueOutbound(ctx, contracts.StreamEnvelope{
-			Type:         contracts.StreamTypeClose,
-			SessionID:    a.sessionID,
-			ConnectionID: connectionID,
-		}); enqueueErr != nil {
-			log.Printf("enqueue open-close envelope failed (session_id=%s connection_id=%s): %v", a.sessionID, connectionID, enqueueErr)
-		}
+		slog.Error("dial intercept failed", "url", a.interceptURL, "session_id", a.sessionID, "err", err)
 		return
 	}
+	defer local.Close()
 
-	a.connMu.Lock()
-	if existing, ok := a.conns[connectionID]; ok {
-		_ = existing.Close()
-	}
-	a.conns[connectionID] = localConn
-	a.connMu.Unlock()
-
-	go a.pumpLocalConnection(ctx, connectionID, localConn)
+	done := make(chan struct{}, 2)
+	go func() { _, _ = io.Copy(local, stream); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(stream, local); done <- struct{}{} }()
+	<-done
 }
 
-func (a *sessionAttachment) handleData(connectionID string, payload []byte) {
-	if connectionID == "" || len(payload) == 0 {
-		return
-	}
-	localConn := a.getLocalConn(connectionID)
-	if localConn == nil {
-		return
-	}
-	if _, err := localConn.Write(payload); err != nil {
-		_ = localConn.Close()
-		a.closeLocalConn(connectionID)
-		if enqueueErr := a.enqueueOutbound(context.Background(), contracts.StreamEnvelope{
-			Type:         contracts.StreamTypeError,
-			SessionID:    a.sessionID,
-			ConnectionID: connectionID,
-			Message:      err.Error(),
-		}); enqueueErr != nil {
-			log.Printf("enqueue write-error envelope failed (session_id=%s connection_id=%s): %v", a.sessionID, connectionID, enqueueErr)
-		}
-		if enqueueErr := a.enqueueOutbound(context.Background(), contracts.StreamEnvelope{
-			Type:         contracts.StreamTypeClose,
-			SessionID:    a.sessionID,
-			ConnectionID: connectionID,
-		}); enqueueErr != nil {
-			log.Printf("enqueue write-close envelope failed (session_id=%s connection_id=%s): %v", a.sessionID, connectionID, enqueueErr)
-		}
-	}
+func yamuxConfig() *yamux.Config {
+	cfg := yamux.DefaultConfig()
+	cfg.LogOutput = io.Discard
+	return cfg
 }
 
-func (a *sessionAttachment) pumpLocalConnection(ctx context.Context, connectionID string, localConn net.Conn) {
-	defer a.closeLocalConn(connectionID)
-
-	buffer := make([]byte, connectionReadBuffer)
-	for {
-		readBytes, readErr := localConn.Read(buffer)
-		if readBytes > 0 {
-			chunk := make([]byte, readBytes)
-			copy(chunk, buffer[:readBytes])
-			if err := a.enqueueOutbound(ctx, contracts.StreamEnvelope{
-				Type:         contracts.StreamTypeData,
-				SessionID:    a.sessionID,
-				ConnectionID: connectionID,
-				Data:         chunk,
-			}); err != nil {
-				return
-			}
-		}
-
-		if readErr == nil {
-			continue
-		}
-		if errors.Is(readErr, io.EOF) {
-			if err := a.enqueueOutbound(ctx, contracts.StreamEnvelope{
-				Type:         contracts.StreamTypeClose,
-				SessionID:    a.sessionID,
-				ConnectionID: connectionID,
-			}); err != nil {
-				log.Printf("enqueue eof-close envelope failed (session_id=%s connection_id=%s): %v", a.sessionID, connectionID, err)
-			}
-			return
-		}
-		if errors.Is(readErr, net.ErrClosed) {
-			return
-		}
-
-		if err := a.enqueueOutbound(ctx, contracts.StreamEnvelope{
-			Type:         contracts.StreamTypeError,
-			SessionID:    a.sessionID,
-			ConnectionID: connectionID,
-			Message:      readErr.Error(),
-		}); err != nil {
-			log.Printf("enqueue read-error envelope failed (session_id=%s connection_id=%s): %v", a.sessionID, connectionID, err)
-		}
-		if err := a.enqueueOutbound(ctx, contracts.StreamEnvelope{
-			Type:         contracts.StreamTypeClose,
-			SessionID:    a.sessionID,
-			ConnectionID: connectionID,
-		}); err != nil {
-			log.Printf("enqueue read-close envelope failed (session_id=%s connection_id=%s): %v", a.sessionID, connectionID, err)
-		}
-		return
-	}
-}
-
-func (a *sessionAttachment) enqueueOutbound(ctx context.Context, envelope contracts.StreamEnvelope) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-a.doneCh:
-		return errors.New("session stream stopped")
-	case a.sendCh <- envelope:
-		return nil
-	default:
-		return errors.New("session stream outbound queue is full")
-	}
-}
-
-func (a *sessionAttachment) getLocalConn(connectionID string) net.Conn {
-	a.connMu.Lock()
-	defer a.connMu.Unlock()
-	return a.conns[connectionID]
-}
-
-func (a *sessionAttachment) closeLocalConn(connectionID string) {
-	if strings.TrimSpace(connectionID) == "" {
-		return
-	}
-	a.connMu.Lock()
-	localConn, ok := a.conns[connectionID]
-	if ok {
-		delete(a.conns, connectionID)
-	}
-	a.connMu.Unlock()
-	if ok {
-		_ = localConn.Close()
-	}
-}
-
-func (a *sessionAttachment) closeAllLocalConns() {
-	a.connMu.Lock()
-	conns := make([]net.Conn, 0, len(a.conns))
-	for _, localConn := range a.conns {
-		conns = append(conns, localConn)
-	}
-	a.conns = map[string]net.Conn{}
-	a.connMu.Unlock()
-	for _, localConn := range conns {
-		_ = localConn.Close()
-	}
-}
-
-func buildStreamURL(managerAddress string, sessionID string, sessionToken string) (string, error) {
-	rawAddress := strings.TrimSpace(managerAddress)
-	if rawAddress == "" {
+func buildStreamURL(managerAddress, sessionID, sessionToken string) (string, error) {
+	raw := strings.TrimSpace(managerAddress)
+	if raw == "" {
 		return "", errors.New("manager address is required")
 	}
-	if !strings.Contains(rawAddress, "://") {
-		rawAddress = "http://" + rawAddress
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
 	}
-
-	parsed, err := url.Parse(rawAddress)
-	if err != nil {
-		return "", fmt.Errorf("invalid manager address %q: %w", managerAddress, err)
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "", fmt.Errorf("invalid manager address %q", managerAddress)
 	}
-	if parsed.Host == "" {
-		return "", fmt.Errorf("invalid manager address %q: host is required", managerAddress)
-	}
-
-	switch parsed.Scheme {
+	switch u.Scheme {
 	case "http":
-		parsed.Scheme = "ws"
+		u.Scheme = "ws"
 	case "https":
-		parsed.Scheme = "wss"
+		u.Scheme = "wss"
 	case "ws", "wss":
 	default:
-		return "", fmt.Errorf("unsupported manager address scheme %q", parsed.Scheme)
+		return "", fmt.Errorf("unsupported manager address scheme %q", u.Scheme)
 	}
-
-	basePath := strings.TrimRight(parsed.Path, "/")
-	parsed.Path = basePath + defaultStreamPath
-	query := parsed.Query()
-	query.Set("session_id", strings.TrimSpace(sessionID))
+	u.Path = strings.TrimRight(u.Path, "/") + streamPath
+	q := u.Query()
+	q.Set("session_id", sessionID)
 	if strings.TrimSpace(sessionToken) != "" {
-		query.Set("session_token", strings.TrimSpace(sessionToken))
+		q.Set("session_token", strings.TrimSpace(sessionToken))
 	}
-	parsed.RawQuery = query.Encode()
-	return parsed.String(), nil
+	u.RawQuery = q.Encode()
+	return u.String(), nil
 }
 
-func sleepWithContext(ctx context.Context, delay time.Duration) bool {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
+func sleep(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
 	select {
 	case <-ctx.Done():
 		return false
-	case <-timer.C:
+	case <-t.C:
 		return true
 	}
 }

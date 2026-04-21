@@ -3,76 +3,61 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/ftechmax/krun/internal/contracts"
 	"github.com/ftechmax/krun/internal/kube"
-	"github.com/ftechmax/krun/internal/traffic-manager/agent"
-	sessionregistry "github.com/ftechmax/krun/internal/traffic-manager/session"
-	streamrelay "github.com/ftechmax/krun/internal/traffic-manager/stream"
-	"github.com/gorilla/websocket"
+	"github.com/ftechmax/krun/internal/sessions"
+	"github.com/ftechmax/krun/internal/traffic-manager/injector"
+	"github.com/ftechmax/krun/internal/traffic-manager/relay"
+	"github.com/google/uuid"
 )
 
 var (
-	version                        = "debug" // will be set by the build system
-	sessionRegistry                = sessionregistry.NewDebugSessionRegistry()
-	sidecarBridge   agent.Injector = agent.NoopInjector{}
-	relayRegistry                  = streamrelay.NewSessionRelayRegistry()
-	streamUpgrader                 = websocket.Upgrader{
-		CheckOrigin: func(_ *http.Request) bool { return true },
-	}
-	errStreamSessionNotFound = errors.New("session not found")
-	errStreamUnauthorized    = errors.New("invalid session token")
+	version         = "debug"
+	sessionStore    = sessions.NewStore()
+	relayRegistry   = relay.NewRegistry()
+	sidecarInjector *injector.Injector
 )
 
-const (
-	defaultListenAddress = ":8080"
+const injectTimeout = 30 * time.Second
 
-	envAgentContainerName    = "KRUN_AGENT_CONTAINER_NAME"
-	envAgentImage            = "KRUN_AGENT_IMAGE"
-	envAgentImagePullPolicy  = "KRUN_AGENT_IMAGE_PULL_POLICY"
-	envManagerAddress        = "KRUN_MANAGER_ADDRESS"
+const (
+	defaultListenAddress     = ":8080"
 	streamSessionIDQuery     = "session_id"
 	streamSessionTokenQuery  = "session_token"
 	streamSessionIDHeader    = "X-Krun-Session-ID"
-	streamSessionTokenHeader = "X-Krun-Session-Token" //nolint:gosec // Header key name only; not a secret value.
+	streamSessionTokenHeader = "X-Krun-Session-Token" //nolint:gosec
 )
 
 func main() {
-	if err := run(); err != nil {
-		log.Printf("traffic-manager failed: %v", err)
+	slog.Info("starting", "version", version)
+
+	client, err := kube.NewInClusterClient()
+	if err != nil {
+		slog.Error("kube client init failed", "err", err)
 		os.Exit(1)
 	}
-}
 
-func run() error {
-	if err := initializeInjector(); err != nil {
-		return err
-	}
-	log.Printf("cleaning up dangling traffic-agent sidecars")
-	cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancelCleanup()
-	if err := cleanupDanglingAgents(cleanupCtx); err != nil {
-		return err
-	}
+	sidecarInjector = injector.NewFromEnv(client.Clientset, version)
+	slog.Info("sidecar injector ready",
+		"image", sidecarInjector.AgentImage,
+		"manager", sidecarInjector.ManagerAddress,
+		"listen_port", sidecarInjector.AgentListenPort)
 
 	server := &http.Server{
 		Addr:              defaultListenAddress,
 		Handler:           newHandler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	log.Printf("krun traffic-manager listening on %s", defaultListenAddress)
-	log.Printf("version: %s", version)
+	slog.Info("listening", "addr", defaultListenAddress)
 
 	serverErrCh := make(chan error, 1)
 	go func() {
@@ -85,228 +70,182 @@ func run() error {
 	select {
 	case err := <-serverErrCh:
 		if err == http.ErrServerClosed {
-			return nil
+			slog.Info("server closed")
+			return
 		}
-		return err
+		slog.Error("server error", "err", err)
+		os.Exit(1)
 	case <-ctx.Done():
-		log.Printf("received shutdown signal, shutting down traffic-manager")
+		slog.Info("received shutdown signal, shutting down traffic-manager")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("shutdown server: %w", err)
+			slog.Error("failed to shutdown server", "err", err)
+			os.Exit(1)
 		}
 		if err := <-serverErrCh; err != nil && err != http.ErrServerClosed {
-			return err
+			slog.Error("server error", "err", err)
+			os.Exit(1)
 		}
-		return nil
+		slog.Info("traffic-manager shutdown complete")
 	}
 }
 
 func newHandler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", handleHealthz)
-	mux.HandleFunc("/v1/sessions", handleSessions)
-	mux.HandleFunc("/v1/sessions/", handleSessionByID)
+	mux.HandleFunc("GET /healthz", handleHealthz)
+	mux.HandleFunc("POST /v1/sessions", handleCreateSession)
+	mux.HandleFunc("GET /v1/sessions", handleListSessions)
+	mux.HandleFunc("DELETE /v1/sessions/{sessionID}", handleDeleteSession)
 	mux.HandleFunc("/v1/stream/agent", func(w http.ResponseWriter, r *http.Request) {
-		handleStreamAttach(w, r, contracts.StreamRoleAgent)
+		handleStreamAttach(w, r, relay.RoleAgent)
 	})
 	mux.HandleFunc("/v1/stream/client", func(w http.ResponseWriter, r *http.Request) {
-		handleStreamAttach(w, r, contracts.StreamRoleClient)
+		handleStreamAttach(w, r, relay.RoleClient)
 	})
 	return mux
 }
 
-func handleHealthz(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+func handleCreateSession(w http.ResponseWriter, r *http.Request) {
+	var request contracts.CreateDebugSessionRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON payload")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+
+	if strings.TrimSpace(request.ServiceName) == "" {
+		writeError(w, http.StatusBadRequest, "service_name is required")
+		return
+	}
+	if request.ServicePort <= 0 {
+		writeError(w, http.StatusBadRequest, "service_port must be greater than 0")
+		return
+	}
+	if request.LocalPort <= 0 {
+		writeError(w, http.StatusBadRequest, "local_port must be greater than 0")
+		return
+	}
+
+	namespace := strings.TrimSpace(request.Namespace)
+	if namespace == "" {
+		namespace = "default"
+	}
+	workload := strings.TrimSpace(request.Workload)
+	if workload == "" {
+		workload = request.ServiceName
+	}
+
+	session := contracts.DebugSession{
+		SessionID:    uuid.NewString(),
+		SessionToken: uuid.NewString(),
+		Namespace:    namespace,
+		ServiceName:  request.ServiceName,
+		Workload:     workload,
+		ServicePort:  request.ServicePort,
+		LocalPort:    request.LocalPort,
+		ClientID:     request.ClientID,
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+	}
+	sessionStore.Put(session.SessionID, session)
+
+	injectCtx, cancel := context.WithTimeout(r.Context(), injectTimeout)
+	defer cancel()
+	if err := sidecarInjector.Inject(injectCtx, session); err != nil {
+		sessionStore.Delete(session.SessionID)
+		slog.Error("sidecar injection failed", "session_id", session.SessionID, "err", err)
+		writeError(w, http.StatusInternalServerError, "sidecar injection failed")
+		return
+	}
+	slog.Info("sidecar injected",
+		"session_id", session.SessionID,
+		"namespace", session.Namespace,
+		"workload", session.Workload)
+
+	slog.Info("session created",
+		"session_id", session.SessionID,
+		"namespace", session.Namespace,
+		"service", session.ServiceName)
+	writeJSON(w, http.StatusCreated, session)
 }
 
-func handleSessions(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodPost:
-		handleCreateSession(w, r)
-	case http.MethodGet:
-		writeJSON(w, http.StatusOK, contracts.ListDebugSessionsResponse{
-			Sessions: sessionRegistry.List(),
-		})
-	default:
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-	}
+func handleListSessions(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, contracts.ListDebugSessionsResponse{Sessions: sessionStore.List()})
 }
 
-func handleSessionByID(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+func handleDeleteSession(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.TrimSpace(r.PathValue("sessionID"))
+	if sessionID == "" {
+		writeError(w, http.StatusBadRequest, "session id is required")
 		return
 	}
-
-	id, err := parseSessionID(r.URL.Path)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "session id not found")
-		return
-	}
-
-	debugSession, ok := sessionRegistry.Get(id)
+	stored, ok := sessionStore.Get(sessionID)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-
-	if err := sidecarBridge.Remove(r.Context(), debugSession); err != nil && !errors.Is(err, agent.ErrWorkloadNotFound) {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to remove traffic-agent sidecar: %v", err))
-		return
+	removeCtx, cancel := context.WithTimeout(r.Context(), injectTimeout)
+	defer cancel()
+	if err := sidecarInjector.Remove(removeCtx, stored); err != nil {
+		slog.Error("sidecar removal failed", "session_id", stored.SessionID, "err", err)
 	}
-
-	sessionRegistry.Delete(id)
+	sessionStore.Delete(sessionID)
+	slog.Info("session deleted", "session_id", stored.SessionID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func handleCreateSession(w http.ResponseWriter, r *http.Request) {
-	defer r.Body.Close()
-
-	var request contracts.CreateDebugSessionRequest
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&request); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid payload")
-		return
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		writeError(w, http.StatusBadRequest, "invalid payload")
-		return
-	}
-
-	session, err := sessionRegistry.Create(request)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	if err := sidecarBridge.Inject(r.Context(), session); err != nil {
-		sessionRegistry.Delete(session.SessionID)
-		statusCode := http.StatusInternalServerError
-		if errors.Is(err, agent.ErrWorkloadNotFound) {
-			statusCode = http.StatusNotFound
-		}
-		writeError(w, statusCode, fmt.Sprintf("failed to inject traffic-agent sidecar: %v", err))
-		return
-	}
-
-	writeJSON(w, http.StatusCreated, session)
+func handleHealthz(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func handleStreamAttach(w http.ResponseWriter, r *http.Request, role string) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	debugSession, err := resolveStreamSession(r)
-	if err != nil {
-		statusCode := http.StatusBadRequest
-		if errors.Is(err, errStreamSessionNotFound) {
-			statusCode = http.StatusNotFound
-		}
-		if errors.Is(err, errStreamUnauthorized) {
-			statusCode = http.StatusUnauthorized
-		}
-		writeError(w, statusCode, err.Error())
-		return
-	}
-
-	conn, err := streamUpgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("stream upgrade failed (role=%s session_id=%s): %v", role, debugSession.SessionID, err)
-		return
-	}
-
-	log.Printf("stream attached (role=%s session_id=%s)", role, debugSession.SessionID)
-	relayRegistry.ServePeer(role, debugSession.SessionID, conn)
-}
-
-func parseSessionID(path string) (string, error) {
-	id := strings.TrimPrefix(path, "/v1/sessions/")
-	if id == "" || strings.Contains(id, "/") {
-		return "", errors.New("missing id")
-	}
-	unescaped, err := url.PathUnescape(id)
-	if err != nil {
-		return "", errors.New("invalid id")
-	}
-	trimmed := strings.TrimSpace(unescaped)
-	if trimmed == "" {
-		return "", errors.New("invalid id")
-	}
-	return trimmed, nil
-}
-
-func resolveStreamSession(r *http.Request) (contracts.DebugSession, error) {
-	sessionID := strings.TrimSpace(r.URL.Query().Get(streamSessionIDQuery))
+	sessionID := strings.TrimSpace(firstNonEmpty(r.URL.Query().Get(streamSessionIDQuery), r.Header.Get(streamSessionIDHeader)))
 	if sessionID == "" {
-		sessionID = strings.TrimSpace(r.Header.Get(streamSessionIDHeader))
+		writeError(w, http.StatusBadRequest, "session id is required")
+		return
 	}
-	if sessionID == "" {
-		return contracts.DebugSession{}, errors.New("session id is required")
-	}
-
-	debugSession, ok := sessionRegistry.Get(sessionID)
+	stored, ok := sessionStore.Get(sessionID)
 	if !ok {
-		return contracts.DebugSession{}, errStreamSessionNotFound
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	token := strings.TrimSpace(firstNonEmpty(r.URL.Query().Get(streamSessionTokenQuery), r.Header.Get(streamSessionTokenHeader)))
+	if stored.SessionToken != "" && token != "" && token != stored.SessionToken {
+		writeError(w, http.StatusUnauthorized, "invalid session token")
+		return
 	}
 
-	sessionToken := strings.TrimSpace(r.URL.Query().Get(streamSessionTokenQuery))
-	if sessionToken == "" {
-		sessionToken = strings.TrimSpace(r.Header.Get(streamSessionTokenHeader))
-	}
-	if strings.TrimSpace(debugSession.SessionToken) != "" && sessionToken != debugSession.SessionToken {
-		return contracts.DebugSession{}, errStreamUnauthorized
+	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+	if err != nil {
+		slog.Error("stream upgrade failed", "role", role, "session_id", stored.SessionID, "err", err)
+		return
 	}
 
-	return debugSession, nil
+	slog.Info("stream attached", "role", role, "session_id", stored.SessionID)
+	if relayRegistry.ServePeer(role, stored.SessionID, websocket.NetConn(context.Background(), ws, websocket.MessageBinary)) {
+		slog.Info("bridge ended", "session_id", stored.SessionID)
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func writeError(w http.ResponseWriter, code int, message string) {
-	log.Printf("http error status=%d message=%q", code, sanitizeLogValue(message)) //nolint:gosec // Value is normalized for logs.
+	slog.Warn("http error", "status", code, "message", message)
 	writeJSON(w, code, map[string]string{
 		"message": message,
 	})
-}
-
-func sanitizeLogValue(value string) string {
-	value = strings.ReplaceAll(value, "\r", "\\r")
-	value = strings.ReplaceAll(value, "\n", "\\n")
-	return value
 }
 
 func writeJSON(w http.ResponseWriter, code int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	if err := json.NewEncoder(w).Encode(payload); err != nil {
-		log.Printf("failed to write json response: %v", err)
+		slog.Error("failed to write json response", "err", err)
 	}
-}
-
-func initializeInjector() error {
-	client, err := kube.NewInClusterClient()
-	if err != nil {
-		return fmt.Errorf("initialize kubernetes client: %w", err)
-	}
-
-	sidecarBridge = agent.NewWorkloadInjector(client.Clientset, agent.Options{
-		ContainerName:   strings.TrimSpace(os.Getenv(envAgentContainerName)),
-		Image:           strings.TrimSpace(os.Getenv(envAgentImage)),
-		ImagePullPolicy: strings.TrimSpace(os.Getenv(envAgentImagePullPolicy)),
-		ManagerAddress:  strings.TrimSpace(os.Getenv(envManagerAddress)),
-	})
-	return nil
-}
-
-func cleanupDanglingAgents(ctx context.Context) error {
-	if err := sidecarBridge.Cleanup(ctx); err != nil {
-		return fmt.Errorf("cleanup dangling traffic-agent sidecars: %w", err)
-	}
-	return nil
 }

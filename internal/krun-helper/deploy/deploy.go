@@ -83,20 +83,20 @@ func handle(ctx context.Context, client *kube.Client, config cfg.Config, project
 
 	var restartCandidates []*unstructured.Unstructured
 	for _, overlayPath := range overlayPaths {
-		objs, err := RenderKustomizeObjects(overlayPath)
+		objs, err := renderKustomizeObjects(overlayPath)
 		if err != nil {
 			return nil, fmt.Errorf("render kustomize %s: %w", overlayPath, err)
 		}
 
 		replaceRegistryInObjects(objs, config.LocalRegistry, config.Registry)
 		if deleteMode {
-			if err := DeleteObjects(ctx, client, objs); err != nil {
+			if err := deleteObjects(ctx, client, objs); err != nil {
 				return nil, fmt.Errorf("delete objects from %s: %w", overlayPath, err)
 			}
 			continue
 		}
 
-		if err := ApplyObjects(ctx, client, objs); err != nil {
+		if err := applyObjects(ctx, client, objs); err != nil {
 			return nil, fmt.Errorf("apply objects from %s: %w", overlayPath, err)
 		}
 		restartCandidates = append(restartCandidates, objs...)
@@ -157,7 +157,7 @@ func hasKustomization(dir string) bool {
 	return false
 }
 
-func RenderKustomizeObjects(overlayPath string) ([]*unstructured.Unstructured, error) {
+func renderKustomizeObjects(overlayPath string) ([]*unstructured.Unstructured, error) {
 	opts := krusty.MakeDefaultOptions()
 	opts.LoadRestrictions = kusttypes.LoadRestrictionsNone
 
@@ -231,7 +231,7 @@ func replaceRegistryInValue(value any, from, to string) any {
 	}
 }
 
-func ApplyObjects(ctx context.Context, client *kube.Client, objs []*unstructured.Unstructured) error {
+func applyObjects(ctx context.Context, client *kube.Client, objs []*unstructured.Unstructured) error {
 	for _, obj := range objs {
 		gvk := obj.GroupVersionKind()
 		mapping, err := client.Mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
@@ -257,7 +257,7 @@ func ApplyObjects(ctx context.Context, client *kube.Client, objs []*unstructured
 	return nil
 }
 
-func DeleteObjects(ctx context.Context, client *kube.Client, objs []*unstructured.Unstructured) error {
+func deleteObjects(ctx context.Context, client *kube.Client, objs []*unstructured.Unstructured) error {
 	background := metav1.DeletePropagationBackground
 	for _, obj := range objs {
 		gvk := obj.GroupVersionKind()

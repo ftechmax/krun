@@ -8,13 +8,13 @@ By default the helper listens on `http://127.0.0.1:47831` and only accepts loopb
 krun install
 ```
 
-You can also run the helper directly if you want to point it at a specific kubeconfig or workspace:
+You can also run the helper directly when elevated. Pass the user config directory explicitly because elevated processes resolve their home directory differently:
 
 ```sh
-krun-helper --kubeconfig ~/.kube/config --workspace /path/to/workspace
+krun-helper --config-path "$HOME/.krun"
 ```
 
-`--workspace` should point to a directory containing `krun-config.json`. If you omit it, `krun-helper` loads `krun-config.json` from next to the binary.
+The shared `config.json` and `token.bin` live in `$HOME/.krun/` on Linux, or `%USERPROFILE%\.krun\` on Windows. `--config-path` is required when starting `krun-helper`.
 
 If you override the listen address with `--listen`, it still must be a loopback address such as `127.0.0.1:47831` or `localhost:47831`.
 
@@ -55,18 +55,18 @@ data: {"ok":false,"error":"..."}
 | Method | Path | Description |
 | --- | --- | --- |
 | `GET` | `/healthz` | Lightweight health check. Returns `{"success":true,"message":"ok"}` when the daemon is ready. |
-| `GET` | `/v1/services` | Discover projects and services from the current `krun-config.json` workspace. |
-| `POST` | `/v1/build` | Build a project or a single service. Response is an SSE stream. |
-| `POST` | `/v1/deploy` | Deploy a project. The `target` can be either the project name or any service in that project. Response is an SSE stream. |
-| `POST` | `/v1/delete` | Delete a project. The `target` can be either the project name or any service in that project. Response is an SSE stream. |
+| `GET` | `/v1/workspace/list` | Discover projects and services from the current `config.json` workspace. |
+| `GET` | `/v1/workspace/service/{serviceName}` | Fetch a single service definition by name. |
+| `POST` | `/v1/workspace/build` | Build a project or a single service. Response is an SSE stream. |
+| `POST` | `/v1/workspace/deploy` | Deploy a project. The `target` can be either the project name or any service in that project. Response is an SSE stream. |
+| `POST` | `/v1/workspace/delete` | Delete a project. The `target` can be either the project name or any service in that project. Response is an SSE stream. |
 | `GET` | `/v1/debug/sessions` | List the active debug sessions currently tracked by the local helper. |
 | `POST` | `/v1/debug/enable` | Enable a local debug session: hosts file entries, dependency port-forwards, and traffic-manager session. |
 | `POST` | `/v1/debug/disable` | Disable a local debug session and clean up local state. |
-| `POST` | `/v1/shutdown` | Stop the running helper daemon. |
 
 ## Request and Response Shapes
 
-### `GET /v1/services`
+### `GET /v1/workspace/list`
 
 Returns discovered services and unique project names:
 
@@ -89,7 +89,27 @@ Returns discovered services and unique project names:
 }
 ```
 
-### `POST /v1/build`
+### `GET /v1/workspace/service/{serviceName}`
+
+Returns the definition of a single discovered service. The `serviceName` path segment must match the `name` field from a `krun.json` entry.
+
+```json
+{
+  "name": "awesome-app-api",
+  "project": "awesome-app",
+  "namespace": "default",
+  "path": "src/api",
+  "dockerfile": "AwesomeApp.Api",
+  "context": "src/",
+  "container_port": 8080,
+  "intercept_port": 5000,
+  "service_dependencies": []
+}
+```
+
+Returns `404 Not Found` with the standard error shape if no service matches the given name.
+
+### `POST /v1/workspace/build`
 
 Request body:
 
@@ -104,7 +124,7 @@ Request body:
 
 `target` may be either a project name or a service name.
 
-### `POST /v1/deploy`
+### `POST /v1/workspace/deploy`
 
 Request body:
 
@@ -118,7 +138,7 @@ Request body:
 
 `target` may be either a project name or a service name, but deploy always applies to the whole project.
 
-### `POST /v1/delete`
+### `POST /v1/workspace/delete`
 
 Request body:
 

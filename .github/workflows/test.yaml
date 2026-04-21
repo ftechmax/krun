@@ -9,7 +9,6 @@ on:
       - 'deploy/**'
       - 'internal/**'
       - 'test/**'
-      - 'krun-config.json'
       - '**/*.mod'
       - '**/*.sum'
   workflow_dispatch:
@@ -85,7 +84,8 @@ jobs:
           chmod +x bin/krun
           chmod +x bin/krun-helper
           
-          cat > bin/krun-config.json <<EOF
+          mkdir -p "$HOME/.krun"
+          cat > "$HOME/.krun/config.json" <<EOF
           {
             "source": {
               "path": "${GITHUB_WORKSPACE}/apps",

@@ -1,110 +1,66 @@
 package hostfile
 
 import (
-	"slices"
 	"strings"
 	"sync"
 
 	"github.com/ftechmax/krun/internal/contracts"
 )
 
-type SessionHostsRegistry struct {
+type Registry struct {
 	mu       sync.Mutex
 	sessions map[string][]contracts.HostsEntry
 }
 
-func NewSessionHostsRegistry() *SessionHostsRegistry {
-	return &SessionHostsRegistry{
+func NewRegistry() *Registry {
+	return &Registry{
 		sessions: map[string][]contracts.HostsEntry{},
 	}
 }
 
-func (r *SessionHostsRegistry) Upsert(sessionKey string, entries []contracts.HostsEntry) []contracts.HostsEntry {
+func (r *Registry) Upsert(sessionKey string, entries []contracts.HostsEntry) []contracts.HostsEntry {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	key := normalizeSessionKey(sessionKey)
-	normalized := normalizeEntries(entries)
-	if len(normalized) == 0 {
-		delete(r.sessions, key)
+	if sessionKey == "" || len(entries) == 0 {
+		delete(r.sessions, sessionKey)
 	} else {
-		r.sessions[key] = normalized
+		r.sessions[sessionKey] = cloneEntries(entries)
 	}
-	return mergeEntries(r.sessions)
+
+	return r.mergedLocked()
 }
 
-func (r *SessionHostsRegistry) Remove(sessionKey string) []contracts.HostsEntry {
+func (r *Registry) Remove(sessionKey string) []contracts.HostsEntry {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if strings.TrimSpace(sessionKey) == "" {
-		r.sessions = map[string][]contracts.HostsEntry{}
-		return nil
-	}
-	delete(r.sessions, normalizeSessionKey(sessionKey))
-	return mergeEntries(r.sessions)
+	delete(r.sessions, sessionKey)
+	return r.mergedLocked()
 }
 
-func (r *SessionHostsRegistry) Clear() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.sessions = map[string][]contracts.HostsEntry{}
-}
-
-func normalizeSessionKey(sessionKey string) string {
-	trimmed := strings.TrimSpace(sessionKey)
-	if trimmed == "" {
-		return "__default__"
-	}
-	return trimmed
-}
-
-func normalizeEntries(entries []contracts.HostsEntry) []contracts.HostsEntry {
-	result := make([]contracts.HostsEntry, 0, len(entries))
-	seen := map[string]bool{}
-	for _, entry := range entries {
-		ip := strings.TrimSpace(entry.IP)
-		host := strings.TrimSpace(entry.Hostname)
-		if ip == "" || host == "" {
-			continue
-		}
-		key := ip + "|" + host
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		result = append(result, contracts.HostsEntry{
-			IP:       ip,
-			Hostname: host,
-		})
-	}
-	slices.SortFunc(result, func(a, b contracts.HostsEntry) int {
-		if a.Hostname == b.Hostname {
-			return strings.Compare(a.IP, b.IP)
-		}
-		return strings.Compare(a.Hostname, b.Hostname)
-	})
-	return result
-}
-
-func mergeEntries(sessions map[string][]contracts.HostsEntry) []contracts.HostsEntry {
+func (r *Registry) mergedLocked() []contracts.HostsEntry {
 	merged := make([]contracts.HostsEntry, 0)
-	seen := map[string]bool{}
-	for _, entries := range sessions {
+	indexByHost := map[string]int{}
+	for _, entries := range r.sessions {
 		for _, entry := range entries {
-			key := entry.IP + "|" + entry.Hostname
-			if seen[key] {
+			host := strings.TrimSpace(entry.Hostname)
+			if host == "" {
 				continue
 			}
-			seen[key] = true
+			if idx, ok := indexByHost[host]; ok {
+				merged[idx] = entry
+				continue
+			}
+			indexByHost[host] = len(merged)
 			merged = append(merged, entry)
 		}
 	}
-	slices.SortFunc(merged, func(a, b contracts.HostsEntry) int {
-		if a.Hostname == b.Hostname {
-			return strings.Compare(a.IP, b.IP)
-		}
-		return strings.Compare(a.Hostname, b.Hostname)
-	})
 	return merged
+}
+
+func cloneEntries(entries []contracts.HostsEntry) []contracts.HostsEntry {
+	out := make([]contracts.HostsEntry, len(entries))
+	copy(out, entries)
+	return out
 }

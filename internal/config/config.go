@@ -1,15 +1,12 @@
 package config
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
-	"os/user"
 	"path/filepath"
 	"strings"
-
-	"github.com/ftechmax/krun/internal/utils"
 )
 
 type Service struct {
@@ -48,26 +45,34 @@ type Config struct {
 	KubeConfig   string
 	Registry     string
 	ProjectPaths map[string]string
+	AuthToken    string
 }
 
-func ParseKrunConfig() (KrunConfig, error) {
-	exePath, err := utils.GetExecutablePath()
-	if err != nil {
-		return KrunConfig{}, fmt.Errorf("failed to get executable path: %w", err)
-	}
+const (
+	KrunDirName    = ".krun"
+	ConfigFileName = "config.json"
+	TokenFileName  = "token.bin"
+)
 
-	return ParseKrunConfigFromDir(filepath.Dir(exePath))
+func LoadKrunConfig() (KrunConfig, error) {
+	dir, err := defaultKrunDir()
+	if err != nil {
+		return KrunConfig{}, err
+	}
+	return LoadKrunConfigDir(dir)
 }
 
-func ParseKrunConfigFromDir(configDir string) (KrunConfig, error) {
-	configPath := filepath.Join(configDir, "krun-config.json")
-	file, err := os.Open(configPath) //nolint:gosec // Path is derived from a trusted config directory and fixed filename.
-	if err != nil {
-		return KrunConfig{}, fmt.Errorf("failed to open file: %w", err)
+// LoadKrunConfigDir reads <dir>/config.json.
+func LoadKrunConfigDir(dir string) (KrunConfig, error) {
+	if strings.TrimSpace(dir) == "" {
+		return KrunConfig{}, fmt.Errorf("config dir is required")
 	}
-	defer file.Close()
+	file := filepath.Join(dir, ConfigFileName)
+	if _, err := os.Stat(file); os.IsNotExist(err) {
+		return KrunConfig{}, fmt.Errorf("file %s does not exist: %w", file, err)
+	}
 
-	bytes, err := io.ReadAll(file)
+	bytes, err := os.ReadFile(file) //nolint:gosec // Path derived from caller-supplied dir + fixed filename.
 	if err != nil {
 		return KrunConfig{}, fmt.Errorf("failed to read file: %w", err)
 	}
@@ -77,193 +82,79 @@ func ParseKrunConfigFromDir(configDir string) (KrunConfig, error) {
 		return KrunConfig{}, fmt.Errorf("failed to unmarshal JSON: %w", err)
 	}
 
-	config.Path = ExpandPath(config.Path)
+	config.Path = expandPathWithHome(config.Path, dir)
 
 	return config, nil
 }
 
-func ExpandPath(path string) string {
-	return expandHomePath(os.ExpandEnv(path))
+func LoadToken() (string, error) {
+	dir, err := defaultKrunDir()
+	if err != nil {
+		return "", err
+	}
+	return LoadTokenDir(dir)
 }
 
-func expandHomePath(path string) string {
-	trimmed := strings.TrimSpace(path)
-	if trimmed == "" {
+// LoadTokenDir reads <dir>/token.bin.
+func LoadTokenDir(dir string) (string, error) {
+	if strings.TrimSpace(dir) == "" {
+		return "", fmt.Errorf("config dir is required")
+	}
+	file := filepath.Join(dir, TokenFileName)
+	if _, err := os.Stat(file); os.IsNotExist(err) {
+		return "", fmt.Errorf("file %s does not exist: %w", file, err)
+	}
+
+	bytes, err := os.ReadFile(file) //nolint:gosec // Path derived from caller-supplied dir + fixed filename.
+	if err != nil {
+		return "", fmt.Errorf("failed to read file: %w", err)
+	}
+
+	return base64.StdEncoding.EncodeToString(bytes), nil
+}
+
+func defaultKrunDir() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get user home directory: %w", err)
+	}
+	return filepath.Join(homeDir, KrunDirName), nil
+}
+
+func expandPathWithHome(path, configDir string) string {
+	if path == "" {
 		return path
 	}
 
-	home := resolvePreferredHomeDir()
-	if home == "" {
-		return path
-	}
-
-	if trimmed == "~" {
-		return home
-	}
-
-	if strings.HasPrefix(trimmed, "~/") || strings.HasPrefix(trimmed, "~\\") {
-		suffix := strings.TrimPrefix(trimmed, "~/")
-		suffix = strings.TrimPrefix(suffix, "~\\")
-		return filepath.Join(home, suffix)
-	}
-
-	return path
-}
-
-func resolvePreferredHomeDir() string {
-	if home := strings.TrimSpace(os.Getenv("KRUN_HOME")); home != "" {
-		return home
-	}
-	if home := lookupHomeByUsername(strings.TrimSpace(os.Getenv("SUDO_USER"))); home != "" {
-		return home
-	}
-	if home := lookupHomeByUID(strings.TrimSpace(os.Getenv("PKEXEC_UID"))); home != "" {
-		return home
-	}
-	if home := lookupHomeByUID(strings.TrimSpace(os.Getenv("SUDO_UID"))); home != "" {
-		return home
-	}
-
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(home)
-}
-
-func lookupHomeByUsername(username string) string {
-	if username == "" {
-		return ""
-	}
-	record, err := user.Lookup(username)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(record.HomeDir)
-}
-
-func lookupHomeByUID(uid string) string {
-	if uid == "" {
-		return ""
-	}
-	record, err := user.LookupId(uid)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(record.HomeDir)
-}
-
-func DiscoverServices(sourceDir string, searchDepth int) ([]Service, map[string]string, error) {
-	services := []Service{}
-	projectPaths := map[string]string{}
-	maxDepth := searchDepth + 1 // Add 1 to include the root directory itself
-
-	// Walk the directory to discover services
-	err := filepath.WalkDir(sourceDir, func(path string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-
-		depth, err := pathDepth(sourceDir, path)
-		if err != nil {
-			return err
-		}
-
-		if d.IsDir() {
-			if depth > maxDepth {
-				return filepath.SkipDir
+	if path == "~" || strings.HasPrefix(path, "~/") || strings.HasPrefix(path, `~\`) {
+		homeDir := homeFromConfigDir(configDir)
+		if homeDir == "" {
+			if h, err := os.UserHomeDir(); err == nil {
+				homeDir = h
+			} else {
+				return filepath.ToSlash(path)
 			}
-			return nil
 		}
-
-		if !isKrunConfigFile(d.Name(), depth, maxDepth) {
-			return nil
+		if path == "~" {
+			return filepath.ToSlash(homeDir)
 		}
-
-		svc, err := loadServicesFile(path)
-		if err != nil {
-			return err
-		}
-		if len(svc) == 0 {
-			return nil
-		}
-
-		project, projectRelPath, err := projectInfo(sourceDir, path)
-		if err != nil {
-			return err
-		}
-		applyDiscoveredServiceDefaults(svc, project)
-		projectPaths[project] = projectRelPath
-		services = append(services, svc...)
-		return nil
-	})
-
-	if err != nil {
-		return nil, nil, err
+		return filepath.ToSlash(filepath.Join(homeDir, path[2:]))
 	}
 
-	return services, projectPaths, nil
+	return filepath.ToSlash(path)
 }
 
-func pathDepth(sourceDir string, path string) (int, error) {
-	rel, err := filepath.Rel(sourceDir, path)
+func homeFromConfigDir(configDir string) string {
+	if strings.TrimSpace(configDir) == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(configDir)
 	if err != nil {
-		return 0, err
+		return ""
 	}
-	if rel == "." {
-		return 0, nil
+	parent := filepath.Dir(abs)
+	if parent == "" || parent == abs {
+		return ""
 	}
-	// filepath.SplitList splits PATH-like lists, not path segments.
-	return len(strings.Split(rel, string(os.PathSeparator))), nil
-}
-
-func isKrunConfigFile(name string, depth int, maxDepth int) bool {
-	return name == "krun.json" && depth <= maxDepth
-}
-
-func loadServicesFile(path string) ([]Service, error) {
-	file, err := os.Open(path) //nolint:gosec // Path is discovered via WalkDir within the configured source root.
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	bytes, err := io.ReadAll(file)
-	if err != nil {
-		return nil, err
-	}
-
-	var svc []Service
-	if err := json.Unmarshal(bytes, &svc); err != nil {
-		fmt.Printf("Warning: skipping invalid krun.json at %s: %v\n", path, err)
-		return nil, nil
-	}
-	return svc, nil
-}
-
-func projectInfo(sourceDir string, path string) (string, string, error) {
-	projectDir := filepath.Dir(path)
-	project := filepath.Base(projectDir)
-	projectRelPath, err := filepath.Rel(sourceDir, projectDir)
-	if err != nil {
-		return "", "", err
-	}
-	return project, filepath.ToSlash(projectRelPath), nil
-}
-
-func applyDiscoveredServiceDefaults(svc []Service, project string) {
-	for i := range svc {
-		// Set the project field based on the directory structure.
-		svc[i].Project = project
-
-		// Set the container port to a default value if not specified.
-		if svc[i].ContainerPort == 0 {
-			svc[i].ContainerPort = 8080
-		}
-
-		// Set the intercept port to a default value if not specified.
-		if svc[i].InterceptPort == 0 {
-			svc[i].InterceptPort = 5000
-		}
-	}
+	return parent
 }
