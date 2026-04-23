@@ -5,13 +5,37 @@ package helper
 import (
 	"fmt"
 	"time"
+	"unsafe"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/eventlog"
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
 const serviceName = "krun-helper"
+
+// openServiceForRead opens the SCM and service with read access only so
+// status checks work without administrator privileges.
+func openServiceForRead() (scm windows.Handle, service windows.Handle, err error) {
+	scm, err = windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	name, err := windows.UTF16PtrFromString(serviceName)
+	if err != nil {
+		windows.CloseServiceHandle(scm)
+		return 0, 0, err
+	}
+
+	service, err = windows.OpenService(scm, name, windows.SERVICE_QUERY_STATUS)
+	if err != nil {
+		windows.CloseServiceHandle(scm)
+		return 0, 0, err
+	}
+	return scm, service, nil
+}
 
 func installHelperService(binaryPath, kubeConfigPath, _ string) error {
 	m, err := mgr.Connect()
@@ -68,17 +92,12 @@ func uninstallHelperService() error {
 }
 
 func isHelperServiceInstalled() bool {
-	m, err := mgr.Connect()
+	scm, service, err := openServiceForRead()
 	if err != nil {
 		return false
 	}
-	defer m.Disconnect()
-
-	s, err := m.OpenService(serviceName)
-	if err != nil {
-		return false
-	}
-	s.Close()
+	windows.CloseServiceHandle(service)
+	windows.CloseServiceHandle(scm)
 	return true
 }
 
@@ -99,23 +118,26 @@ func startHelperService() error {
 }
 
 func helperServiceStatus() (running bool, installed bool) {
-	m, err := mgr.Connect()
+	scm, service, err := openServiceForRead()
 	if err != nil {
 		return false, false
 	}
-	defer m.Disconnect()
+	defer windows.CloseServiceHandle(scm)
+	defer windows.CloseServiceHandle(service)
 
-	s, err := m.OpenService(serviceName)
-	if err != nil {
-		return false, false
-	}
-	defer s.Close()
-
-	status, err := s.Query()
+	var status windows.SERVICE_STATUS_PROCESS
+	var needed uint32
+	err = windows.QueryServiceStatusEx(
+		service,
+		windows.SC_STATUS_PROCESS_INFO,
+		(*byte)(unsafe.Pointer(&status)),
+		uint32(unsafe.Sizeof(status)),
+		&needed,
+	)
 	if err != nil {
 		return false, true
 	}
-	return status.State == svc.Running, true
+	return svc.State(status.CurrentState) == svc.Running, true
 }
 
 func stopWindowsService(s *mgr.Service) error {

@@ -63,6 +63,17 @@ func (s *helperService) Execute(args []string, r <-chan svc.ChangeRequest, chang
 	}
 }
 
+// ShouldRunAsService reports whether the helper was launched by the Windows
+// Service Control Manager. The serviceFlag argument is ignored on Windows:
+// the SCM always sets the process up so that svc.IsWindowsService is true.
+func ShouldRunAsService(_ bool) bool {
+	isService, err := svc.IsWindowsService()
+	if err != nil {
+		return false
+	}
+	return isService
+}
+
 // RunAsService starts the helper daemon as a Windows service.
 func RunAsService(listenAddress, kubeConfigPath string, startDaemon StartDaemonFunc) error {
 	elog, err := eventlog.Open(serviceName)

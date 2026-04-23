@@ -110,13 +110,23 @@ func main() {
 			Hidden:           true,
 			Args:             cobra.NoArgs,
 			PersistentPreRun: preRunKubeConfigOnly,
-			Run:              func(cmd *cobra.Command, args []string) { helper.HelperInstall(config) },
+			Run: func(cmd *cobra.Command, args []string) {
+				if err := helper.HelperInstallService(config); err != nil {
+					fmt.Println(utils.Colorize(err.Error(), utils.Red))
+					os.Exit(1)
+				}
+			},
 		},
 		&cobra.Command{
 			Use:    "__helper-uninstall",
 			Hidden: true,
 			Args:   cobra.NoArgs,
-			Run:    func(cmd *cobra.Command, args []string) { helper.HelperUninstall() },
+			Run: func(cmd *cobra.Command, args []string) {
+				if err := helper.HelperUninstallService(); err != nil {
+					fmt.Println(utils.Colorize(err.Error(), utils.Red))
+					os.Exit(1)
+				}
+			},
 		},
 	)
 

@@ -67,12 +67,6 @@ func HelperStop() {
 }
 
 func HelperInstall(config cfg.Config) {
-	binaryPath, err := resolveHelperBinaryPath()
-	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("cannot find krun-helper binary: %v", err), utils.Red))
-		return
-	}
-
 	absKubeConfig, err := filepath.Abs(config.KubeConfig)
 	if err != nil {
 		fmt.Println(utils.Colorize(fmt.Sprintf("cannot resolve kubeconfig path: %v", err), utils.Red))
@@ -82,13 +76,13 @@ func HelperInstall(config cfg.Config) {
 	if needsElevationForHelperService() {
 		if err := rerunHelperServiceCommandElevated("install", absKubeConfig); err != nil {
 			fmt.Println(utils.Colorize(fmt.Sprintf("failed to install helper service: %v", err), utils.Red))
+			return
 		}
-		return
-	}
-
-	if err := installHelperService(binaryPath, absKubeConfig, resolveInstallerHomeDir()); err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("failed to install helper service: %v", err), utils.Red))
-		return
+	} else {
+		if err := HelperInstallService(config); err != nil {
+			fmt.Println(utils.Colorize(fmt.Sprintf("failed to install helper service: %v", err), utils.Red))
+			return
+		}
 	}
 
 	fmt.Println("Waiting for helper service to become ready...")
@@ -100,6 +94,23 @@ func HelperInstall(config cfg.Config) {
 	fmt.Println(utils.Colorize("helper service installed", utils.Green))
 }
 
+// HelperInstallService installs the platform service. The caller must already
+// be running with elevated privileges. Returns an error so the hidden
+// __helper-install command can signal failure with a non-zero exit code.
+func HelperInstallService(config cfg.Config) error {
+	binaryPath, err := resolveHelperBinaryPath()
+	if err != nil {
+		return fmt.Errorf("cannot find krun-helper binary: %w", err)
+	}
+
+	absKubeConfig, err := filepath.Abs(config.KubeConfig)
+	if err != nil {
+		return fmt.Errorf("cannot resolve kubeconfig path: %w", err)
+	}
+
+	return installHelperService(binaryPath, absKubeConfig, resolveInstallerHomeDir())
+}
+
 func HelperUninstall() {
 	if !isHelperServiceInstalled() {
 		fmt.Println(utils.Colorize("helper service is not installed", utils.Yellow))
@@ -109,15 +120,21 @@ func HelperUninstall() {
 	if needsElevationForHelperService() {
 		if err := rerunHelperServiceCommandElevated("uninstall", ""); err != nil {
 			fmt.Println(utils.Colorize(fmt.Sprintf("failed to uninstall helper service: %v", err), utils.Red))
+			return
 		}
-		return
-	}
-
-	if err := uninstallHelperService(); err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("failed to uninstall helper service: %v", err), utils.Red))
-		return
+	} else {
+		if err := HelperUninstallService(); err != nil {
+			fmt.Println(utils.Colorize(fmt.Sprintf("failed to uninstall helper service: %v", err), utils.Red))
+			return
+		}
 	}
 	fmt.Println(utils.Colorize("helper service uninstalled", utils.Green))
+}
+
+// HelperUninstallService removes the platform service. The caller must already
+// be running with elevated privileges.
+func HelperUninstallService() error {
+	return uninstallHelperService()
 }
 
 func needsElevationForHelperService() bool {

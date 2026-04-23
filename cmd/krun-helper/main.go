@@ -119,8 +119,8 @@ func main() {
 		Use:   "krun-helper",
 		Short: "Elevated daemon helper for krun debug sessions",
 		Run: func(cmd *cobra.Command, args []string) {
-			if shouldRunAsService(serviceFlag) {
-				if err := runAsService(listenAddress, kubeConfigPath); err != nil {
+			if service.ShouldRunAsService(serviceFlag) {
+				if err := service.RunAsService(listenAddress, kubeConfigPath, startHelperDaemonForService); err != nil {
 					fmt.Printf("service failed: %v\n", err)
 					os.Exit(1)
 				}

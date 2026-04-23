@@ -13,6 +13,13 @@ var dialNotifySocket = func(addr *net.UnixAddr) (net.Conn, error) {
 	return net.DialUnix("unixgram", nil, addr)
 }
 
+// ShouldRunAsService reports whether the helper should enter service mode.
+// On Linux, this is driven by the caller-supplied --service flag (set by
+// systemd's ExecStart).
+func ShouldRunAsService(serviceFlag bool) bool {
+	return serviceFlag
+}
+
 // RunAsService starts the helper daemon in systemd service mode.
 // It calls startDaemon (provided by the caller) and sends sd_notify READY=1
 // once the listener is bound.
