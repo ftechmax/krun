@@ -21,7 +21,7 @@ After=network.target
 [Service]
 Type=notify
 %s
-ExecStart=%s --service --kubeconfig %s
+ExecStart=%s --kubeconfig %s
 Restart=on-failure
 RestartSec=5
 

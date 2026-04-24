@@ -113,13 +113,12 @@ func main() {
 	var kubeConfigPath string
 	var listenAddress string
 	var workspacePath string
-	var serviceFlag bool
 
 	rootCmd := &cobra.Command{
 		Use:   "krun-helper",
 		Short: "Elevated daemon helper for krun debug sessions",
 		Run: func(cmd *cobra.Command, args []string) {
-			if service.ShouldRunAsService(serviceFlag) {
+			if service.ShouldRunAsService() {
 				if err := service.RunAsService(listenAddress, kubeConfigPath, startHelperDaemonForService); err != nil {
 					fmt.Printf("service failed: %v\n", err)
 					os.Exit(1)
@@ -136,7 +135,6 @@ func main() {
 	rootCmd.Flags().StringVar(&kubeConfigPath, "kubeconfig", "", "Path to kubeconfig file")
 	rootCmd.Flags().StringVar(&listenAddress, "listen", "", "Daemon listen address")
 	rootCmd.Flags().StringVar(&workspacePath, "workspace", "", "Path to a workspace containing krun-config.json")
-	rootCmd.Flags().BoolVar(&serviceFlag, "service", false, "Run as system service (used by systemd ExecStart)")
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)

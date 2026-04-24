@@ -14,10 +14,9 @@ var dialNotifySocket = func(addr *net.UnixAddr) (net.Conn, error) {
 }
 
 // ShouldRunAsService reports whether the helper should enter service mode.
-// On Linux, this is driven by the caller-supplied --service flag (set by
-// systemd's ExecStart).
-func ShouldRunAsService(serviceFlag bool) bool {
-	return serviceFlag
+// On Linux, systemd exposes service execution through NOTIFY_SOCKET.
+func ShouldRunAsService() bool {
+	return strings.TrimSpace(os.Getenv("NOTIFY_SOCKET")) != ""
 }
 
 // RunAsService starts the helper daemon in systemd service mode.

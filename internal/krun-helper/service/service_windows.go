@@ -64,9 +64,8 @@ func (s *helperService) Execute(args []string, r <-chan svc.ChangeRequest, chang
 }
 
 // ShouldRunAsService reports whether the helper was launched by the Windows
-// Service Control Manager. The serviceFlag argument is ignored on Windows:
-// the SCM always sets the process up so that svc.IsWindowsService is true.
-func ShouldRunAsService(_ bool) bool {
+// Service Control Manager.
+func ShouldRunAsService() bool {
 	isService, err := svc.IsWindowsService()
 	if err != nil {
 		return false

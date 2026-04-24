@@ -8,6 +8,18 @@ import (
 	"time"
 )
 
+func TestShouldRunAsService(t *testing.T) {
+	t.Setenv("NOTIFY_SOCKET", "@systemd-notify")
+	if !ShouldRunAsService() {
+		t.Fatalf("expected NOTIFY_SOCKET to enable service mode")
+	}
+
+	t.Setenv("NOTIFY_SOCKET", " \t ")
+	if ShouldRunAsService() {
+		t.Fatalf("expected empty NOTIFY_SOCKET to keep service mode disabled")
+	}
+}
+
 func TestNormalizeNotifySocketAddress(t *testing.T) {
 	if got := normalizeNotifySocketAddress("/run/systemd/notify"); got != "/run/systemd/notify" {
 		t.Fatalf("expected filesystem socket path to remain unchanged, got %q", got)
