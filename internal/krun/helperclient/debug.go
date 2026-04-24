@@ -17,18 +17,6 @@ import (
 var lookupCurrentUser = user.Current
 
 func HelperDebugSessionsList(config cfg.Config) ([]contracts.HelperDebugSession, error) {
-	return helperDebugSessionsList(config)
-}
-
-func HelperDebugEnable(config cfg.Config, context contracts.DebugServiceContext, containerName string) (contracts.HelperResponse, error) {
-	return helperDebugEnable(config, context, containerName)
-}
-
-func HelperDebugDisable(config cfg.Config, context contracts.DebugServiceContext) (contracts.HelperResponse, error) {
-	return helperDebugDisable(config, context)
-}
-
-func helperDebugSessionsList(config cfg.Config) ([]contracts.HelperDebugSession, error) {
 	if err := helper.EnsureStarted(config); err != nil {
 		return nil, fmt.Errorf("helper unreachable: %w", err)
 	}
@@ -40,7 +28,7 @@ func helperDebugSessionsList(config cfg.Config) ([]contracts.HelperDebugSession,
 	return response.Sessions, nil
 }
 
-func helperDebugEnable(config cfg.Config, context contracts.DebugServiceContext, containerName string) (contracts.HelperResponse, error) {
+func HelperDebugEnable(config cfg.Config, context contracts.DebugServiceContext, containerName string) (contracts.HelperResponse, error) {
 	if err := helper.EnsureStarted(config); err != nil {
 		return contracts.HelperResponse{}, fmt.Errorf("helper unreachable: %w", err)
 	}
@@ -55,7 +43,7 @@ func helperDebugEnable(config cfg.Config, context contracts.DebugServiceContext,
 	return response, err
 }
 
-func helperDebugDisable(config cfg.Config, context contracts.DebugServiceContext) (contracts.HelperResponse, error) {
+func HelperDebugDisable(config cfg.Config, context contracts.DebugServiceContext) (contracts.HelperResponse, error) {
 	if err := helper.EnsureStarted(config); err != nil {
 		return contracts.HelperResponse{}, fmt.Errorf("helper unreachable: %w", err)
 	}

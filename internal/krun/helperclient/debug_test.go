@@ -58,9 +58,9 @@ func TestHelperDebugEnableSendsRequestAndParsesResponse(t *testing.T) {
 	helper.BaseURL = server.URL
 	t.Cleanup(func() { helper.BaseURL = originalBaseURL })
 
-	response, err := helperDebugEnable(cfg.Config{}, contracts.DebugServiceContext{ServiceName: "svc-a"}, "custom-container")
+	response, err := HelperDebugEnable(cfg.Config{}, contracts.DebugServiceContext{ServiceName: "svc-a"}, "custom-container")
 	if err != nil {
-		t.Fatalf("helperDebugEnable returned error: %v", err)
+		t.Fatalf("HelperDebugEnable returned error: %v", err)
 	}
 	if !response.Success {
 		t.Fatalf("expected success response, got %+v", response)
@@ -86,9 +86,9 @@ func TestHelperDebugDisableReturnsErrorPayload(t *testing.T) {
 	helper.BaseURL = server.URL
 	t.Cleanup(func() { helper.BaseURL = originalBaseURL })
 
-	_, err := helperDebugDisable(cfg.Config{}, contracts.DebugServiceContext{ServiceName: "svc-a"})
+	_, err := HelperDebugDisable(cfg.Config{}, contracts.DebugServiceContext{ServiceName: "svc-a"})
 	if err == nil {
-		t.Fatalf("expected helperDebugDisable to return error")
+		t.Fatalf("expected HelperDebugDisable to return error")
 	}
 	if !strings.Contains(err.Error(), "invalid session") {
 		t.Fatalf("unexpected error: %v", err)
@@ -114,9 +114,9 @@ func TestHelperDebugSessionsListDecodesSessions(t *testing.T) {
 	helper.BaseURL = server.URL
 	t.Cleanup(func() { helper.BaseURL = originalBaseURL })
 
-	sessions, err := helperDebugSessionsList(cfg.Config{})
+	sessions, err := HelperDebugSessionsList(cfg.Config{})
 	if err != nil {
-		t.Fatalf("helperDebugSessionsList returned error: %v", err)
+		t.Fatalf("HelperDebugSessionsList returned error: %v", err)
 	}
 	if len(sessions) != 1 || sessions[0].Context.ServiceName != "svc" {
 		t.Fatalf("unexpected sessions response: %+v", sessions)

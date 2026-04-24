@@ -31,7 +31,7 @@ WantedBy=multi-user.target
 
 func installHelperService(binaryPath, kubeConfigPath, userHome string) error {
 	// If already installed, stop and remove first for a clean update.
-	if isHelperServiceInstalled() {
+	if HelperServiceInstalled() {
 		if err := runSystemctl("stop", unitName); err != nil {
 			fmt.Printf("warning: failed to stop existing helper service: %v\n", err)
 		}
@@ -74,7 +74,7 @@ func uninstallHelperService() error {
 	return nil
 }
 
-func isHelperServiceInstalled() bool {
+func HelperServiceInstalled() bool {
 	_, err := os.Stat(unitPath)
 	return err == nil
 }
@@ -84,7 +84,7 @@ func startHelperService() error {
 }
 
 func helperServiceStatus() (running bool, installed bool) {
-	installed = isHelperServiceInstalled()
+	installed = HelperServiceInstalled()
 	if !installed {
 		return false, false
 	}

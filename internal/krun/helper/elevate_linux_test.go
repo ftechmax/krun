@@ -69,7 +69,7 @@ func TestBuildLinuxLaunchSpecErrorsWithoutElevationTool(t *testing.T) {
 }
 
 func TestBuildLinuxRunSpecUsesForegroundBinaryForRoot(t *testing.T) {
-	spec, err := buildLinuxRunSpec("/tmp/krun", []string{"debug", "helper", "install"}, 0, "/usr/bin/sudo", "/usr/bin/pkexec")
+	spec, err := buildLinuxRunSpec("/tmp/krun", []string{"install", "--kubeconfig", "/tmp/config"}, 0, "/usr/bin/sudo", "/usr/bin/pkexec")
 	if err != nil {
 		t.Fatalf("build run spec: %v", err)
 	}
@@ -81,14 +81,14 @@ func TestBuildLinuxRunSpecUsesForegroundBinaryForRoot(t *testing.T) {
 		t.Fatalf("expected foreground run for root")
 	}
 
-	wantArgs := []string{"debug", "helper", "install"}
+	wantArgs := []string{"install", "--kubeconfig", "/tmp/config"}
 	if !reflect.DeepEqual(spec.args, wantArgs) {
 		t.Fatalf("unexpected args: want %v, got %v", wantArgs, spec.args)
 	}
 }
 
 func TestBuildLinuxRunSpecPrefersSudo(t *testing.T) {
-	spec, err := buildLinuxRunSpec("/tmp/krun", []string{"debug", "helper", "install"}, 1000, "/usr/bin/sudo", "/usr/bin/pkexec")
+	spec, err := buildLinuxRunSpec("/tmp/krun", []string{"install", "--kubeconfig", "/tmp/config"}, 1000, "/usr/bin/sudo", "/usr/bin/pkexec")
 	if err != nil {
 		t.Fatalf("build run spec: %v", err)
 	}
@@ -100,14 +100,14 @@ func TestBuildLinuxRunSpecPrefersSudo(t *testing.T) {
 		t.Fatalf("expected foreground sudo command")
 	}
 
-	wantArgs := []string{"--", "/tmp/krun", "debug", "helper", "install"}
+	wantArgs := []string{"--", "/tmp/krun", "install", "--kubeconfig", "/tmp/config"}
 	if !reflect.DeepEqual(spec.args, wantArgs) {
 		t.Fatalf("unexpected args: want %v, got %v", wantArgs, spec.args)
 	}
 }
 
 func TestBuildLinuxRunSpecFallsBackToPkexec(t *testing.T) {
-	spec, err := buildLinuxRunSpec("/tmp/krun", []string{"debug", "helper", "uninstall"}, 1000, "", "/usr/bin/pkexec")
+	spec, err := buildLinuxRunSpec("/tmp/krun", []string{"uninstall", "--kubeconfig", "/tmp/config"}, 1000, "", "/usr/bin/pkexec")
 	if err != nil {
 		t.Fatalf("build run spec: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestBuildLinuxRunSpecFallsBackToPkexec(t *testing.T) {
 		t.Fatalf("expected pkexec launcher, got %q", spec.path)
 	}
 
-	wantArgs := []string{"/tmp/krun", "debug", "helper", "uninstall"}
+	wantArgs := []string{"/tmp/krun", "uninstall", "--kubeconfig", "/tmp/config"}
 	if !reflect.DeepEqual(spec.args, wantArgs) {
 		t.Fatalf("unexpected args: want %v, got %v", wantArgs, spec.args)
 	}

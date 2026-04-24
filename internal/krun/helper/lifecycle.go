@@ -21,10 +21,6 @@ import (
 
 var BaseURL = "http://127.0.0.1:47831"
 
-func EnsureStarted(config cfg.Config) error {
-	return ensureHelperStarted(config)
-}
-
 func HelperStatus(config cfg.Config) {
 	running, installed := helperServiceStatus()
 	if !installed {
@@ -67,22 +63,9 @@ func HelperStop() {
 }
 
 func HelperInstall(config cfg.Config) {
-	absKubeConfig, err := filepath.Abs(config.KubeConfig)
-	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("cannot resolve kubeconfig path: %v", err), utils.Red))
+	if err := HelperInstallService(config); err != nil {
+		fmt.Println(utils.Colorize(fmt.Sprintf("failed to install helper service: %v", err), utils.Red))
 		return
-	}
-
-	if needsElevationForHelperService() {
-		if err := rerunHelperServiceCommandElevated("install", absKubeConfig); err != nil {
-			fmt.Println(utils.Colorize(fmt.Sprintf("failed to install helper service: %v", err), utils.Red))
-			return
-		}
-	} else {
-		if err := HelperInstallService(config); err != nil {
-			fmt.Println(utils.Colorize(fmt.Sprintf("failed to install helper service: %v", err), utils.Red))
-			return
-		}
 	}
 
 	fmt.Println("Waiting for helper service to become ready...")
@@ -95,8 +78,7 @@ func HelperInstall(config cfg.Config) {
 }
 
 // HelperInstallService installs the platform service. The caller must already
-// be running with elevated privileges. Returns an error so the hidden
-// __helper-install command can signal failure with a non-zero exit code.
+// be running with elevated privileges.
 func HelperInstallService(config cfg.Config) error {
 	binaryPath, err := resolveHelperBinaryPath()
 	if err != nil {
@@ -112,50 +94,32 @@ func HelperInstallService(config cfg.Config) error {
 }
 
 func HelperUninstall() {
-	if !isHelperServiceInstalled() {
+	if !HelperServiceInstalled() {
 		fmt.Println(utils.Colorize("helper service is not installed", utils.Yellow))
 		return
 	}
 
-	if needsElevationForHelperService() {
-		if err := rerunHelperServiceCommandElevated("uninstall", ""); err != nil {
-			fmt.Println(utils.Colorize(fmt.Sprintf("failed to uninstall helper service: %v", err), utils.Red))
-			return
-		}
-	} else {
-		if err := HelperUninstallService(); err != nil {
-			fmt.Println(utils.Colorize(fmt.Sprintf("failed to uninstall helper service: %v", err), utils.Red))
-			return
-		}
+	if err := uninstallHelperService(); err != nil {
+		fmt.Println(utils.Colorize(fmt.Sprintf("failed to uninstall helper service: %v", err), utils.Red))
+		return
 	}
 	fmt.Println(utils.Colorize("helper service uninstalled", utils.Green))
 }
 
-// HelperUninstallService removes the platform service. The caller must already
-// be running with elevated privileges.
-func HelperUninstallService() error {
-	return uninstallHelperService()
-}
-
-func needsElevationForHelperService() bool {
+func HelperServiceRequiresElevation() bool {
 	return !isProcessElevated()
 }
 
-func rerunHelperServiceCommandElevated(action string, kubeConfigPath string) error {
+func RerunKrunCommandElevated(args []string) error {
 	krunBinaryPath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("resolve krun executable: %w", err)
 	}
 
-	args := []string{"__helper-" + action}
-	if trimmedKubeConfig := strings.TrimSpace(kubeConfigPath); trimmedKubeConfig != "" {
-		args = append(args, "--kubeconfig", trimmedKubeConfig)
-	}
-
 	return runElevatedCommand(krunBinaryPath, args)
 }
 
-func ensureHelperStarted(config cfg.Config) error {
+func EnsureStarted(config cfg.Config) error {
 	// 1. Already running?
 	if err := helperCheckHealth(); err == nil {
 		return nil

@@ -40,7 +40,7 @@ type shellExecuteInfo struct {
 func startElevatedProcess(binaryPath string, args []string) error {
 	verb, _ := syscall.UTF16PtrFromString("runas")
 	file, _ := syscall.UTF16PtrFromString(binaryPath)
-	params, _ := syscall.UTF16PtrFromString(strings.Join(args, " "))
+	params, _ := syscall.UTF16PtrFromString(joinWindowsCommandArgs(args))
 
 	ret, _, _ := procShellExecute.Call(
 		0,
@@ -64,7 +64,7 @@ func startElevatedProcess(binaryPath string, args []string) error {
 func runElevatedCommand(binaryPath string, args []string) error {
 	verb, _ := syscall.UTF16PtrFromString("runas")
 	file, _ := syscall.UTF16PtrFromString(binaryPath)
-	params, _ := syscall.UTF16PtrFromString(strings.Join(args, " "))
+	params, _ := syscall.UTF16PtrFromString(joinWindowsCommandArgs(args))
 
 	info := shellExecuteInfo{
 		fMask:        seeMaskNoCloseProcess,
@@ -93,6 +93,14 @@ func runElevatedCommand(binaryPath string, args []string) error {
 		return fmt.Errorf("elevated process exited with code %d", exitCode)
 	}
 	return nil
+}
+
+func joinWindowsCommandArgs(args []string) string {
+	escaped := make([]string, 0, len(args))
+	for _, arg := range args {
+		escaped = append(escaped, syscall.EscapeArg(arg))
+	}
+	return strings.Join(escaped, " ")
 }
 
 func isProcessElevated() bool {

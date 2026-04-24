@@ -91,7 +91,7 @@ func uninstallHelperService() error {
 	return nil
 }
 
-func isHelperServiceInstalled() bool {
+func HelperServiceInstalled() bool {
 	scm, service, err := openServiceForRead()
 	if err != nil {
 		return false

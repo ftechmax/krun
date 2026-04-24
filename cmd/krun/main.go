@@ -104,32 +104,6 @@ func main() {
 	}
 	rootCmd.AddCommand(installCmd, uninstallCmd, statusCmd)
 
-	rootCmd.AddCommand(
-		&cobra.Command{
-			Use:              "__helper-install",
-			Hidden:           true,
-			Args:             cobra.NoArgs,
-			PersistentPreRun: preRunKubeConfigOnly,
-			Run: func(cmd *cobra.Command, args []string) {
-				if err := helper.HelperInstallService(config); err != nil {
-					fmt.Println(utils.Colorize(err.Error(), utils.Red))
-					os.Exit(1)
-				}
-			},
-		},
-		&cobra.Command{
-			Use:    "__helper-uninstall",
-			Hidden: true,
-			Args:   cobra.NoArgs,
-			Run: func(cmd *cobra.Command, args []string) {
-				if err := helper.HelperUninstallService(); err != nil {
-					fmt.Println(utils.Colorize(err.Error(), utils.Red))
-					os.Exit(1)
-				}
-			},
-		},
-	)
-
 	debugCmd := &cobra.Command{
 		Use:              "debug",
 		Short:            "Debug commands",
@@ -407,13 +381,48 @@ func handleDebugHelperStop(cmd *cobra.Command, args []string) {
 }
 
 func handleInstall(cmd *cobra.Command, args []string) {
+	if helper.HelperServiceRequiresElevation() {
+		rerunArgs, err := elevatedCommandArgs("install")
+		if err != nil {
+			fmt.Println(utils.Colorize(err.Error(), utils.Red))
+			os.Exit(1)
+		}
+		if err := helper.RerunKrunCommandElevated(rerunArgs); err != nil {
+			fmt.Println(utils.Colorize(fmt.Sprintf("failed to re-run install with elevation: %v", err), utils.Red))
+			os.Exit(1)
+		}
+		return
+	}
+
 	helper.HelperInstall(config)
 	krunruntime.RuntimeInstall(config, version)
 }
 
 func handleUninstall(cmd *cobra.Command, args []string) {
+	if helper.HelperServiceInstalled() && helper.HelperServiceRequiresElevation() {
+		rerunArgs, err := elevatedCommandArgs("uninstall")
+		if err != nil {
+			fmt.Println(utils.Colorize(err.Error(), utils.Red))
+			os.Exit(1)
+		}
+		if err := helper.RerunKrunCommandElevated(rerunArgs); err != nil {
+			fmt.Println(utils.Colorize(fmt.Sprintf("failed to re-run uninstall with elevation: %v", err), utils.Red))
+			os.Exit(1)
+		}
+		return
+	}
+
 	krunruntime.RuntimeUninstall(config, version)
 	helper.HelperUninstall()
+}
+
+func elevatedCommandArgs(commandName string) ([]string, error) {
+	absKubeConfigPath, err := filepath.Abs(strings.TrimSpace(config.KubeConfig))
+	if err != nil {
+		return nil, fmt.Errorf("cannot resolve kubeconfig path: %w", err)
+	}
+
+	return []string{commandName, "--kubeconfig", filepath.ToSlash(absKubeConfigPath)}, nil
 }
 
 func handleStatus(cmd *cobra.Command, args []string) {
