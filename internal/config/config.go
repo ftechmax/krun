@@ -51,15 +51,23 @@ type Config struct {
 }
 
 func ParseKrunConfig() (KrunConfig, error) {
+	return ParseKrunConfigWithHome("")
+}
+
+func ParseKrunConfigWithHome(homeDir string) (KrunConfig, error) {
 	exePath, err := utils.GetExecutablePath()
 	if err != nil {
 		return KrunConfig{}, fmt.Errorf("failed to get executable path: %w", err)
 	}
 
-	return ParseKrunConfigFromDir(filepath.Dir(exePath))
+	return ParseKrunConfigFromDirWithHome(filepath.Dir(exePath), homeDir)
 }
 
 func ParseKrunConfigFromDir(configDir string) (KrunConfig, error) {
+	return ParseKrunConfigFromDirWithHome(configDir, "")
+}
+
+func ParseKrunConfigFromDirWithHome(configDir string, homeDir string) (KrunConfig, error) {
 	configPath := filepath.Join(configDir, "krun-config.json")
 	file, err := os.Open(configPath) //nolint:gosec // Path is derived from a trusted config directory and fixed filename.
 	if err != nil {
@@ -77,22 +85,29 @@ func ParseKrunConfigFromDir(configDir string) (KrunConfig, error) {
 		return KrunConfig{}, fmt.Errorf("failed to unmarshal JSON: %w", err)
 	}
 
-	config.Path = ExpandPath(config.Path)
+	config.Path = ExpandPathWithHome(config.Path, homeDir)
 
 	return config, nil
 }
 
 func ExpandPath(path string) string {
-	return expandHomePath(os.ExpandEnv(path))
+	return ExpandPathWithHome(path, "")
 }
 
-func expandHomePath(path string) string {
+func ExpandPathWithHome(path string, homeDir string) string {
+	return expandHomePath(os.ExpandEnv(path), homeDir)
+}
+
+func expandHomePath(path string, homeDir string) string {
 	trimmed := strings.TrimSpace(path)
 	if trimmed == "" {
 		return path
 	}
 
-	home := resolvePreferredHomeDir()
+	home := strings.TrimSpace(homeDir)
+	if home == "" {
+		home = resolvePreferredHomeDir()
+	}
 	if home == "" {
 		return path
 	}

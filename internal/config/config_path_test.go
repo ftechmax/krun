@@ -8,8 +8,18 @@ import (
 func TestExpandPathUsesKRUNHOMEForTilde(t *testing.T) {
 	t.Setenv("KRUN_HOME", "/tmp/krun-home")
 
-	got := ExpandPath("~/git/ftechmax")
-	want := filepath.Join("/tmp/krun-home", "git", "ftechmax")
+	got := ExpandPath("~/git/testuser")
+	want := filepath.Join("/tmp/krun-home", "git", "testuser")
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestExpandPathWithHomePrefersExplicitHome(t *testing.T) {
+	t.Setenv("KRUN_HOME", "/tmp/krun-home")
+
+	got := ExpandPathWithHome("~/git/testuser", "/tmp/service-owner")
+	want := filepath.Join("/tmp/service-owner", "git", "testuser")
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}

@@ -6,15 +6,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os/user"
-	"strings"
 
 	cfg "github.com/ftechmax/krun/internal/config"
 	"github.com/ftechmax/krun/internal/contracts"
 	"github.com/ftechmax/krun/internal/krun/helper"
 )
-
-var lookupCurrentUser = user.Current
 
 func HelperDebugSessionsList(config cfg.Config) ([]contracts.HelperDebugSession, error) {
 	if err := helper.EnsureStarted(config); err != nil {
@@ -36,7 +32,6 @@ func HelperDebugEnable(config cfg.Config, context contracts.DebugServiceContext,
 	request := contracts.DebugSessionCommandRequest{
 		Context:       context,
 		ContainerName: containerName,
-		User:          resolveDebugSessionUser(),
 	}
 	var response contracts.HelperResponse
 	err := helperJSONRequest(http.MethodPost, "/v1/debug/enable", request, &response)
@@ -48,7 +43,7 @@ func HelperDebugDisable(config cfg.Config, context contracts.DebugServiceContext
 		return contracts.HelperResponse{}, fmt.Errorf("helper unreachable: %w", err)
 	}
 
-	request := contracts.DebugSessionCommandRequest{Context: context, User: resolveDebugSessionUser()}
+	request := contracts.DebugSessionCommandRequest{Context: context}
 	var response contracts.HelperResponse
 	err := helperJSONRequest(http.MethodPost, "/v1/debug/disable", request, &response)
 	return response, err
@@ -93,16 +88,4 @@ func helperJSONRequest(method string, path string, payload any, responseTarget a
 	}
 
 	return nil
-}
-
-func resolveDebugSessionUser() contracts.DebugSessionUser {
-	record, err := lookupCurrentUser()
-	if err != nil {
-		return contracts.DebugSessionUser{}
-	}
-
-	return contracts.DebugSessionUser{
-		UID: strings.TrimSpace(record.Uid),
-		GID: strings.TrimSpace(record.Gid),
-	}
 }

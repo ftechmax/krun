@@ -461,6 +461,7 @@ func TestDebugEnableHandlerFailsWhenManagerForwardEnsureFails(t *testing.T) {
 
 func TestDebugEnableHandlerWritesEnvFileWithContainerName(t *testing.T) {
 	resetHelperGlobals(t)
+	helperOwner = helperOwnerInfo{UID: "1000", GID: "1001"}
 
 	helperKrunConfigLoaded = true
 	helperKrunConfig = cfg.KrunConfig{
@@ -674,6 +675,12 @@ func TestDebugSessionsListMethodNotAllowed(t *testing.T) {
 	}
 }
 
+func TestResolveHelperOwnerInfoRequiresOwner(t *testing.T) {
+	if _, err := resolveHelperOwnerInfo(" "); err == nil {
+		t.Fatalf("expected empty owner to fail")
+	}
+}
+
 func resetHelperGlobals(t *testing.T) {
 	t.Helper()
 	hostsRegistry = hostfile.NewSessionHostsRegistry()
@@ -693,6 +700,8 @@ func resetHelperGlobals(t *testing.T) {
 	helperKrunConfigLoaded = false
 	helperKubeConfigPath = ""
 	helperWorkspacePath = ""
+	helperOwnerName = ""
+	helperOwner = helperOwnerInfo{}
 }
 
 type fakePortForwardRegistry struct {

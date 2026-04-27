@@ -21,7 +21,10 @@ var (
 	services = []cfg.Service{} // map of service name to service struct
 )
 
-var kubeConfigPath string
+var (
+	kubeConfigPath   string
+	installOwnerName string
+)
 
 func main() {
 	rootCmd := &cobra.Command{
@@ -88,6 +91,8 @@ func main() {
 		PersistentPreRun: preRunKubeConfigOnly,
 		Run:              handleInstall,
 	}
+	installCmd.Flags().StringVar(&installOwnerName, "owner", "", "Owner user for elevated helper service")
+	_ = installCmd.Flags().MarkHidden("owner")
 	uninstallCmd := &cobra.Command{
 		Use:              "uninstall",
 		Short:            "Uninstall krun-helper service and in-cluster runtime",
@@ -394,7 +399,7 @@ func handleInstall(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	helper.HelperInstall(config)
+	helper.HelperInstall(config, installOwnerName)
 	krunruntime.RuntimeInstall(config, version)
 }
 
@@ -422,7 +427,17 @@ func elevatedCommandArgs(commandName string) ([]string, error) {
 		return nil, fmt.Errorf("cannot resolve kubeconfig path: %w", err)
 	}
 
-	return []string{commandName, "--kubeconfig", filepath.ToSlash(absKubeConfigPath)}, nil
+	rerunArgs := []string{commandName, "--kubeconfig", filepath.ToSlash(absKubeConfigPath)}
+	if commandName == "install" {
+		trimmedOwnerName := strings.TrimSpace(installOwnerName)
+		if trimmedOwnerName == "" {
+			trimmedOwnerName = helper.ResolveServiceOwnerName()
+		}
+		if trimmedOwnerName != "" {
+			rerunArgs = append(rerunArgs, "--owner", trimmedOwnerName)
+		}
+	}
+	return rerunArgs, nil
 }
 
 func handleStatus(cmd *cobra.Command, args []string) {

@@ -62,8 +62,8 @@ func HelperStop() {
 	fmt.Println(utils.Colorize("helper is shutting down", utils.Green))
 }
 
-func HelperInstall(config cfg.Config) {
-	if err := HelperInstallService(config); err != nil {
+func HelperInstall(config cfg.Config, ownerName string) {
+	if err := helperInstallService(config, ownerName); err != nil {
 		fmt.Println(utils.Colorize(fmt.Sprintf("failed to install helper service: %v", err), utils.Red))
 		return
 	}
@@ -77,9 +77,7 @@ func HelperInstall(config cfg.Config) {
 	fmt.Println(utils.Colorize("helper service installed", utils.Green))
 }
 
-// HelperInstallService installs the platform service. The caller must already
-// be running with elevated privileges.
-func HelperInstallService(config cfg.Config) error {
+func helperInstallService(config cfg.Config, ownerName string) error {
 	binaryPath, err := resolveHelperBinaryPath()
 	if err != nil {
 		return fmt.Errorf("cannot find krun-helper binary: %w", err)
@@ -90,7 +88,15 @@ func HelperInstallService(config cfg.Config) error {
 		return fmt.Errorf("cannot resolve kubeconfig path: %w", err)
 	}
 
-	return installHelperService(binaryPath, absKubeConfig, resolveInstallerHomeDir())
+	trimmedOwnerName := strings.TrimSpace(ownerName)
+	if trimmedOwnerName == "" {
+		trimmedOwnerName = ResolveServiceOwnerName()
+	}
+	if trimmedOwnerName == "" {
+		return fmt.Errorf("cannot resolve helper service owner")
+	}
+
+	return installHelperService(binaryPath, absKubeConfig, trimmedOwnerName)
 }
 
 func HelperUninstall() {
@@ -171,6 +177,11 @@ func startHelperProcess(config cfg.Config) error {
 	if trimmedKubeConfig := strings.TrimSpace(config.KubeConfig); trimmedKubeConfig != "" {
 		args = append(args, "--kubeconfig", trimmedKubeConfig)
 	}
+	ownerName := ResolveServiceOwnerName()
+	if ownerName == "" {
+		return fmt.Errorf("cannot resolve helper owner")
+	}
+	args = append(args, "--owner", ownerName)
 
 	if err := startElevatedProcess(helperBinaryPath, args); err != nil {
 		return fmt.Errorf("failed to start helper: %w", err)
@@ -267,39 +278,25 @@ func printStatusValue(label string, value string, color utils.Color) {
 	fmt.Printf("%s %s\n", label, utils.Colorize(value, color))
 }
 
-func resolveInstallerHomeDir() string {
-	if home := strings.TrimSpace(os.Getenv("KRUN_HOME")); home != "" {
-		return home
+func ResolveServiceOwnerName() string {
+	if username := strings.TrimSpace(os.Getenv("SUDO_USER")); username != "" {
+		return username
 	}
-	if home := lookupHomeByUsername(strings.TrimSpace(os.Getenv("SUDO_USER"))); home != "" {
-		return home
+	if username := lookupUsernameByUID(strings.TrimSpace(os.Getenv("PKEXEC_UID"))); username != "" {
+		return username
 	}
-	if home := lookupHomeByUID(strings.TrimSpace(os.Getenv("PKEXEC_UID"))); home != "" {
-		return home
-	}
-	if home := lookupHomeByUID(strings.TrimSpace(os.Getenv("SUDO_UID"))); home != "" {
-		return home
+	if username := lookupUsernameByUID(strings.TrimSpace(os.Getenv("SUDO_UID"))); username != "" {
+		return username
 	}
 
-	home, err := os.UserHomeDir()
+	record, err := user.Current()
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(home)
+	return strings.TrimSpace(record.Username)
 }
 
-func lookupHomeByUsername(username string) string {
-	if username == "" {
-		return ""
-	}
-	record, err := user.Lookup(username)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(record.HomeDir)
-}
-
-func lookupHomeByUID(uid string) string {
+func lookupUsernameByUID(uid string) string {
 	if uid == "" {
 		return ""
 	}
@@ -307,5 +304,5 @@ func lookupHomeByUID(uid string) string {
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(record.HomeDir)
+	return strings.TrimSpace(record.Username)
 }

@@ -38,3 +38,13 @@ func TestResolveHelperBinaryPathFallsBackToWorkingDirectory(t *testing.T) {
 		t.Fatalf("expected %q, got %q", helperPath, resolvedPath)
 	}
 }
+
+func TestResolveServiceOwnerNameUsesSudoUser(t *testing.T) {
+	t.Setenv("SUDO_USER", "testuser")
+	t.Setenv("PKEXEC_UID", "")
+	t.Setenv("SUDO_UID", "")
+
+	if got := ResolveServiceOwnerName(); got != "testuser" {
+		t.Fatalf("expected sudo user, got %q", got)
+	}
+}

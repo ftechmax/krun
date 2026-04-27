@@ -20,8 +20,7 @@ After=network.target
 
 [Service]
 Type=notify
-%s
-ExecStart=%s --kubeconfig %s
+ExecStart=%s --kubeconfig %s%s
 Restart=on-failure
 RestartSec=5
 
@@ -29,7 +28,7 @@ RestartSec=5
 WantedBy=multi-user.target
 `
 
-func installHelperService(binaryPath, kubeConfigPath, userHome string) error {
+func installHelperService(binaryPath, kubeConfigPath, ownerName string) error {
 	// If already installed, stop and remove first for a clean update.
 	if HelperServiceInstalled() {
 		if err := runSystemctl("stop", unitName); err != nil {
@@ -37,14 +36,7 @@ func installHelperService(binaryPath, kubeConfigPath, userHome string) error {
 		}
 	}
 
-	environmentLine := ""
-	if trimmedUserHome := strings.TrimSpace(userHome); trimmedUserHome != "" {
-		escapedUserHome := strings.ReplaceAll(trimmedUserHome, "\\", "\\\\")
-		escapedUserHome = strings.ReplaceAll(escapedUserHome, "\"", "\\\"")
-		environmentLine = fmt.Sprintf("Environment=\"KRUN_HOME=%s\"\n", escapedUserHome)
-	}
-
-	content := fmt.Sprintf(unitTemplate, environmentLine, binaryPath, kubeConfigPath)
+	content := buildSystemdUnit(binaryPath, kubeConfigPath, ownerName)
 	if err := os.WriteFile(unitPath, []byte(content), 0o600); err != nil {
 		return fmt.Errorf("write unit file: %w", err)
 	}
@@ -56,6 +48,14 @@ func installHelperService(binaryPath, kubeConfigPath, userHome string) error {
 		return fmt.Errorf("enable service: %w", err)
 	}
 	return nil
+}
+
+func buildSystemdUnit(binaryPath, kubeConfigPath, ownerName string) string {
+	ownerArg := ""
+	if trimmedOwnerName := strings.TrimSpace(ownerName); trimmedOwnerName != "" {
+		ownerArg = fmt.Sprintf(" --owner %s", trimmedOwnerName)
+	}
+	return fmt.Sprintf(unitTemplate, binaryPath, kubeConfigPath, ownerArg)
 }
 
 func uninstallHelperService() error {

@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -72,9 +74,9 @@ var (
 	streamRegistry                  sessionStreamRegistry      = noopStreamRegistry{}
 	managerSessionClient            managerclient.SessionAPI   = managerclient.NoopSessionClient{}
 	managerForwardBootstrapRequired bool
-	newPortForwardRegistry          = newHelperPortForwardRegistry
+	newPortForwardRegistry          = helperportforward.NewSessionRegistry
 	newManagerClient                = managerclient.NewSessionClient
-	newStreamRegistry               = newHelperStreamRegistry
+	newStreamRegistry               = helperstream.NewSessionRegistry
 	discoverServices                = cfg.DiscoverServices
 	runWorkspaceBuild               = workspacebuild.Build
 	runWorkspaceDeploy              = workspacedeploy.Deploy
@@ -85,25 +87,33 @@ var (
 	helperKrunConfigLoaded          bool
 	helperKubeConfigPath            string
 	helperWorkspacePath             string
+	helperOwnerName                 string
+	helperOwner                     helperOwnerInfo
 )
 
-func newHelperPortForwardRegistry(kubeConfigPath string) (sessionPortForwardRegistry, error) {
-	return helperportforward.NewSessionRegistry(kubeConfigPath)
+type helperOwnerInfo struct {
+	Username string
+	UID      string
+	GID      string
+	HomeDir  string
 }
 
-func newHelperStreamRegistry(managerAddress string) sessionStreamRegistry {
-	return helperstream.NewSessionRegistry(managerAddress)
+func (o helperOwnerInfo) debugSessionUser() contracts.DebugSessionUser {
+	return contracts.DebugSessionUser{
+		UID: strings.TrimSpace(o.UID),
+		GID: strings.TrimSpace(o.GID),
+	}
 }
 
 type daemonOptions struct {
-	externalShutdown <-chan struct{} // service stop signal (nil channel = not used)
+	externalShutdown <-chan struct{} // service stop signal
 	onReady          func()          // called when HTTP listener is bound
 }
 
 // startHelperDaemonForService adapts startHelperDaemon to the service.StartDaemonFunc
 // signature so the service runner can call it without importing main.
 func startHelperDaemonForService(listenAddress, kubeConfigPath string, opts service.DaemonOptions) error {
-	return startHelperDaemon(listenAddress, kubeConfigPath, "", daemonOptions{
+	return startHelperDaemon(listenAddress, kubeConfigPath, "", helperOwnerName, daemonOptions{
 		externalShutdown: opts.ExternalShutdown,
 		onReady:          opts.OnReady,
 	})
@@ -125,7 +135,7 @@ func main() {
 				}
 				return
 			}
-			if err := startHelperDaemon(listenAddress, kubeConfigPath, workspacePath, daemonOptions{}); err != nil {
+			if err := startHelperDaemon(listenAddress, kubeConfigPath, workspacePath, helperOwnerName, daemonOptions{}); err != nil {
 				fmt.Printf("helper daemon failed: %v\n", err)
 				os.Exit(1)
 			}
@@ -135,6 +145,8 @@ func main() {
 	rootCmd.Flags().StringVar(&kubeConfigPath, "kubeconfig", "", "Path to kubeconfig file")
 	rootCmd.Flags().StringVar(&listenAddress, "listen", "", "Daemon listen address")
 	rootCmd.Flags().StringVar(&workspacePath, "workspace", "", "Path to a workspace containing krun-config.json")
+	rootCmd.Flags().StringVar(&helperOwnerName, "owner", "", "Owner user for elevated helper home and file permissions")
+	_ = rootCmd.Flags().MarkHidden("owner")
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)
@@ -142,13 +154,13 @@ func main() {
 	}
 }
 
-func startHelperDaemon(listenAddress string, kubeConfigPath string, workspacePath string, opts daemonOptions) error {
+func startHelperDaemon(listenAddress string, kubeConfigPath string, workspacePath string, ownerName string, opts daemonOptions) error {
 	addr, err := resolveHelperListenAddress(listenAddress)
 	if err != nil {
 		return err
 	}
 
-	if err := initializeHelperDependencies(kubeConfigPath, workspacePath); err != nil {
+	if err := initializeHelperDependencies(kubeConfigPath, workspacePath, ownerName); err != nil {
 		return err
 	}
 
@@ -166,13 +178,19 @@ func resolveHelperListenAddress(listenAddress string) (string, error) {
 	return addr, nil
 }
 
-func initializeHelperDependencies(kubeConfigPath string, workspacePath string) error {
+func initializeHelperDependencies(kubeConfigPath string, workspacePath string, ownerName string) error {
 	helperKubeConfigPath = strings.TrimSpace(kubeConfigPath)
 	helperWorkspacePath = strings.TrimSpace(workspacePath)
 	helperKrunConfigLoaded = false
 	helperKrunConfig = cfg.KrunConfig{}
 
-	loadedConfig, err := loadHelperKrunConfig(helperWorkspacePath)
+	ownerInfo, err := resolveHelperOwnerInfo(ownerName)
+	if err != nil {
+		return err
+	}
+	helperOwner = ownerInfo
+
+	loadedConfig, err := loadHelperKrunConfig(helperWorkspacePath, helperOwner.HomeDir)
 	if err != nil {
 		fmt.Printf("warning: cannot load krun-config.json: %v\n", err)
 	} else {
@@ -205,6 +223,32 @@ func initializeHelperDependencies(kubeConfigPath string, workspacePath string) e
 	}
 	managerSessionClient = managerClient
 	return nil
+}
+
+func resolveHelperOwnerInfo(ownerName string) (helperOwnerInfo, error) {
+	trimmedOwnerName := strings.TrimSpace(ownerName)
+	if trimmedOwnerName == "" {
+		return helperOwnerInfo{}, fmt.Errorf("owner is required")
+	}
+
+	record, err := user.Lookup(trimmedOwnerName)
+	if err != nil {
+		return helperOwnerInfo{}, fmt.Errorf("lookup owner %q: %w", trimmedOwnerName, err)
+	}
+
+	ownerInfo := helperOwnerInfo{
+		Username: strings.TrimSpace(record.Username),
+		UID:      strings.TrimSpace(record.Uid),
+		GID:      strings.TrimSpace(record.Gid),
+		HomeDir:  strings.TrimSpace(record.HomeDir),
+	}
+	if ownerInfo.HomeDir == "" {
+		return helperOwnerInfo{}, fmt.Errorf("owner %q has no home directory", trimmedOwnerName)
+	}
+	if runtime.GOOS != "windows" && (ownerInfo.UID == "" || ownerInfo.GID == "") {
+		return helperOwnerInfo{}, fmt.Errorf("owner %q has no uid/gid", trimmedOwnerName)
+	}
+	return ownerInfo, nil
 }
 
 func startHelperServer(addr string, opts daemonOptions) error {
@@ -596,10 +640,10 @@ func decodeStrict(r *http.Request, target any) error {
 	return nil
 }
 
-func loadHelperKrunConfig(workspacePath string) (cfg.KrunConfig, error) {
+func loadHelperKrunConfig(workspacePath string, homeDir string) (cfg.KrunConfig, error) {
 	trimmed := strings.TrimSpace(workspacePath)
 	if trimmed == "" {
-		return cfg.ParseKrunConfig()
+		return cfg.ParseKrunConfigWithHome(homeDir)
 	}
 
 	if strings.EqualFold(filepath.Base(trimmed), "krun-config.json") {
@@ -611,12 +655,12 @@ func loadHelperKrunConfig(workspacePath string) (cfg.KrunConfig, error) {
 		return cfg.KrunConfig{}, fmt.Errorf("resolve workspace path %q: %w", workspacePath, err)
 	}
 
-	return cfg.ParseKrunConfigFromDir(absWorkspacePath)
+	return cfg.ParseKrunConfigFromDirWithHome(absWorkspacePath, homeDir)
 }
 
 func buildConfig() (cfg.Config, []cfg.Service, error) {
 	if !helperKrunConfigLoaded {
-		loadedConfig, err := loadHelperKrunConfig(helperWorkspacePath)
+		loadedConfig, err := loadHelperKrunConfig(helperWorkspacePath, helperOwner.HomeDir)
 		if err != nil {
 			return cfg.Config{}, nil, fmt.Errorf("krun-config.json is not available: %w", err)
 		}
@@ -624,7 +668,7 @@ func buildConfig() (cfg.Config, []cfg.Service, error) {
 		helperKrunConfigLoaded = true
 	}
 
-	sourcePath := cfg.ExpandPath(helperKrunConfig.Path)
+	sourcePath := cfg.ExpandPathWithHome(helperKrunConfig.Path, helperOwner.HomeDir)
 	services, projectPaths, err := discoverServices(sourcePath, helperKrunConfig.SearchDepth)
 	if err != nil {
 		return cfg.Config{}, nil, fmt.Errorf("discover services: %w", err)
@@ -790,7 +834,7 @@ func handleDebugEnable(w http.ResponseWriter, r *http.Request) {
 	managerSessionsRegistry.Upsert(sessionKey, managerSession.SessionID)
 	sessionsRegistry.Upsert(sessionKey, req.Context)
 
-	createServiceEnvFile(req.Context.ServiceName, req.ContainerName, req.User)
+	createServiceEnvFile(req.Context.ServiceName, req.ContainerName)
 
 	writeJSON(w, http.StatusOK, contracts.HelperResponse{
 		Success: true,
@@ -886,7 +930,7 @@ func handleDebugDisable(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func createServiceEnvFile(serviceName, containerName string, user contracts.DebugSessionUser) {
+func createServiceEnvFile(serviceName, containerName string) {
 	conf, services, err := buildConfig()
 	if err != nil {
 		fmt.Printf("warning: could not load services for env file: %v\n", err)
@@ -896,7 +940,7 @@ func createServiceEnvFile(serviceName, containerName string, user contracts.Debu
 	if !ok {
 		return
 	}
-	if err := createEnvFile(service, conf, containerName, user); err != nil {
+	if err := createEnvFile(service, conf, containerName, helperOwner.debugSessionUser()); err != nil {
 		fmt.Printf("warning: could not create env file: %v\n", err)
 	}
 }

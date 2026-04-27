@@ -37,7 +37,7 @@ func openServiceForRead() (scm windows.Handle, service windows.Handle, err error
 	return scm, service, nil
 }
 
-func installHelperService(binaryPath, kubeConfigPath, _ string) error {
+func installHelperService(binaryPath, kubeConfigPath, ownerName string) error {
 	m, err := mgr.Connect()
 	if err != nil {
 		return fmt.Errorf("connect to service manager: %w", err)
@@ -54,7 +54,7 @@ func installHelperService(binaryPath, kubeConfigPath, _ string) error {
 	s, err := m.CreateService(serviceName, binaryPath, mgr.Config{
 		DisplayName: "krun Debug Helper",
 		StartType:   mgr.StartAutomatic,
-	}, "--kubeconfig", kubeConfigPath)
+	}, helperServiceArgs(kubeConfigPath, ownerName)...)
 	if err != nil {
 		return fmt.Errorf("create service: %w", err)
 	}
