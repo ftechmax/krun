@@ -5,7 +5,7 @@ Push-Location $repoRoot
 
 try {
     $outputPath = Join-Path $repoRoot 'krun-helper.exe'
-    $manifestPath = Join-Path $repoRoot 'cmd\krun-helper\krun-helper.manifest'
+    $manifestPath = Join-Path $repoRoot 'scripts\krun-helper.manifest'
 
     if (-not (Test-Path $outputPath)) {
         throw "Helper binary not found at '$outputPath'. Build it before applying the UAC patch."
