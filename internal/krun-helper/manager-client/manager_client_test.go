@@ -1,6 +1,7 @@
 package managerclient
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -165,10 +166,35 @@ func TestNormalizeNamespace(t *testing.T) {
 	}
 }
 
+const testAuthToken = "test-auth-token"
+
 func newTestManagerClient(t *testing.T, handler http.HandlerFunc) (*kubeManagerSessionClient, func()) {
 	t.Helper()
 
-	server := httptest.NewServer(handler)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Serve the manager auth Secret that every session call fetches
+		// before hitting the service proxy.
+		if strings.HasSuffix(r.URL.Path, "/secrets/"+authSecretName) {
+			writeJSONResponse(t, w, http.StatusOK, map[string]any{
+				"apiVersion": "v1",
+				"kind":       "Secret",
+				"metadata": map[string]any{
+					"name":      authSecretName,
+					"namespace": defaultManagerNamespace,
+				},
+				"data": map[string]string{
+					authSecretKey: base64.StdEncoding.EncodeToString([]byte(testAuthToken)),
+				},
+			})
+			return
+		}
+		if strings.Contains(r.URL.Path, "/proxy/") {
+			if got := r.Header.Get(authTokenHeader); got != testAuthToken {
+				t.Errorf("proxy request missing auth token header, got %q", got)
+			}
+		}
+		handler(w, r)
+	}))
 
 	groupVersion := schema.GroupVersion{Version: "v1"}
 	restConfig := &rest.Config{

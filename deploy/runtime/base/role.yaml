@@ -1,0 +1,17 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: krun-traffic-manager-auth
+  namespace: krun-system
+  labels:
+    app.kubernetes.io/name: krun-traffic-manager
+    app.kubernetes.io/component: traffic-manager
+    app.kubernetes.io/part-of: krun-debug-runtime
+    app.kubernetes.io/managed-by: krun
+    krun.ftechmax/runtime: "true"
+  annotations:
+    krun.ftechmax/component: traffic-runtime
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "update"]

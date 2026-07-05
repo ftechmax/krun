@@ -16,6 +16,8 @@ import (
 
 	"github.com/ftechmax/krun/internal/contracts"
 	"github.com/ftechmax/krun/internal/sessionkey"
+	"github.com/ftechmax/krun/internal/streamconn"
+	"github.com/ftechmax/krun/internal/wskeepalive"
 	"github.com/gorilla/websocket"
 )
 
@@ -102,8 +104,7 @@ type sessionAttachment struct {
 	doneCh chan struct{}
 	sendCh chan contracts.StreamEnvelope
 
-	connMu sync.Mutex
-	conns  map[string]net.Conn
+	conns *streamconn.Registry
 }
 
 func newSessionAttachment(managerAddress string, sessionID string, sessionToken string, interceptPort int) (*sessionAttachment, error) {
@@ -126,7 +127,7 @@ func newSessionAttachment(managerAddress string, sessionID string, sessionToken 
 		streamURL:    streamURL,
 		doneCh:       make(chan struct{}),
 		sendCh:       make(chan contracts.StreamEnvelope, sendQueueSize),
-		conns:        map[string]net.Conn{},
+		conns:        streamconn.NewRegistry(),
 	}, nil
 }
 
@@ -145,7 +146,7 @@ func (a *sessionAttachment) stop() {
 
 func (a *sessionAttachment) run(ctx context.Context) {
 	defer close(a.doneCh)
-	defer a.closeAllLocalConns()
+	defer a.conns.CloseAll()
 
 	backoff := initialBackoff
 	for {
@@ -172,11 +173,19 @@ func (a *sessionAttachment) run(ctx context.Context) {
 		if err := a.pumpConnection(ctx, conn); err != nil && !errors.Is(err, context.Canceled) {
 			log.Printf("helper stream disconnected (session_id=%s): %v", a.sessionID, err)
 		}
+		// The manager drops all connection routing for this session when the
+		// client stream detaches, so any local conns from this epoch are dead.
+		a.conns.CloseAll()
 	}
 }
 
 func (a *sessionAttachment) pumpConnection(ctx context.Context, conn *websocket.Conn) error {
 	defer conn.Close()
+
+	wskeepalive.Configure(conn)
+	pingDone := make(chan struct{})
+	defer close(pingDone)
+	go wskeepalive.Ping(conn, pingDone)
 
 	readErrCh := make(chan error, 1)
 	envelopeCh := make(chan contracts.StreamEnvelope, 128)
@@ -218,8 +227,16 @@ func (a *sessionAttachment) handleInboundEnvelope(ctx context.Context, envelope 
 		a.handleOpen(ctx, connectionID)
 	case contracts.StreamTypeData:
 		a.handleData(connectionID, envelope.Data)
+	case contracts.StreamTypeCloseWrite:
+		if a.conns.CloseWriteHalf(connectionID) {
+			_ = a.enqueueOutbound(ctx, contracts.StreamEnvelope{
+				Type:         contracts.StreamTypeClose,
+				SessionID:    a.sessionID,
+				ConnectionID: connectionID,
+			})
+		}
 	case contracts.StreamTypeClose, contracts.StreamTypeError:
-		a.closeLocalConn(connectionID)
+		a.conns.CloseAndDelete(connectionID)
 	case contracts.StreamTypePing:
 		a.enqueueOutbound(ctx, contracts.StreamEnvelope{
 			Type:      contracts.StreamTypePing,
@@ -249,12 +266,7 @@ func (a *sessionAttachment) handleOpen(ctx context.Context, connectionID string)
 		return
 	}
 
-	a.connMu.Lock()
-	if existing, ok := a.conns[connectionID]; ok {
-		_ = existing.Close()
-	}
-	a.conns[connectionID] = localConn
-	a.connMu.Unlock()
+	a.conns.Set(connectionID, localConn)
 
 	go a.pumpLocalConnection(ctx, connectionID, localConn)
 }
@@ -263,13 +275,15 @@ func (a *sessionAttachment) handleData(connectionID string, payload []byte) {
 	if connectionID == "" || len(payload) == 0 {
 		return
 	}
-	localConn := a.getLocalConn(connectionID)
+	localConn := a.conns.Get(connectionID)
 	if localConn == nil {
 		return
 	}
+	// Bound the write so a local app that stopped reading cannot stall the
+	// session pump indefinitely (which would also hang attachment.stop()).
+	_ = localConn.SetWriteDeadline(time.Now().Add(writeTimeout))
 	if _, err := localConn.Write(payload); err != nil {
-		_ = localConn.Close()
-		a.closeLocalConn(connectionID)
+		a.conns.CloseAndDelete(connectionID)
 		a.enqueueOutbound(context.Background(), contracts.StreamEnvelope{
 			Type:         contracts.StreamTypeError,
 			SessionID:    a.sessionID,
@@ -285,8 +299,6 @@ func (a *sessionAttachment) handleData(connectionID string, payload []byte) {
 }
 
 func (a *sessionAttachment) pumpLocalConnection(ctx context.Context, connectionID string, localConn net.Conn) {
-	defer a.closeLocalConn(connectionID)
-
 	buffer := make([]byte, connectionReadBuffer)
 	for {
 		readBytes, readErr := localConn.Read(buffer)
@@ -299,6 +311,7 @@ func (a *sessionAttachment) pumpLocalConnection(ctx context.Context, connectionI
 				ConnectionID: connectionID,
 				Data:         chunk,
 			}); err != nil {
+				a.conns.CloseAndDelete(connectionID)
 				return
 			}
 		}
@@ -307,11 +320,20 @@ func (a *sessionAttachment) pumpLocalConnection(ctx context.Context, connectionI
 			continue
 		}
 		if errors.Is(readErr, io.EOF) {
+			// Half-close: the local app finished its response stream, but the
+			// caller-to-app direction may still be open.
 			_ = a.enqueueOutbound(ctx, contracts.StreamEnvelope{
-				Type:         contracts.StreamTypeClose,
+				Type:         contracts.StreamTypeCloseWrite,
 				SessionID:    a.sessionID,
 				ConnectionID: connectionID,
 			})
+			if a.conns.MarkReadClosed(connectionID) {
+				_ = a.enqueueOutbound(ctx, contracts.StreamEnvelope{
+					Type:         contracts.StreamTypeClose,
+					SessionID:    a.sessionID,
+					ConnectionID: connectionID,
+				})
+			}
 			return
 		}
 		if errors.Is(readErr, net.ErrClosed) {
@@ -329,6 +351,7 @@ func (a *sessionAttachment) pumpLocalConnection(ctx context.Context, connectionI
 			SessionID:    a.sessionID,
 			ConnectionID: connectionID,
 		})
+		a.conns.CloseAndDelete(connectionID)
 		return
 	}
 }
@@ -343,40 +366,6 @@ func (a *sessionAttachment) enqueueOutbound(ctx context.Context, envelope contra
 		return nil
 	default:
 		return errors.New("session stream outbound queue is full")
-	}
-}
-
-func (a *sessionAttachment) getLocalConn(connectionID string) net.Conn {
-	a.connMu.Lock()
-	defer a.connMu.Unlock()
-	return a.conns[connectionID]
-}
-
-func (a *sessionAttachment) closeLocalConn(connectionID string) {
-	if strings.TrimSpace(connectionID) == "" {
-		return
-	}
-	a.connMu.Lock()
-	localConn, ok := a.conns[connectionID]
-	if ok {
-		delete(a.conns, connectionID)
-	}
-	a.connMu.Unlock()
-	if ok {
-		_ = localConn.Close()
-	}
-}
-
-func (a *sessionAttachment) closeAllLocalConns() {
-	a.connMu.Lock()
-	conns := make([]net.Conn, 0, len(a.conns))
-	for _, localConn := range a.conns {
-		conns = append(conns, localConn)
-	}
-	a.conns = map[string]net.Conn{}
-	a.connMu.Unlock()
-	for _, localConn := range conns {
-		_ = localConn.Close()
 	}
 }
 

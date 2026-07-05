@@ -8,12 +8,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/ftechmax/krun/internal/contracts"
+	"github.com/ftechmax/krun/internal/helperipc"
 	"github.com/ftechmax/krun/internal/krun-helper/hostfile"
 	managerclient "github.com/ftechmax/krun/internal/krun-helper/manager-client"
 	helperportforward "github.com/ftechmax/krun/internal/krun-helper/portforward"
@@ -23,9 +23,7 @@ import (
 )
 
 const (
-	defaultHelperListenAddress       = "127.0.0.1:47831"
 	managerAPIForwardSessionKey      = "__manager_api__"
-	defaultManagerForwardAddress     = "127.0.0.1:47832"
 	defaultManagerForwardNamespace   = "krun-system"
 	defaultManagerForwardServiceName = "krun-traffic-manager"
 	defaultManagerForwardRemotePort  = 8080
@@ -35,6 +33,7 @@ type sessionPortForwardRegistry interface {
 	Upsert(sessionKey string, forwards []contracts.PortForward) error
 	Remove(sessionKey string) error
 	Clear() error
+	BoundLocalPort(sessionKey string, forward contracts.PortForward) (int, bool)
 }
 
 type sessionStreamRegistry interface {
@@ -48,6 +47,9 @@ type noopPortForwardRegistry struct{}
 func (noopPortForwardRegistry) Upsert(_ string, _ []contracts.PortForward) error { return nil }
 func (noopPortForwardRegistry) Remove(_ string) error                            { return nil }
 func (noopPortForwardRegistry) Clear() error                                     { return nil }
+func (noopPortForwardRegistry) BoundLocalPort(_ string, _ contracts.PortForward) (int, bool) {
+	return 0, false
+}
 
 type noopStreamRegistry struct{}
 
@@ -79,13 +81,13 @@ func newHelperStreamRegistry(managerAddress string) sessionStreamRegistry {
 
 func main() {
 	var kubeConfigPath string
-	var listenAddress string
+	var socketEndpoint string
 
 	rootCmd := &cobra.Command{
 		Use:   "krun-helper",
 		Short: "Elevated daemon helper for krun debug sessions",
 		Run: func(cmd *cobra.Command, args []string) {
-			if err := startHelperDaemon(listenAddress, kubeConfigPath); err != nil {
+			if err := startHelperDaemon(socketEndpoint, kubeConfigPath); err != nil {
 				fmt.Printf("helper daemon failed: %v\n", err)
 				os.Exit(1)
 			}
@@ -93,7 +95,7 @@ func main() {
 	}
 
 	rootCmd.Flags().StringVar(&kubeConfigPath, "kubeconfig", "", "Path to kubeconfig file")
-	rootCmd.Flags().StringVar(&listenAddress, "listen", "", "Daemon listen address")
+	rootCmd.Flags().StringVar(&socketEndpoint, "socket", "", "IPC endpoint override (unix socket path / named pipe name)")
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)
@@ -101,13 +103,10 @@ func main() {
 	}
 }
 
-func startHelperDaemon(listenAddress string, kubeConfigPath string) error {
-	addr := strings.TrimSpace(listenAddress)
-	if addr == "" {
-		addr = defaultHelperListenAddress
-	}
-	if err := validateLoopbackAddress(addr); err != nil {
-		return err
+func startHelperDaemon(socketEndpoint string, kubeConfigPath string) error {
+	endpoint := strings.TrimSpace(socketEndpoint)
+	if endpoint == "" {
+		endpoint = helperipc.DefaultEndpoint
 	}
 
 	registry, err := newPortForwardRegistry(kubeConfigPath)
@@ -116,22 +115,26 @@ func startHelperDaemon(listenAddress string, kubeConfigPath string) error {
 	}
 	portForwardRegistry = registry
 
-	managerForwardPort, err := parsePortFromAddress(defaultManagerForwardAddress)
-	if err != nil {
-		return fmt.Errorf("invalid manager forward address %q: %w", defaultManagerForwardAddress, err)
+	// Local port 0: the OS picks a free port, so a busy port can never
+	// block helper startup. The bound port is queried back afterwards.
+	managerForward := contracts.PortForward{
+		Namespace:  defaultManagerForwardNamespace,
+		Service:    defaultManagerForwardServiceName,
+		LocalPort:  0,
+		RemotePort: defaultManagerForwardRemotePort,
 	}
-	if err := portForwardRegistry.Upsert(managerAPIForwardSessionKey, []contracts.PortForward{
-		{
-			Namespace:  defaultManagerForwardNamespace,
-			Service:    defaultManagerForwardServiceName,
-			LocalPort:  managerForwardPort,
-			RemotePort: defaultManagerForwardRemotePort,
-		},
-	}); err != nil {
+	if err := portForwardRegistry.Upsert(managerAPIForwardSessionKey, []contracts.PortForward{managerForward}); err != nil {
 		return fmt.Errorf("failed to initialize manager api port-forward: %w", err)
 	}
 
-	streamRegistry = newStreamRegistry("http://" + defaultManagerForwardAddress)
+	managerForwardPort, ok := portForwardRegistry.BoundLocalPort(managerAPIForwardSessionKey, managerForward)
+	if !ok || managerForwardPort <= 0 {
+		return fmt.Errorf("manager api port-forward reported no bound local port")
+	}
+	managerForwardAddress := fmt.Sprintf("127.0.0.1:%d", managerForwardPort)
+	fmt.Printf("manager api forwarded to %s\n", managerForwardAddress)
+
+	streamRegistry = newStreamRegistry("http://" + managerForwardAddress)
 
 	managerClient, err := newManagerClient(kubeConfigPath)
 	if err != nil {
@@ -141,15 +144,19 @@ func startHelperDaemon(listenAddress string, kubeConfigPath string) error {
 
 	shutdownCh := make(chan struct{}, 1)
 
+	listener, err := helperipc.Listen(endpoint)
+	if err != nil {
+		return fmt.Errorf("failed to listen on helper endpoint: %w", err)
+	}
+
 	server := &http.Server{
-		Addr:    addr,
 		Handler: newHandler(shutdownCh),
 	}
-	fmt.Printf("krun-helper listening on %s\n", addr)
+	fmt.Printf("krun-helper listening on %s\n", endpoint)
 
 	serverErrCh := make(chan error, 1)
 	go func() {
-		serverErrCh <- server.ListenAndServe()
+		serverErrCh <- server.Serve(listener)
 	}()
 
 	signalCh := make(chan os.Signal, 1)
@@ -167,11 +174,13 @@ func startHelperDaemon(listenAddress string, kubeConfigPath string) error {
 		if err := <-serverErrCh; err != nil && err != http.ErrServerClosed {
 			return err
 		}
+		helperipc.Cleanup(endpoint)
 		return cleanupHelperState()
 	}
 
 	select {
 	case err := <-serverErrCh:
+		helperipc.Cleanup(endpoint)
 		if err == http.ErrServerClosed {
 			return nil
 		}
@@ -431,20 +440,6 @@ func handleDebugSessionsList(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func validateLoopbackAddress(addr string) error {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return fmt.Errorf("invalid listen address %q: %w", addr, err)
-	}
-
-	switch strings.TrimSpace(host) {
-	case "127.0.0.1", "localhost":
-		return nil
-	default:
-		return fmt.Errorf("listen address must be loopback (localhost or 127.0.0.1): %s", addr)
-	}
-}
-
 func writeJSON(w http.ResponseWriter, code int, response contracts.HelperResponse) {
 	writeJSONAny(w, code, response)
 }
@@ -500,24 +495,6 @@ func resolveManagerSessionIDForDisable(ctx contracts.DebugServiceContext) (strin
 	}
 
 	return strings.TrimSpace(matched.SessionID), nil
-}
-
-func parsePortFromAddress(address string) (int, error) {
-	host, portValue, err := net.SplitHostPort(strings.TrimSpace(address))
-	if err != nil {
-		return 0, err
-	}
-	if strings.TrimSpace(host) == "" {
-		return 0, fmt.Errorf("host is required")
-	}
-	port, err := strconv.Atoi(strings.TrimSpace(portValue))
-	if err != nil {
-		return 0, err
-	}
-	if port < 1 || port > 65535 {
-		return 0, fmt.Errorf("port out of range")
-	}
-	return port, nil
 }
 
 func parseDebugCommandRequest(r *http.Request) (contracts.DebugSessionCommandRequest, string, error) {

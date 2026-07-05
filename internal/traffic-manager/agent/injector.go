@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -12,6 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
@@ -22,8 +24,12 @@ const (
 	DefaultImage           = "docker.io/ftechmax/krun-traffic-agent:latest"
 	DefaultImagePullPolicy = "IfNotPresent"
 	DefaultManagerAddress  = "http://krun-traffic-manager.krun-system.svc:8080"
+	DefaultProbePort       = 8082
 	InjectedLabelKey   = "krun.ftechmax.com/traffic-agent-injected"
 	injectedLabelValue = "true"
+	// OriginalProbesAnnotation stores the pre-rewrite probe specs so
+	// Remove/Cleanup can restore them when the sidecar is taken out.
+	OriginalProbesAnnotation = "krun.ftechmax.com/original-probes"
 )
 
 var ErrWorkloadNotFound = errors.New("target workload not found")
@@ -53,6 +59,7 @@ type Options struct {
 	Image           string
 	ImagePullPolicy string
 	ManagerAddress  string
+	ProbePort       int
 }
 
 type WorkloadInjector struct {
@@ -109,6 +116,10 @@ func (i *WorkloadInjector) Inject(ctx context.Context, session contracts.DebugSe
 			changed = true
 		}
 
+		if i.rewriteProbes(target, session.ServicePort) {
+			changed = true
+		}
+
 		return changed
 	})
 }
@@ -135,6 +146,9 @@ func (i *WorkloadInjector) Remove(ctx context.Context, session contracts.DebugSe
 			changed = true
 		}
 		if removeInjectedLabel(target.object) {
+			changed = true
+		}
+		if restoreProbes(target) {
 			changed = true
 		}
 		return changed
@@ -201,6 +215,9 @@ func (i *WorkloadInjector) removeInjectedSidecarAndAnnotation(target *workloadTa
 		changed = true
 	}
 	if removeInjectedLabel(target.object) {
+		changed = true
+	}
+	if restoreProbes(target) {
 		changed = true
 	}
 	return changed
@@ -371,6 +388,7 @@ func (i *WorkloadInjector) buildContainer(session contracts.DebugSession) corev1
 			{Name: "KRUN_TARGET_NAMESPACE", Value: session.Namespace},
 			{Name: "KRUN_TARGET_WORKLOAD", Value: session.Workload},
 			{Name: "KRUN_TARGET_PORT", Value: strconv.Itoa(session.ServicePort)},
+			{Name: "KRUN_AGENT_PROBE_PORT", Value: strconv.Itoa(i.options.ProbePort)},
 		},
 		SecurityContext: &corev1.SecurityContext{
 			RunAsUser: ptr.To(int64(0)),
@@ -378,6 +396,145 @@ func (i *WorkloadInjector) buildContainer(session contracts.DebugSession) corev1
 				Add: []corev1.Capability{"NET_ADMIN"},
 			},
 		},
+	}
+}
+
+// savedProbes records a container's pre-rewrite probe specs. Only probes
+// that were rewritten are stored; nil means the probe was left untouched.
+type savedProbes struct {
+	Liveness  *corev1.Probe `json:"liveness,omitempty"`
+	Readiness *corev1.Probe `json:"readiness,omitempty"`
+	Startup   *corev1.Probe `json:"startup,omitempty"`
+}
+
+// rewriteProbes points every probe that targets the intercepted port at the
+// agent's probe server instead. Otherwise kubelet probes get redirected to
+// the developer's local app, and the pod goes NotReady the moment that app
+// is stopped or paused on a breakpoint.
+func (i *WorkloadInjector) rewriteProbes(target *workloadTarget, targetPort int) bool {
+	saved := map[string]savedProbes{}
+	changed := false
+
+	for idx := range target.template.Spec.Containers {
+		container := &target.template.Spec.Containers[idx]
+		if container.Name == i.options.ContainerName {
+			continue
+		}
+
+		var record savedProbes
+		rewrote := false
+		slots := []struct {
+			probe    **corev1.Probe
+			original **corev1.Probe
+		}{
+			{&container.LivenessProbe, &record.Liveness},
+			{&container.ReadinessProbe, &record.Readiness},
+			{&container.StartupProbe, &record.Startup},
+		}
+		for _, slot := range slots {
+			if !probeTargetsPort(*slot.probe, *container, targetPort) {
+				continue
+			}
+			*slot.original = (*slot.probe).DeepCopy()
+			rewritten := (*slot.probe).DeepCopy()
+			rewriteProbePort(rewritten, i.options.ProbePort)
+			*slot.probe = rewritten
+			rewrote = true
+		}
+		if rewrote {
+			saved[container.Name] = record
+			changed = true
+		}
+	}
+
+	if changed {
+		annotations := target.object.GetAnnotations()
+		// Keep an existing annotation: it holds the true originals from the
+		// first injection; a re-inject sees already-rewritten probes.
+		if _, exists := annotations[OriginalProbesAnnotation]; !exists {
+			data, err := json.Marshal(saved)
+			if err == nil {
+				if annotations == nil {
+					annotations = map[string]string{}
+				}
+				annotations[OriginalProbesAnnotation] = string(data)
+				target.object.SetAnnotations(annotations)
+			}
+		}
+	}
+	return changed
+}
+
+// restoreProbes puts the original probe specs back and drops the annotation.
+func restoreProbes(target *workloadTarget) bool {
+	annotations := target.object.GetAnnotations()
+	raw, ok := annotations[OriginalProbesAnnotation]
+	if !ok {
+		return false
+	}
+
+	var saved map[string]savedProbes
+	if err := json.Unmarshal([]byte(raw), &saved); err == nil {
+		for idx := range target.template.Spec.Containers {
+			container := &target.template.Spec.Containers[idx]
+			record, ok := saved[container.Name]
+			if !ok {
+				continue
+			}
+			if record.Liveness != nil {
+				container.LivenessProbe = record.Liveness
+			}
+			if record.Readiness != nil {
+				container.ReadinessProbe = record.Readiness
+			}
+			if record.Startup != nil {
+				container.StartupProbe = record.Startup
+			}
+		}
+	}
+
+	delete(annotations, OriginalProbesAnnotation)
+	if len(annotations) == 0 {
+		target.object.SetAnnotations(nil)
+	} else {
+		target.object.SetAnnotations(annotations)
+	}
+	return true
+}
+
+func probeTargetsPort(probe *corev1.Probe, container corev1.Container, targetPort int) bool {
+	if probe == nil {
+		return false
+	}
+	var port intstr.IntOrString
+	switch {
+	case probe.HTTPGet != nil:
+		port = probe.HTTPGet.Port
+	case probe.TCPSocket != nil:
+		port = probe.TCPSocket.Port
+	default:
+		return false
+	}
+
+	switch port.Type {
+	case intstr.Int:
+		return port.IntValue() == targetPort
+	case intstr.String:
+		for _, containerPort := range container.Ports {
+			if containerPort.Name == port.StrVal {
+				return int(containerPort.ContainerPort) == targetPort
+			}
+		}
+	}
+	return false
+}
+
+func rewriteProbePort(probe *corev1.Probe, probePort int) {
+	if probe.HTTPGet != nil {
+		probe.HTTPGet.Port = intstr.FromInt32(int32(probePort))
+	}
+	if probe.TCPSocket != nil {
+		probe.TCPSocket.Port = intstr.FromInt32(int32(probePort))
 	}
 }
 
@@ -424,6 +581,10 @@ func normalizeOptions(options Options) Options {
 	options.ManagerAddress = strings.TrimSpace(options.ManagerAddress)
 	if options.ManagerAddress == "" {
 		options.ManagerAddress = DefaultManagerAddress
+	}
+
+	if options.ProbePort < 1 || options.ProbePort > 65535 {
+		options.ProbePort = DefaultProbePort
 	}
 
 	return options

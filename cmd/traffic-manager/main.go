@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -21,6 +24,10 @@ import (
 	sessionregistry "github.com/ftechmax/krun/internal/traffic-manager/session"
 	streamrelay "github.com/ftechmax/krun/internal/traffic-manager/stream"
 	"github.com/gorilla/websocket"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 )
 
 var (
@@ -33,6 +40,7 @@ var (
 	}
 	errStreamSessionNotFound = errors.New("session not found")
 	errStreamUnauthorized    = errors.New("invalid session token")
+	managerAuthToken         string
 )
 
 const (
@@ -41,11 +49,20 @@ const (
 	envAgentContainerName    = "KRUN_AGENT_CONTAINER_NAME"
 	envAgentImage            = "KRUN_AGENT_IMAGE"
 	envAgentImagePullPolicy  = "KRUN_AGENT_IMAGE_PULL_POLICY"
+	envAgentProbePort        = "KRUN_AGENT_PROBE_PORT"
 	envManagerAddress        = "KRUN_MANAGER_ADDRESS"
 	streamSessionIDQuery     = "session_id"
 	streamSessionTokenQuery  = "session_token"
 	streamSessionIDHeader    = "X-Krun-Session-ID"
 	streamSessionTokenHeader = "X-Krun-Session-Token"
+
+	managerNamespace = "krun-system"
+	authSecretName   = "krun-manager-auth"
+	authSecretKey    = "token"
+	// Session CRUD requires this shared-token header. A custom header is
+	// used because the API server consumes Authorization for its own
+	// authentication and does not forward it through the service proxy.
+	authTokenHeader = "X-Krun-Auth-Token"
 )
 
 func main() {
@@ -56,13 +73,21 @@ func main() {
 }
 
 func run() error {
-	if err := initializeInjector(); err != nil {
+	client, err := kube.NewInClusterClient()
+	if err != nil {
+		return fmt.Errorf("initialize kubernetes client: %w", err)
+	}
+	initializeInjector(client.Clientset)
+
+	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelStartup()
+
+	if err := initializeAuthToken(startupCtx, client.Clientset); err != nil {
 		return err
 	}
+
 	log.Printf("cleaning up dangling traffic-agent sidecars")
-	cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancelCleanup()
-	if err := cleanupDanglingAgents(cleanupCtx); err != nil {
+	if err := cleanupDanglingAgents(startupCtx); err != nil {
 		return err
 	}
 
@@ -104,8 +129,8 @@ func run() error {
 func newHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", handleHealthz)
-	mux.HandleFunc("/v1/sessions", handleSessions)
-	mux.HandleFunc("/v1/sessions/", handleSessionByID)
+	mux.HandleFunc("/v1/sessions", requireAuthToken(handleSessions))
+	mux.HandleFunc("/v1/sessions/", requireAuthToken(handleSessionByID))
 	mux.HandleFunc("/v1/stream/agent", func(w http.ResponseWriter, r *http.Request) {
 		handleStreamAttach(w, r, contracts.StreamRoleAgent)
 	})
@@ -280,19 +305,83 @@ func writeJSON(w http.ResponseWriter, code int, payload any) {
 	_ = json.NewEncoder(w).Encode(payload)
 }
 
-func initializeInjector() error {
-	client, err := kube.NewInClusterClient()
-	if err != nil {
-		return fmt.Errorf("initialize kubernetes client: %w", err)
-	}
+func initializeInjector(clientset kubernetes.Interface) {
+	probePort, _ := strconv.Atoi(strings.TrimSpace(os.Getenv(envAgentProbePort)))
 
-	sidecarBridge = agent.NewWorkloadInjector(client.Clientset, agent.Options{
+	sidecarBridge = agent.NewWorkloadInjector(clientset, agent.Options{
 		ContainerName:   strings.TrimSpace(os.Getenv(envAgentContainerName)),
 		Image:           strings.TrimSpace(os.Getenv(envAgentImage)),
 		ImagePullPolicy: strings.TrimSpace(os.Getenv(envAgentImagePullPolicy)),
 		ManagerAddress:  strings.TrimSpace(os.Getenv(envManagerAddress)),
+		ProbePort:       probePort,
 	})
+}
+
+// initializeAuthToken loads the shared session-API token from its Secret,
+// generating and persisting a fresh one on first start. Requiring the token
+// (or kube API access to read it) means network reach to the manager Service
+// alone is no longer enough to inject root+NET_ADMIN sidecars.
+func initializeAuthToken(ctx context.Context, clientset kubernetes.Interface) error {
+	secret, err := clientset.CoreV1().Secrets(managerNamespace).Get(ctx, authSecretName, metav1.GetOptions{})
+	if err == nil {
+		if token := strings.TrimSpace(string(secret.Data[authSecretKey])); token != "" {
+			managerAuthToken = token
+			return nil
+		}
+		token := newAuthToken()
+		updated := secret.DeepCopy()
+		if updated.Data == nil {
+			updated.Data = map[string][]byte{}
+		}
+		updated.Data[authSecretKey] = []byte(token)
+		if _, err := clientset.CoreV1().Secrets(managerNamespace).Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("update auth secret: %w", err)
+		}
+		managerAuthToken = token
+		return nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("get auth secret: %w", err)
+	}
+
+	token := newAuthToken()
+	_, err = clientset.CoreV1().Secrets(managerNamespace).Create(ctx, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      authSecretName,
+			Namespace: managerNamespace,
+		},
+		Data: map[string][]byte{
+			authSecretKey: []byte(token),
+		},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			// Lost a create race against another replica; adopt its token.
+			return initializeAuthToken(ctx, clientset)
+		}
+		return fmt.Errorf("create auth secret: %w", err)
+	}
+	managerAuthToken = token
 	return nil
+}
+
+func newAuthToken() string {
+	buffer := make([]byte, 32)
+	if _, err := rand.Read(buffer); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(buffer)
+}
+
+func requireAuthToken(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := strings.TrimSpace(r.Header.Get(authTokenHeader))
+		if managerAuthToken == "" || token != managerAuthToken {
+			writeError(w, http.StatusUnauthorized, "invalid or missing auth token")
+			return
+		}
+		next(w, r)
+	}
 }
 
 func cleanupDanglingAgents(ctx context.Context) error {

@@ -180,13 +180,16 @@ jobs:
         run: |
           sudo -n "$GITHUB_WORKSPACE/bin/krun-helper" --kubeconfig "$HOME/.kube/config" &
           for i in $(seq 1 20); do
-            if nc -z 127.0.0.1 47831 2>/dev/null; then
+            output=$(krun debug helper status 2>/dev/null || true)
+            if echo "$output" | grep -q "helper is running"; then
               echo "krun-helper daemon is ready"
               break
             fi
             sleep 0.5
           done
-          nc -z 127.0.0.1 47831 || { echo "krun-helper daemon failed to start"; exit 1; }
+          output=$(krun debug helper status)
+          echo "$output"
+          echo "$output" | grep -q "helper is running" || { echo "krun-helper daemon failed to start"; exit 1; }
 
       - name: Test krun debug enable
         run: |

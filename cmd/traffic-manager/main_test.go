@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -27,7 +28,7 @@ func TestSessionsLifecycle(t *testing.T) {
 		LocalPort:   5000,
 		ClientID:    "dev-1",
 	})
-	createReq := httptest.NewRequest(http.MethodPost, "/v1/sessions", bytes.NewReader(createPayload))
+	createReq := newAuthedRequest(http.MethodPost, "/v1/sessions", bytes.NewReader(createPayload))
 	createRec := httptest.NewRecorder()
 	handler.ServeHTTP(createRec, createReq)
 
@@ -51,7 +52,7 @@ func TestSessionsLifecycle(t *testing.T) {
 		t.Fatalf("expected workload default to service_name, got %q", created.Workload)
 	}
 
-	listReq := httptest.NewRequest(http.MethodGet, "/v1/sessions", nil)
+	listReq := newAuthedRequest(http.MethodGet, "/v1/sessions", nil)
 	listRec := httptest.NewRecorder()
 	handler.ServeHTTP(listRec, listReq)
 	if listRec.Code != http.StatusOK {
@@ -68,7 +69,7 @@ func TestSessionsLifecycle(t *testing.T) {
 		t.Fatalf("expected listed session id %q, got %q", created.SessionID, listResponse.Sessions[0].SessionID)
 	}
 
-	deleteReq := httptest.NewRequest(http.MethodDelete, "/v1/sessions/"+created.SessionID, nil)
+	deleteReq := newAuthedRequest(http.MethodDelete, "/v1/sessions/"+created.SessionID, nil)
 	deleteRec := httptest.NewRecorder()
 	handler.ServeHTTP(deleteRec, deleteReq)
 	if deleteRec.Code != http.StatusNoContent {
@@ -78,7 +79,7 @@ func TestSessionsLifecycle(t *testing.T) {
 		t.Fatalf("expected sidecar remove call for deleted session, got %+v", fake.removeCalls)
 	}
 
-	listAfterDeleteReq := httptest.NewRequest(http.MethodGet, "/v1/sessions", nil)
+	listAfterDeleteReq := newAuthedRequest(http.MethodGet, "/v1/sessions", nil)
 	listAfterDeleteRec := httptest.NewRecorder()
 	handler.ServeHTTP(listAfterDeleteRec, listAfterDeleteReq)
 	if listAfterDeleteRec.Code != http.StatusOK {
@@ -99,7 +100,7 @@ func TestCreateSessionValidation(t *testing.T) {
 	handler := newHandler()
 
 	payload := []byte(`{"service_name":"orders-api","service_port":8080}`)
-	req := httptest.NewRequest(http.MethodPost, "/v1/sessions", bytes.NewReader(payload))
+	req := newAuthedRequest(http.MethodPost, "/v1/sessions", bytes.NewReader(payload))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -113,14 +114,14 @@ func TestSessionMethodsAndNotFound(t *testing.T) {
 	sidecarBridge = &fakeInjector{}
 	handler := newHandler()
 
-	methodReq := httptest.NewRequest(http.MethodPut, "/v1/sessions", nil)
+	methodReq := newAuthedRequest(http.MethodPut, "/v1/sessions", nil)
 	methodRec := httptest.NewRecorder()
 	handler.ServeHTTP(methodRec, methodReq)
 	if methodRec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected status 405, got %d", methodRec.Code)
 	}
 
-	deleteReq := httptest.NewRequest(http.MethodDelete, "/v1/sessions/does-not-exist", nil)
+	deleteReq := newAuthedRequest(http.MethodDelete, "/v1/sessions/does-not-exist", nil)
 	deleteRec := httptest.NewRecorder()
 	handler.ServeHTTP(deleteRec, deleteReq)
 	if deleteRec.Code != http.StatusNotFound {
@@ -141,7 +142,7 @@ func TestCreateSessionRollsBackWhenInjectFails(t *testing.T) {
 		LocalPort:   5000,
 		ClientID:    "dev-1",
 	})
-	createReq := httptest.NewRequest(http.MethodPost, "/v1/sessions", bytes.NewReader(createPayload))
+	createReq := newAuthedRequest(http.MethodPost, "/v1/sessions", bytes.NewReader(createPayload))
 	createRec := httptest.NewRecorder()
 	handler.ServeHTTP(createRec, createReq)
 
@@ -149,7 +150,7 @@ func TestCreateSessionRollsBackWhenInjectFails(t *testing.T) {
 		t.Fatalf("expected status 500, got %d", createRec.Code)
 	}
 
-	listReq := httptest.NewRequest(http.MethodGet, "/v1/sessions", nil)
+	listReq := newAuthedRequest(http.MethodGet, "/v1/sessions", nil)
 	listRec := httptest.NewRecorder()
 	handler.ServeHTTP(listRec, listReq)
 	var listResponse contracts.ListDebugSessionsResponse
@@ -175,7 +176,7 @@ func TestDeleteSessionReturnsServerErrorWhenRemoveFails(t *testing.T) {
 		LocalPort:   5000,
 		ClientID:    "dev-1",
 	})
-	createReq := httptest.NewRequest(http.MethodPost, "/v1/sessions", bytes.NewReader(createPayload))
+	createReq := newAuthedRequest(http.MethodPost, "/v1/sessions", bytes.NewReader(createPayload))
 	createRec := httptest.NewRecorder()
 	handler.ServeHTTP(createRec, createReq)
 	if createRec.Code != http.StatusCreated {
@@ -186,14 +187,14 @@ func TestDeleteSessionReturnsServerErrorWhenRemoveFails(t *testing.T) {
 		t.Fatalf("decode create response: %v", err)
 	}
 
-	deleteReq := httptest.NewRequest(http.MethodDelete, "/v1/sessions/"+created.SessionID, nil)
+	deleteReq := newAuthedRequest(http.MethodDelete, "/v1/sessions/"+created.SessionID, nil)
 	deleteRec := httptest.NewRecorder()
 	handler.ServeHTTP(deleteRec, deleteReq)
 	if deleteRec.Code != http.StatusInternalServerError {
 		t.Fatalf("expected status 500, got %d", deleteRec.Code)
 	}
 
-	listReq := httptest.NewRequest(http.MethodGet, "/v1/sessions", nil)
+	listReq := newAuthedRequest(http.MethodGet, "/v1/sessions", nil)
 	listRec := httptest.NewRecorder()
 	handler.ServeHTTP(listRec, listReq)
 	var listResponse contracts.ListDebugSessionsResponse
@@ -218,7 +219,7 @@ func TestDeleteSessionIgnoresMissingWorkloadOnRemove(t *testing.T) {
 		LocalPort:   5000,
 		ClientID:    "dev-1",
 	})
-	createReq := httptest.NewRequest(http.MethodPost, "/v1/sessions", bytes.NewReader(createPayload))
+	createReq := newAuthedRequest(http.MethodPost, "/v1/sessions", bytes.NewReader(createPayload))
 	createRec := httptest.NewRecorder()
 	handler.ServeHTTP(createRec, createReq)
 	if createRec.Code != http.StatusCreated {
@@ -229,7 +230,7 @@ func TestDeleteSessionIgnoresMissingWorkloadOnRemove(t *testing.T) {
 		t.Fatalf("decode create response: %v", err)
 	}
 
-	deleteReq := httptest.NewRequest(http.MethodDelete, "/v1/sessions/"+created.SessionID, nil)
+	deleteReq := newAuthedRequest(http.MethodDelete, "/v1/sessions/"+created.SessionID, nil)
 	deleteRec := httptest.NewRecorder()
 	handler.ServeHTTP(deleteRec, deleteReq)
 	if deleteRec.Code != http.StatusNoContent {
@@ -241,7 +242,7 @@ func TestStreamAttachMethodNotAllowed(t *testing.T) {
 	resetSessionState(t)
 	handler := newHandler()
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/stream/agent", nil)
+	req := newAuthedRequest(http.MethodPost, "/v1/stream/agent", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
@@ -262,14 +263,14 @@ func TestStreamAttachRequiresValidSessionAndToken(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 
-	missingToken := httptest.NewRequest(http.MethodGet, "/v1/stream/agent?session_id="+created.SessionID, nil)
+	missingToken := newAuthedRequest(http.MethodGet, "/v1/stream/agent?session_id="+created.SessionID, nil)
 	missingTokenRec := httptest.NewRecorder()
 	handleStreamAttach(missingTokenRec, missingToken, contracts.StreamRoleAgent)
 	if missingTokenRec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected status 401, got %d", missingTokenRec.Code)
 	}
 
-	invalidSession := httptest.NewRequest(http.MethodGet, "/v1/stream/agent?session_id=unknown&session_token=abc", nil)
+	invalidSession := newAuthedRequest(http.MethodGet, "/v1/stream/agent?session_id=unknown&session_token=abc", nil)
 	invalidSessionRec := httptest.NewRecorder()
 	handleStreamAttach(invalidSessionRec, invalidSession, contracts.StreamRoleAgent)
 	if invalidSessionRec.Code != http.StatusNotFound {
@@ -333,4 +334,51 @@ func (f *fakeInjector) Remove(_ context.Context, session contracts.DebugSession)
 func (f *fakeInjector) Cleanup(_ context.Context) error {
 	f.cleanupCalls++
 	return f.cleanupErr
+}
+
+const testAuthToken = "test-auth-token"
+
+func init() {
+	managerAuthToken = testAuthToken
+}
+
+// newAuthedRequest builds a test request carrying the session-API auth
+// token. Harmless on unauthenticated routes (healthz, streams).
+func newAuthedRequest(method string, target string, body io.Reader) *http.Request {
+	req := httptest.NewRequest(method, target, body)
+	req.Header.Set(authTokenHeader, testAuthToken)
+	return req
+}
+
+func TestSessionsRequireAuthToken(t *testing.T) {
+	sessionRegistry.Clear()
+	handler := newHandler()
+
+	noToken := httptest.NewRequest(http.MethodGet, "/v1/sessions", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, noToken)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without token, got %d", rec.Code)
+	}
+
+	wrongToken := httptest.NewRequest(http.MethodGet, "/v1/sessions", nil)
+	wrongToken.Header.Set(authTokenHeader, "not-the-token")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, wrongToken)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 with wrong token, got %d", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, newAuthedRequest(http.MethodGet, "/v1/sessions", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 with token, got %d", rec.Code)
+	}
+
+	healthz := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, healthz)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("healthz must stay unauthenticated, got %d", rec.Code)
+	}
 }

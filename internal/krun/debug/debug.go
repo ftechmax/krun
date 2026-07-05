@@ -17,6 +17,7 @@ import (
 
 	cfg "github.com/ftechmax/krun/internal/config"
 	"github.com/ftechmax/krun/internal/contracts"
+	"github.com/ftechmax/krun/internal/helperipc"
 	deploy "github.com/ftechmax/krun/internal/krun/deploy"
 	"github.com/ftechmax/krun/internal/kube"
 	"github.com/ftechmax/krun/internal/utils"
@@ -25,7 +26,15 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-const helperBaseURL = "http://127.0.0.1:47831"
+const (
+	// healthTimeout bounds the liveness probe; listTimeout the cheap reads.
+	// commandTimeout covers enable/disable, whose helper-side work includes
+	// a 10s ready-verify per dependency port-forward, a 10s manager session
+	// call, and the sidecar injection — well beyond a generic 5s budget.
+	healthTimeout  = 2 * time.Second
+	listTimeout    = 5 * time.Second
+	commandTimeout = 60 * time.Second
+)
 
 func List(config cfg.Config) {
 	if err := ensureHelperStarted(config); err != nil {
@@ -90,7 +99,7 @@ func Enable(service cfg.Service, config cfg.Config, containerName string) {
 	request := contracts.DebugSessionCommandRequest{
 		Context: buildDebugServiceContext(service),
 	}
-	response, err := helperRequest(http.MethodPost, "/v1/debug/enable", request)
+	response, err := helperRequest(http.MethodPost, "/v1/debug/enable", request, commandTimeout)
 	if err != nil {
 		fmt.Println(utils.Colorize(fmt.Sprintf("cannot apply debug enable via helper: %v", err), utils.Red))
 		return
@@ -115,7 +124,7 @@ func Disable(service cfg.Service, config cfg.Config) {
 
 	response, err := helperRequest(http.MethodPost, "/v1/debug/disable", contracts.DebugSessionCommandRequest{
 		Context: buildDebugServiceContext(service),
-	})
+	}, commandTimeout)
 	if err != nil {
 		fmt.Println(utils.Colorize(fmt.Sprintf("cannot apply debug disable via helper: %v", err), utils.Red))
 		return
@@ -135,18 +144,32 @@ func Disable(service cfg.Service, config cfg.Config) {
 	}
 }
 
+// HelperStatus reports the helper's state without side effects: unlike the
+// other commands it never starts the helper.
 func HelperStatus(config cfg.Config) {
-	if err := ensureHelperStarted(config); err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("cannot start helper: %v", err), utils.Red))
+	if err := helperCheckHealth(); err != nil {
+		fmt.Println(utils.Colorize("helper is not running", utils.Yellow))
+		fmt.Printf("endpoint: %s\n", helperipc.DefaultEndpoint)
 		return
 	}
 
-	if err := helperCheckHealth(); err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("helper unreachable: %v", err), utils.Red))
+	fmt.Println(utils.Colorize("helper is running", utils.Green))
+	fmt.Printf("endpoint: %s\n", helperipc.DefaultEndpoint)
+	fmt.Printf("kubeconfig: %s\n", config.KubeConfig)
+
+	sessions, err := helperListSessions()
+	if err != nil {
+		fmt.Println(utils.Colorize(fmt.Sprintf("cannot list debug sessions: %v", err), utils.Yellow))
 		return
 	}
-	fmt.Println(utils.Colorize("helper is running", utils.Green))
-	fmt.Printf("kubeconfig: %s\n", config.KubeConfig)
+	if len(sessions) == 0 {
+		fmt.Println("Active debug sessions: none")
+		return
+	}
+	fmt.Println("Active debug sessions:")
+	for _, session := range sessions {
+		fmt.Printf("  - %s (intercept port %d)\n", session.Context.ServiceName, session.Context.InterceptPort)
+	}
 }
 
 func HelperStop() {
@@ -155,7 +178,7 @@ func HelperStop() {
 		return
 	}
 
-	response, err := helperRequest(http.MethodPost, "/v1/shutdown", nil)
+	response, err := helperRequest(http.MethodPost, "/v1/shutdown", nil, listTimeout)
 	if err != nil {
 		fmt.Println(utils.Colorize(fmt.Sprintf("failed to stop helper: %v", err), utils.Red))
 		return
@@ -322,7 +345,7 @@ func ensureHelperStarted(config cfg.Config) error {
 		time.Sleep(200 * time.Millisecond)
 	}
 
-	return fmt.Errorf("helper failed to become healthy on %s", helperBaseURL)
+	return fmt.Errorf("helper failed to become healthy on %s", helperipc.DefaultEndpoint)
 }
 
 func startHelperProcess(config cfg.Config) error {
@@ -373,8 +396,8 @@ func resolveHelperBinaryPath() (string, error) {
 }
 
 func helperCheckHealth() error {
-	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(helperBaseURL + "/healthz")
+	client := helperipc.NewClient(healthTimeout)
+	resp, err := client.Get(helperipc.BaseURL + "/healthz")
 	if err != nil {
 		return err
 	}
@@ -385,7 +408,7 @@ func helperCheckHealth() error {
 	return nil
 }
 
-func helperRequest(method string, path string, payload any) (contracts.HelperResponse, error) {
+func helperRequest(method string, path string, payload any, timeout time.Duration) (contracts.HelperResponse, error) {
 	var body io.Reader
 	if payload != nil {
 		marshaledBody, err := json.Marshal(payload)
@@ -395,7 +418,7 @@ func helperRequest(method string, path string, payload any) (contracts.HelperRes
 		body = bytes.NewReader(marshaledBody)
 	}
 
-	request, err := http.NewRequest(method, helperBaseURL+path, body)
+	request, err := http.NewRequest(method, helperipc.BaseURL+path, body)
 	if err != nil {
 		return contracts.HelperResponse{}, err
 	}
@@ -403,7 +426,7 @@ func helperRequest(method string, path string, payload any) (contracts.HelperRes
 		request.Header.Set("Content-Type", "application/json")
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := helperipc.NewClient(timeout)
 	response, err := client.Do(request)
 	if err != nil {
 		return contracts.HelperResponse{}, err
@@ -432,12 +455,12 @@ func helperRequest(method string, path string, payload any) (contracts.HelperRes
 }
 
 func helperListSessions() ([]contracts.HelperDebugSession, error) {
-	request, err := http.NewRequest(http.MethodGet, helperBaseURL+"/v1/debug/sessions", nil)
+	request, err := http.NewRequest(http.MethodGet, helperipc.BaseURL+"/v1/debug/sessions", nil)
 	if err != nil {
 		return nil, err
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := helperipc.NewClient(listTimeout)
 	response, err := client.Do(request)
 	if err != nil {
 		return nil, err

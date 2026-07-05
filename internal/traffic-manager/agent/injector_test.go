@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -370,5 +371,79 @@ func newTestDaemonSet(namespace string, name string) *appsv1.DaemonSet {
 				},
 			},
 		},
+	}
+}
+
+func TestWorkloadInjectorRewritesAndRestoresProbes(t *testing.T) {
+	deployment := newTestDeployment("default", "orders-api")
+	deployment.Spec.Template.Spec.Containers[0].Ports = []corev1.ContainerPort{
+		{Name: "http", ContainerPort: 8080},
+	}
+	deployment.Spec.Template.Spec.Containers[0].LivenessProbe = &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt32(8080)},
+		},
+	}
+	deployment.Spec.Template.Spec.Containers[0].ReadinessProbe = &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromString("http")},
+		},
+	}
+	deployment.Spec.Template.Spec.Containers[0].StartupProbe = &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{Path: "/other", Port: intstr.FromInt32(9999)},
+		},
+	}
+
+	client := fake.NewSimpleClientset(deployment)
+	injector := NewWorkloadInjector(client, Options{})
+	session := contracts.DebugSession{
+		SessionID:   "sess_1",
+		Namespace:   "default",
+		ServiceName: "orders-api",
+		Workload:    "orders-api",
+		ServicePort: 8080,
+		LocalPort:   5005,
+	}
+
+	if err := injector.Inject(context.Background(), session); err != nil {
+		t.Fatalf("inject: %v", err)
+	}
+
+	updated, err := client.AppsV1().Deployments("default").Get(context.Background(), "orders-api", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+	app := updated.Spec.Template.Spec.Containers[0]
+	if got := app.LivenessProbe.HTTPGet.Port.IntValue(); got != DefaultProbePort {
+		t.Fatalf("liveness probe port = %d, want %d", got, DefaultProbePort)
+	}
+	if got := app.ReadinessProbe.TCPSocket.Port.IntValue(); got != DefaultProbePort {
+		t.Fatalf("readiness probe port = %d, want %d (named port must be resolved)", got, DefaultProbePort)
+	}
+	if got := app.StartupProbe.HTTPGet.Port.IntValue(); got != 9999 {
+		t.Fatalf("startup probe port = %d, must stay untouched", got)
+	}
+	if _, ok := updated.Annotations[OriginalProbesAnnotation]; !ok {
+		t.Fatal("expected original-probes annotation after inject")
+	}
+
+	if err := injector.Remove(context.Background(), session); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+
+	restored, err := client.AppsV1().Deployments("default").Get(context.Background(), "orders-api", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get deployment after remove: %v", err)
+	}
+	app = restored.Spec.Template.Spec.Containers[0]
+	if got := app.LivenessProbe.HTTPGet.Port.IntValue(); got != 8080 {
+		t.Fatalf("liveness probe port = %d, want restored 8080", got)
+	}
+	if got := app.ReadinessProbe.TCPSocket.Port.String(); got != "http" {
+		t.Fatalf("readiness probe port = %q, want restored named port", got)
+	}
+	if _, ok := restored.Annotations[OriginalProbesAnnotation]; ok {
+		t.Fatal("original-probes annotation must be removed on restore")
 	}
 }

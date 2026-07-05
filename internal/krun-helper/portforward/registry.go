@@ -47,9 +47,10 @@ type sharedForward struct {
 type forwardHandle struct {
 	spec contracts.PortForward
 
-	cancel   context.CancelFunc
-	doneChan chan struct{}
-	stopOnce sync.Once
+	boundLocalPort int
+	cancel         context.CancelFunc
+	doneChan       chan struct{}
+	stopOnce       sync.Once
 }
 
 func NewSessionRegistry(kubeConfigPath string) (*SessionRegistry, error) {
@@ -107,7 +108,7 @@ func (r *SessionRegistry) Upsert(sessionKey string, forwards []contracts.PortFor
 			return err
 		}
 
-		fmt.Printf("Started port-forward %s/%s:%d -> 127.0.0.1:%d\n", forward.Namespace, forward.Service, forward.RemotePort, forward.LocalPort)
+		fmt.Printf("Started port-forward %s/%s:%d -> 127.0.0.1:%d\n", handle.spec.Namespace, handle.spec.Service, handle.spec.RemotePort, handle.spec.LocalPort)
 		r.shared[forwardKey] = &sharedForward{handle: handle, refCount: 1}
 		next[forwardKey] = handle
 		acquiredKeys = append(acquiredKeys, forwardKey)
@@ -123,6 +124,32 @@ func (r *SessionRegistry) Upsert(sessionKey string, forwards []contracts.PortFor
 
 	r.sessions[key] = next
 	return nil
+}
+
+// BoundLocalPort reports the actual local port of a forward previously
+// requested via Upsert. For requests with LocalPort 0 this is the
+// OS-allocated port; the lookup key is the forward spec as requested.
+func (r *SessionRegistry) BoundLocalPort(sessionKey string, forward contracts.PortForward) (int, bool) {
+	normalized := normalizePortForwards([]contracts.PortForward{forward})
+	if len(normalized) != 1 {
+		return 0, false
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	handles, ok := r.sessions[sessionkey.Normalize(sessionKey)]
+	if !ok {
+		return 0, false
+	}
+	handle, ok := handles[portForwardKey(normalized[0])]
+	if !ok {
+		return 0, false
+	}
+	if handle.boundLocalPort > 0 {
+		return handle.boundLocalPort, true
+	}
+	return handle.spec.LocalPort, true
 }
 
 func (r *SessionRegistry) Remove(sessionKey string) error {
@@ -178,18 +205,25 @@ func (r *SessionRegistry) releaseSharedLocked(forwardKey string) {
 
 func (r *SessionRegistry) startForward(forward contracts.PortForward) (*forwardHandle, error) {
 	// Dial once to verify the forward works before returning.
-	stopChan, doneChan, err := r.dialForward(forward)
+	stopChan, doneChan, boundLocalPort, err := r.dialForward(forward)
 	if err != nil {
 		return nil, err
+	}
+
+	// A requested local port of 0 lets the OS pick one; pin the allocation
+	// so supervision re-dials rebind the same port that consumers use.
+	if forward.LocalPort == 0 {
+		forward.LocalPort = boundLocalPort
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	supervisedDone := make(chan struct{})
 
 	h := &forwardHandle{
-		spec:     forward,
-		cancel:   cancel,
-		doneChan: supervisedDone,
+		spec:           forward,
+		boundLocalPort: boundLocalPort,
+		cancel:         cancel,
+		doneChan:       supervisedDone,
 	}
 
 	// Supervision goroutine: watches the active forward and re-dials on failure.
@@ -218,7 +252,7 @@ func (r *SessionRegistry) startForward(forward contracts.PortForward) (*forwardH
 				case <-time.After(delay):
 				}
 
-				newStop, newDone, dialErr := r.dialForward(forward)
+				newStop, newDone, _, dialErr := r.dialForward(forward)
 				if dialErr != nil {
 					log.Printf("port-forward reconnect failed %s/%s: %v", forward.Namespace, forward.Service, dialErr)
 					delay *= 2
@@ -240,10 +274,10 @@ func (r *SessionRegistry) startForward(forward contracts.PortForward) (*forwardH
 	return h, nil
 }
 
-func (r *SessionRegistry) dialForward(forward contracts.PortForward) (stopChan chan struct{}, doneChan chan struct{}, err error) {
+func (r *SessionRegistry) dialForward(forward contracts.PortForward) (stopChan chan struct{}, doneChan chan struct{}, boundLocalPort int, err error) {
 	targetPod, targetPort, err := r.resolvePodForwardTarget(forward)
 	if err != nil {
-		return nil, nil, fmt.Errorf("resolve target for %s/%s: %w", forward.Namespace, forward.Service, err)
+		return nil, nil, 0, fmt.Errorf("resolve target for %s/%s: %w", forward.Namespace, forward.Service, err)
 	}
 
 	request := r.client.Clientset.CoreV1().RESTClient().Post().
@@ -254,7 +288,7 @@ func (r *SessionRegistry) dialForward(forward contracts.PortForward) (stopChan c
 
 	transport, upgrader, err := spdy.RoundTripperFor(r.client.RestConfig)
 	if err != nil {
-		return nil, nil, fmt.Errorf("build spdy round tripper: %w", err)
+		return nil, nil, 0, fmt.Errorf("build spdy round tripper: %w", err)
 	}
 	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport}, http.MethodPost, request.URL())
 
@@ -265,7 +299,7 @@ func (r *SessionRegistry) dialForward(forward contracts.PortForward) (stopChan c
 
 	pf, err := portforward.NewOnAddresses(dialer, []string{"127.0.0.1"}, ports, stop, readyChan, io.Discard, errOut)
 	if err != nil {
-		return nil, nil, fmt.Errorf("create port-forwarder: %w", err)
+		return nil, nil, 0, fmt.Errorf("create port-forwarder: %w", err)
 	}
 
 	forwardErr := make(chan error, 1)
@@ -277,7 +311,20 @@ func (r *SessionRegistry) dialForward(forward contracts.PortForward) (stopChan c
 
 	select {
 	case <-readyChan:
-		return stop, done, nil
+		boundLocalPort = forward.LocalPort
+		if boundLocalPort == 0 {
+			forwardedPorts, portsErr := pf.GetPorts()
+			if portsErr != nil || len(forwardedPorts) == 0 {
+				close(stop)
+				select {
+				case <-done:
+				case <-time.After(forwardShutdownTimeout):
+				}
+				return nil, nil, 0, fmt.Errorf("resolve bound local port for %s/%s: %v", forward.Namespace, forward.Service, portsErr)
+			}
+			boundLocalPort = int(forwardedPorts[0].Local)
+		}
+		return stop, done, boundLocalPort, nil
 	case err := <-forwardErr:
 		msg := strings.TrimSpace(errOut.String())
 		if err == nil {
@@ -286,14 +333,14 @@ func (r *SessionRegistry) dialForward(forward contracts.PortForward) (stopChan c
 		if msg != "" {
 			err = fmt.Errorf("%w: %s", err, msg)
 		}
-		return nil, nil, fmt.Errorf("start %s/%s (pod %s) %d -> 127.0.0.1:%d: %w", forward.Namespace, forward.Service, targetPod, targetPort, forward.LocalPort, err)
+		return nil, nil, 0, fmt.Errorf("start %s/%s (pod %s) %d -> 127.0.0.1:%d: %w", forward.Namespace, forward.Service, targetPod, targetPort, forward.LocalPort, err)
 	case <-time.After(readyTimeout):
 		close(stop)
 		select {
 		case <-done:
 		case <-time.After(forwardShutdownTimeout):
 		}
-		return nil, nil, fmt.Errorf("timed out waiting for %s/%s (pod %s) %d -> 127.0.0.1:%d", forward.Namespace, forward.Service, targetPod, targetPort, forward.LocalPort)
+		return nil, nil, 0, fmt.Errorf("timed out waiting for %s/%s (pod %s) %d -> 127.0.0.1:%d", forward.Namespace, forward.Service, targetPod, targetPort, forward.LocalPort)
 	}
 }
 
@@ -435,7 +482,8 @@ func normalizePortForwards(forwards []contracts.PortForward) []contracts.PortFor
 		if namespace == "" {
 			namespace = defaultNamespace
 		}
-		if service == "" || forward.LocalPort <= 0 || forward.RemotePort <= 0 {
+		// LocalPort 0 is allowed: the OS allocates a free port at dial time.
+		if service == "" || forward.LocalPort < 0 || forward.RemotePort <= 0 {
 			continue
 		}
 

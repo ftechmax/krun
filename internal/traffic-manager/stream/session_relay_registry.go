@@ -7,12 +7,14 @@ import (
 
 	"github.com/ftechmax/krun/internal/contracts"
 	"github.com/ftechmax/krun/internal/sessionkey"
+	"github.com/ftechmax/krun/internal/wskeepalive"
 	"github.com/gorilla/websocket"
 )
 
 const (
 	peerSendQueueSize = 1024
 	writeTimeout      = 10 * time.Second
+	sendGraceTimeout  = 5 * time.Second
 )
 
 type SessionRelayRegistry struct {
@@ -33,6 +35,12 @@ type relayPeer struct {
 	sendCh    chan contracts.StreamEnvelope
 }
 
+func (p *relayPeer) closeConn() {
+	if p.conn != nil {
+		_ = p.conn.Close()
+	}
+}
+
 func NewSessionRelayRegistry() *SessionRelayRegistry {
 	return &SessionRelayRegistry{
 		sessions: map[string]*sessionRelay{},
@@ -50,6 +58,11 @@ func (h *SessionRelayRegistry) ServePeer(role string, sessionID string, conn *we
 	h.register(peer)
 	defer h.unregister(peer)
 	defer peer.conn.Close()
+
+	wskeepalive.Configure(peer.conn)
+	pingDone := make(chan struct{})
+	defer close(pingDone)
+	go wskeepalive.Ping(peer.conn, pingDone)
 
 	readErrCh := make(chan error, 1)
 	envelopeCh := make(chan contracts.StreamEnvelope, 128)
@@ -87,7 +100,7 @@ func (h *SessionRelayRegistry) register(peer *relayPeer) {
 	switch peer.role {
 	case contracts.StreamRoleClient:
 		if session.client != nil {
-			_ = session.client.conn.Close()
+			session.client.closeConn()
 		}
 		session.client = peer
 	default:
@@ -109,9 +122,12 @@ func (h *SessionRelayRegistry) unregister(peer *relayPeer) {
 
 	switch peer.role {
 	case contracts.StreamRoleClient:
-		if session.client == peer {
-			session.client = nil
+		if session.client != peer {
+			// A newer client replaced this peer; the live routing state
+			// belongs to the replacement and must stay untouched.
+			break
 		}
+		session.client = nil
 		if len(session.connectionPeer) > 0 {
 			toAgent = map[*relayPeer][]contracts.StreamEnvelope{}
 			for connectionID, owner := range session.connectionPeer {
@@ -272,7 +288,17 @@ func sendEnvelope(peer *relayPeer, envelope contracts.StreamEnvelope) {
 	}
 	select {
 	case peer.sendCh <- envelope:
+		return
 	default:
-		_ = peer.conn.Close()
+	}
+
+	// Queue is full: give the peer a bounded grace period to drain before
+	// declaring it dead, instead of tearing down the shared stream instantly.
+	timer := time.NewTimer(sendGraceTimeout)
+	defer timer.Stop()
+	select {
+	case peer.sendCh <- envelope:
+	case <-timer.C:
+		peer.closeConn()
 	}
 }

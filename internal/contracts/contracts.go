@@ -76,11 +76,15 @@ type HelperResponse struct {
 }
 
 const (
-	StreamTypeOpen  = "open"
-	StreamTypeData  = "data"
-	StreamTypeClose = "close"
-	StreamTypeError = "error"
-	StreamTypePing  = "ping"
+	StreamTypeOpen = "open"
+	StreamTypeData = "data"
+	// StreamTypeCloseWrite half-closes a connection: the sender saw EOF on
+	// its read side but the reverse direction may still carry data. The
+	// relay routes it like data; only close/error tear the connection down.
+	StreamTypeCloseWrite = "close-write"
+	StreamTypeClose      = "close"
+	StreamTypeError      = "error"
+	StreamTypePing       = "ping"
 )
 
 const (

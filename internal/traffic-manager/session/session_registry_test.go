@@ -100,3 +100,53 @@ func TestDebugSessionRegistryCreateValidationAndDefaults(t *testing.T) {
 		t.Fatalf("expected trimmed service name, got %q", created.ServiceName)
 	}
 }
+
+func TestCreateSupersedesSessionForSameWorkload(t *testing.T) {
+	registry := NewDebugSessionRegistry()
+
+	first, err := registry.Create(contracts.CreateDebugSessionRequest{
+		Namespace:   "shop",
+		ServiceName: "orders-api",
+		ServicePort: 8080,
+		LocalPort:   5005,
+	})
+	if err != nil {
+		t.Fatalf("create first: %v", err)
+	}
+
+	second, err := registry.Create(contracts.CreateDebugSessionRequest{
+		Namespace:   "shop",
+		ServiceName: "orders-api",
+		ServicePort: 8080,
+		LocalPort:   5005,
+	})
+	if err != nil {
+		t.Fatalf("create second: %v", err)
+	}
+
+	if _, ok := registry.Get(first.SessionID); ok {
+		t.Fatal("first session must be superseded by the second")
+	}
+	if _, ok := registry.Get(second.SessionID); !ok {
+		t.Fatal("second session must be active")
+	}
+	if got := len(registry.List()); got != 1 {
+		t.Fatalf("expected 1 session, got %d", got)
+	}
+
+	other, err := registry.Create(contracts.CreateDebugSessionRequest{
+		Namespace:   "other-ns",
+		ServiceName: "orders-api",
+		ServicePort: 8080,
+		LocalPort:   5005,
+	})
+	if err != nil {
+		t.Fatalf("create other namespace: %v", err)
+	}
+	if _, ok := registry.Get(second.SessionID); !ok {
+		t.Fatal("session in a different namespace must not be superseded")
+	}
+	if _, ok := registry.Get(other.SessionID); !ok {
+		t.Fatal("other-namespace session must be active")
+	}
+}

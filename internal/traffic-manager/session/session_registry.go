@@ -49,6 +49,15 @@ func (s *DebugSessionRegistry) Create(req contracts.CreateDebugSessionRequest) (
 		workload = serviceName
 	}
 
+	// Supersede any earlier session for the same workload: the new sidecar
+	// injection overwrites the old one in place, so the old registry entry
+	// can only go stale (e.g. after a helper restart skipped the delete).
+	for sessionID, existing := range s.sessions {
+		if existing.Namespace == namespace && existing.Workload == workload {
+			delete(s.sessions, sessionID)
+		}
+	}
+
 	session := contracts.DebugSession{
 		SessionID:    "sess_" + randomHex(8),
 		SessionToken: randomHex(16),

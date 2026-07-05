@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/ftechmax/krun/internal/contracts"
+	"github.com/ftechmax/krun/internal/streamconn"
+	"github.com/ftechmax/krun/internal/wskeepalive"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
@@ -35,11 +37,14 @@ const (
 	sessionTokenEnv        = "KRUN_SESSION_TOKEN"
 	targetPortEnv          = "KRUN_TARGET_PORT"
 	agentListenPortEnv     = "KRUN_AGENT_LISTEN_PORT"
+	agentProbePortEnv      = "KRUN_AGENT_PROBE_PORT"
 	defaultAgentListenPort = 8081
+	defaultAgentProbePort  = 8082
 	defaultStreamPath      = "/v1/stream/agent"
 	maxBackoff             = 10 * time.Second
 	initialBackoff         = time.Second
 	streamQueueSize        = 2048
+	connWriteTimeout       = 10 * time.Second
 )
 
 type runtimeConfig struct {
@@ -48,22 +53,20 @@ type runtimeConfig struct {
 	ManagerAddress  string
 	TargetPort      int
 	AgentListenPort int
+	ProbePort       int
 	StreamURL       string
 }
 
 type reconnectingStreamClient struct {
-	streamURL string
-	headers   http.Header
-	sendCh    chan contracts.StreamEnvelope
-	onReceive func(contracts.StreamEnvelope)
-	cancel    context.CancelFunc
-	doneCh    chan struct{}
-	once      sync.Once
-}
-
-type connectionRegistry struct {
-	mu    sync.Mutex
-	conns map[string]net.Conn
+	streamURL    string
+	headers      http.Header
+	sendCh       chan contracts.StreamEnvelope
+	onReceive    func(contracts.StreamEnvelope)
+	onDisconnect func()
+	runCtx       context.Context
+	cancel       context.CancelFunc
+	doneCh       chan struct{}
+	once         sync.Once
 }
 
 type redirectRule struct {
@@ -97,16 +100,20 @@ func run() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	connectionRegistry := newConnectionRegistry()
-	defer connectionRegistry.CloseAll()
+	connections := streamconn.NewRegistry()
+	defer connections.CloseAll()
 
-	streamClient := newReconnectingStreamClient(
-		ctx,
-		cfg,
-		func(envelope contracts.StreamEnvelope) {
-			handleInboundEnvelope(connectionRegistry, envelope)
-		},
-	)
+	// The manager drops connection routing for this session when the agent
+	// stream detaches (and tells the helper to close its side), so every
+	// intercepted conn from the previous epoch is dead: close them instead
+	// of streaming into the void after reconnect.
+	streamClient := newReconnectingStreamClient(ctx, cfg, nil, connections.CloseAll)
+	streamClient.onReceive = func(envelope contracts.StreamEnvelope) {
+		handleInboundEnvelope(connections, envelope, func(connectionID string) {
+			_ = streamClient.Send(ctx, cfg.newStreamEnvelope(connectionID, contracts.StreamTypeClose))
+		})
+	}
+	streamClient.start()
 	defer streamClient.Close()
 
 	rule := redirectRule{
@@ -130,8 +137,17 @@ func run() error {
 	}
 	defer listener.Close()
 
+	// Kubelet probes that originally targeted the intercepted port are
+	// rewritten by the injector to point here; answering them keeps the pod
+	// Ready while the developer's local app is stopped or on a breakpoint.
+	probeServer, err := startProbeServer(cfg.ProbePort)
+	if err != nil {
+		return err
+	}
+	defer probeServer.Close()
+
 	var connIDCounter atomic.Uint64
-	go acceptInterceptedConnections(ctx, listener, cfg, streamClient, connectionRegistry, &connIDCounter)
+	go acceptInterceptedConnections(ctx, listener, cfg, streamClient, connections, &connIDCounter)
 
 	signalCh := make(chan os.Signal, 1)
 	signal.Notify(signalCh, os.Interrupt, syscall.SIGTERM)
@@ -165,6 +181,11 @@ func loadRuntimeConfig() (runtimeConfig, error) {
 		return runtimeConfig{}, err
 	}
 
+	probePort, err := parseOptionalPort(agentProbePortEnv, defaultAgentProbePort)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
+
 	streamURL, err := buildStreamURL(managerAddress, sessionID)
 	if err != nil {
 		return runtimeConfig{}, err
@@ -176,6 +197,7 @@ func loadRuntimeConfig() (runtimeConfig, error) {
 		ManagerAddress:  managerAddress,
 		TargetPort:      targetPort,
 		AgentListenPort: agentListenPort,
+		ProbePort:       probePort,
 		StreamURL:       streamURL,
 	}, nil
 }
@@ -270,7 +292,7 @@ func acceptInterceptedConnections(
 	listener net.Listener,
 	cfg runtimeConfig,
 	streamClient *reconnectingStreamClient,
-	connectionRegistry *connectionRegistry,
+	connections *streamconn.Registry,
 	connIDCounter *atomic.Uint64,
 ) {
 	for {
@@ -283,7 +305,7 @@ func acceptInterceptedConnections(
 			continue
 		}
 
-		go captureConnection(ctx, conn, cfg, streamClient, connectionRegistry, connIDCounter)
+		go captureConnection(ctx, conn, cfg, streamClient, connections, connIDCounter)
 	}
 }
 
@@ -292,18 +314,16 @@ func captureConnection(
 	conn net.Conn,
 	cfg runtimeConfig,
 	streamClient *reconnectingStreamClient,
-	connectionRegistry *connectionRegistry,
+	connections *streamconn.Registry,
 	connIDCounter *atomic.Uint64,
 ) {
-	defer conn.Close()
 	go func() {
 		<-ctx.Done()
 		_ = conn.Close()
 	}()
 
 	connectionID := fmt.Sprintf("%s-%d", agentID, connIDCounter.Add(1))
-	connectionRegistry.Set(connectionID, conn)
-	defer connectionRegistry.CloseAndDelete(connectionID)
+	connections.Set(connectionID, conn)
 
 	openEnvelope := cfg.newStreamEnvelope(connectionID, contracts.StreamTypeOpen)
 	openEnvelope.Metadata = map[string]string{
@@ -312,6 +332,7 @@ func captureConnection(
 	}
 	if err := streamClient.Send(ctx, openEnvelope); err != nil {
 		log.Printf("send open envelope failed (connection_id=%s): %v", connectionID, err)
+		connections.CloseAndDelete(connectionID)
 		return
 	}
 
@@ -325,6 +346,7 @@ func captureConnection(
 			dataEnvelope.Data = chunk
 			if err := streamClient.Send(ctx, dataEnvelope); err != nil {
 				log.Printf("send data envelope failed (connection_id=%s): %v", connectionID, err)
+				connections.CloseAndDelete(connectionID)
 				return
 			}
 		}
@@ -333,7 +355,12 @@ func captureConnection(
 			continue
 		}
 		if errors.Is(readErr, io.EOF) {
-			_ = streamClient.Send(ctx, cfg.newStreamEnvelope(connectionID, contracts.StreamTypeClose))
+			// Half-close: the caller finished sending but may still expect
+			// response data, so keep the conn registered for writes.
+			_ = streamClient.Send(ctx, cfg.newStreamEnvelope(connectionID, contracts.StreamTypeCloseWrite))
+			if connections.MarkReadClosed(connectionID) {
+				_ = streamClient.Send(ctx, cfg.newStreamEnvelope(connectionID, contracts.StreamTypeClose))
+			}
 			return
 		}
 
@@ -341,6 +368,7 @@ func captureConnection(
 		errorEnvelope.Message = readErr.Error()
 		_ = streamClient.Send(ctx, errorEnvelope)
 		_ = streamClient.Send(ctx, cfg.newStreamEnvelope(connectionID, contracts.StreamTypeClose))
+		connections.CloseAndDelete(connectionID)
 		return
 	}
 }
@@ -349,6 +377,7 @@ func newReconnectingStreamClient(
 	parent context.Context,
 	cfg runtimeConfig,
 	onReceive func(contracts.StreamEnvelope),
+	onDisconnect func(),
 ) *reconnectingStreamClient {
 	ctx, cancel := context.WithCancel(parent)
 	headers := make(http.Header)
@@ -358,16 +387,22 @@ func newReconnectingStreamClient(
 	}
 
 	client := &reconnectingStreamClient{
-		streamURL: cfg.StreamURL,
-		headers:   headers,
-		sendCh:    make(chan contracts.StreamEnvelope, streamQueueSize),
-		onReceive: onReceive,
-		cancel:    cancel,
-		doneCh:    make(chan struct{}),
+		streamURL:    cfg.StreamURL,
+		headers:      headers,
+		sendCh:       make(chan contracts.StreamEnvelope, streamQueueSize),
+		onReceive:    onReceive,
+		onDisconnect: onDisconnect,
+		runCtx:       ctx,
+		cancel:       cancel,
+		doneCh:       make(chan struct{}),
 	}
-
-	go client.run(ctx)
 	return client
+}
+
+// start launches the reconnect loop. Kept separate from construction so the
+// caller can finish wiring callbacks that reference the client itself.
+func (c *reconnectingStreamClient) start() {
+	go c.run(c.runCtx)
 }
 
 func (c *reconnectingStreamClient) Send(ctx context.Context, envelope contracts.StreamEnvelope) error {
@@ -415,11 +450,19 @@ func (c *reconnectingStreamClient) run(ctx context.Context) {
 		if err != nil && !errors.Is(err, context.Canceled) {
 			log.Printf("manager stream disconnected: %v", err)
 		}
+		if c.onDisconnect != nil {
+			c.onDisconnect()
+		}
 	}
 }
 
 func (c *reconnectingStreamClient) pumpConnection(ctx context.Context, conn *websocket.Conn) error {
 	defer conn.Close()
+
+	wskeepalive.Configure(conn)
+	pingDone := make(chan struct{})
+	defer close(pingDone)
+	go wskeepalive.Ping(conn, pingDone)
 
 	readerErrCh := make(chan error, 1)
 	inboundCh := make(chan contracts.StreamEnvelope, 128)
@@ -462,6 +505,29 @@ func (c *reconnectingStreamClient) pumpConnection(ctx context.Context, conn *web
 		}
 		pending = nil
 	}
+}
+
+// startProbeServer answers rewritten kubelet probes: accepting the TCP
+// connection satisfies tcpSocket probes, and any HTTP request gets 200 OK
+// for httpGet probes.
+func startProbeServer(port int) (*http.Server, error) {
+	listener, err := net.Listen("tcp", net.JoinHostPort("", strconv.Itoa(port)))
+	if err != nil {
+		return nil, fmt.Errorf("listen on probe port %d: %w", port, err)
+	}
+
+	server := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}),
+	}
+	go func() {
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+			log.Printf("probe server stopped: %v", err)
+		}
+	}()
+	log.Printf("probe server listening on :%d", port)
+	return server, nil
 }
 
 func sleepWithContext(ctx context.Context, delay time.Duration) bool {
@@ -551,57 +617,7 @@ func isMissingIptablesRuleError(err error) bool {
 		strings.Contains(message, "no chain/target/match by that name")
 }
 
-func newConnectionRegistry() *connectionRegistry {
-	return &connectionRegistry{
-		conns: map[string]net.Conn{},
-	}
-}
-
-func (r *connectionRegistry) Set(connectionID string, conn net.Conn) {
-	r.mu.Lock()
-	if previous, ok := r.conns[connectionID]; ok {
-		_ = previous.Close()
-	}
-	r.conns[connectionID] = conn
-	r.mu.Unlock()
-}
-
-func (r *connectionRegistry) Get(connectionID string) net.Conn {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.conns[connectionID]
-}
-
-func (r *connectionRegistry) CloseAndDelete(connectionID string) {
-	if strings.TrimSpace(connectionID) == "" {
-		return
-	}
-	r.mu.Lock()
-	conn, ok := r.conns[connectionID]
-	if ok {
-		delete(r.conns, connectionID)
-	}
-	r.mu.Unlock()
-	if ok {
-		_ = conn.Close()
-	}
-}
-
-func (r *connectionRegistry) CloseAll() {
-	r.mu.Lock()
-	conns := make([]net.Conn, 0, len(r.conns))
-	for _, conn := range r.conns {
-		conns = append(conns, conn)
-	}
-	r.conns = map[string]net.Conn{}
-	r.mu.Unlock()
-
-	for _, conn := range conns {
-		_ = conn.Close()
-	}
-}
-
-func handleInboundEnvelope(connectionRegistry *connectionRegistry, envelope contracts.StreamEnvelope) {
+func handleInboundEnvelope(connections *streamconn.Registry, envelope contracts.StreamEnvelope, sendClose func(connectionID string)) {
 	connectionID := strings.TrimSpace(envelope.ConnectionID)
 	if connectionID == "" {
 		return
@@ -612,14 +628,21 @@ func handleInboundEnvelope(connectionRegistry *connectionRegistry, envelope cont
 		if len(envelope.Data) == 0 {
 			return
 		}
-		conn := connectionRegistry.Get(connectionID)
+		conn := connections.Get(connectionID)
 		if conn == nil {
 			return
 		}
+		// Bound the write so a caller that stopped reading cannot stall the
+		// stream pump for every other intercepted connection.
+		_ = conn.SetWriteDeadline(time.Now().Add(connWriteTimeout))
 		if _, err := conn.Write(envelope.Data); err != nil {
-			connectionRegistry.CloseAndDelete(connectionID)
+			connections.CloseAndDelete(connectionID)
+		}
+	case contracts.StreamTypeCloseWrite:
+		if connections.CloseWriteHalf(connectionID) && sendClose != nil {
+			sendClose(connectionID)
 		}
 	case contracts.StreamTypeClose, contracts.StreamTypeError:
-		connectionRegistry.CloseAndDelete(connectionID)
+		connections.CloseAndDelete(connectionID)
 	}
 }

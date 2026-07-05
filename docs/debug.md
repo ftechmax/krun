@@ -30,7 +30,23 @@ krun (CLI)                                 krun-system namespace
        - manager API proxy + stream client    -> traffic-agent (injected sidecar)
        - local connection bridge                    - iptables REDIRECT
                                                     - intercepted TCP listener
+                                                    - probe server (:8082)
 ```
+
+## CLI <-> Helper Transport
+
+The CLI talks HTTP+JSON to the helper over a local IPC endpoint, not TCP:
+
+1. Linux: unix domain socket `/run/krun/krun-helper.sock`, chowned to the
+   invoking user (`SUDO_UID`/`PKEXEC_UID`) with mode `0600`. Only that user
+   (and root) can talk to the elevated helper.
+2. Windows: named pipe `\\.\pipe\krun-helper` with a security descriptor
+   admitting the interactive user alongside SYSTEM/Administrators.
+3. Override with `krun-helper --socket <endpoint>`.
+
+Poking around: `krun debug helper status` (read-only, never auto-starts the
+helper) or, on Linux,
+`curl --unix-socket /run/krun/krun-helper.sock http://localhost/v1/debug/sessions`.
 
 ## Traffic Flow (Breakpoint Path)
 
@@ -80,14 +96,29 @@ REST (HTTP on `:8080`):
 2. `GET /v1/sessions`
 3. `DELETE /v1/sessions/{id}`
 
+Session CRUD requires the shared token from Secret
+`krun-system/krun-manager-auth` in the `X-Krun-Auth-Token` header (a custom
+header because the API-server service proxy consumes `Authorization` for its
+own authentication). The manager generates the token on first start; the
+helper reads the Secret through the user's kubeconfig. Network reach to the
+Service alone is not enough to create sessions (= inject root+NET_ADMIN
+sidecars). `/healthz` and the stream endpoints are exempt; streams
+authenticate with their per-session token.
+
 Streaming (same port, upgraded protocol):
 
 1. Helper attaches as session client.
 2. Agent attaches as session agent.
-3. Messages are typed envelopes (`open`, `data`, `close`, `error`, `ping`).
-
-Implementation detail: gRPC bidirectional stream is preferred for typed envelopes and
-backpressure handling without custom framing code.
+3. Messages are typed envelopes (`open`, `data`, `close-write`, `close`,
+   `error`, `ping`).
+4. `close-write` half-closes one direction (sender saw EOF on its read
+   side); the connection is torn down on `close`/`error` or once both
+   directions are closed. Protocols that half-close and then await the
+   response keep working.
+5. Liveness uses websocket ping/pong control frames: every peer pings on a
+   30s cadence and reads carry a 60s deadline, so half-open connections
+   (e.g. through a dropped port-forward) are detected and re-dialed instead
+   of silently eating traffic.
 
 ## traffic-agent Responsibilities
 
@@ -98,8 +129,16 @@ backpressure handling without custom framing code.
    - create connection id
    - emit `open`
    - stream `data`
-   - emit `close`/`error`
-4. Reconnect stream with bounded backoff.
+   - emit `close-write` on caller EOF, `close`/`error` on teardown
+4. Reconnect stream with bounded backoff; on reconnect, close all
+   connections from the previous stream epoch (the manager already dropped
+   their routing).
+5. Serve kubelet probes on the probe port (default `:8082`,
+   `KRUN_AGENT_PROBE_PORT`): the injector rewrites workload probes that
+   target the intercepted port to this port (originals are preserved in the
+   `krun.ftechmax.com/original-probes` annotation and restored on removal).
+   The pod stays Ready while the developer's local app is stopped or paused
+   on a breakpoint.
 
 Security/runtime requirements remain:
 
@@ -132,6 +171,19 @@ Security/runtime requirements remain:
 1. `krun-traffic-manager` service exposes only `8080`.
 2. Sidecar env points to manager address on `:8080`.
 3. No separate tunnel service port.
+4. Namespaced Role/RoleBinding in `krun-system` let the manager create and
+   read the `krun-manager-auth` Secret.
+
+## Notes
+
+1. The helper's manager-API port-forward requests local port 0 (OS-picked),
+   so a busy port can never block helper startup.
+2. Per-connection TCP writes carry a 10s deadline on both bridge ends; a
+   peer that stops reading costs at most that before its connection is
+   closed with an error, instead of stalling the whole session pump.
+3. Possible future improvement: per-connection writer goroutines in the
+   helper/agent bridges for higher throughput under many concurrent
+   connections (correctness does not require it).
 
 ## Implementation Phasing
 

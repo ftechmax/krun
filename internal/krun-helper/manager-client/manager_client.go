@@ -11,6 +11,7 @@ import (
 	"github.com/ftechmax/krun/internal/contracts"
 	"github.com/ftechmax/krun/internal/kube"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
@@ -19,6 +20,14 @@ const (
 	defaultManagerServicePort = 8080
 	ManagerClientID           = "krun-helper"
 	managerRequestTimeout     = 10 * time.Second
+
+	authSecretName = "krun-manager-auth"
+	authSecretKey  = "token"
+	// The manager's session REST endpoints require this shared-token header.
+	// A custom header is used because the API server consumes Authorization
+	// for its own authentication and does not forward it through the
+	// service proxy.
+	authTokenHeader = "X-Krun-Auth-Token"
 )
 
 type SessionAPI interface {
@@ -88,12 +97,18 @@ func (c *kubeManagerSessionClient) CreateSession(ctx contracts.DebugServiceConte
 	requestCtx, cancel := context.WithTimeout(context.Background(), managerRequestTimeout)
 	defer cancel()
 
+	authToken, err := c.fetchAuthToken(requestCtx)
+	if err != nil {
+		return contracts.DebugSession{}, err
+	}
+
 	responseBody, err := c.client.Clientset.CoreV1().RESTClient().Post().
 		Namespace(defaultManagerNamespace).
 		Resource("services").
 		Name(c.serviceProxyName()).
 		SubResource("proxy").
 		Suffix("v1", "sessions").
+		SetHeader(authTokenHeader, authToken).
 		Body(body).
 		Do(requestCtx).
 		Raw()
@@ -121,12 +136,18 @@ func (c *kubeManagerSessionClient) DeleteSession(sessionID string) error {
 	requestCtx, cancel := context.WithTimeout(context.Background(), managerRequestTimeout)
 	defer cancel()
 
-	err := c.client.Clientset.CoreV1().RESTClient().Delete().
+	authToken, err := c.fetchAuthToken(requestCtx)
+	if err != nil {
+		return err
+	}
+
+	err = c.client.Clientset.CoreV1().RESTClient().Delete().
 		Namespace(defaultManagerNamespace).
 		Resource("services").
 		Name(c.serviceProxyName()).
 		SubResource("proxy").
 		Suffix("v1", "sessions", trimmedSessionID).
+		SetHeader(authTokenHeader, authToken).
 		Do(requestCtx).
 		Error()
 	if err == nil || k8serrors.IsNotFound(err) {
@@ -139,12 +160,18 @@ func (c *kubeManagerSessionClient) ListSessions() ([]contracts.DebugSession, err
 	requestCtx, cancel := context.WithTimeout(context.Background(), managerRequestTimeout)
 	defer cancel()
 
+	authToken, err := c.fetchAuthToken(requestCtx)
+	if err != nil {
+		return nil, err
+	}
+
 	responseBody, err := c.client.Clientset.CoreV1().RESTClient().Get().
 		Namespace(defaultManagerNamespace).
 		Resource("services").
 		Name(c.serviceProxyName()).
 		SubResource("proxy").
 		Suffix("v1", "sessions").
+		SetHeader(authTokenHeader, authToken).
 		Do(requestCtx).
 		Raw()
 	if err != nil {
@@ -156,6 +183,21 @@ func (c *kubeManagerSessionClient) ListSessions() ([]contracts.DebugSession, err
 		return nil, fmt.Errorf("decode manager sessions response: %w", err)
 	}
 	return response.Sessions, nil
+}
+
+// fetchAuthToken reads the shared manager token from its Secret on every
+// call so a reinstalled runtime (new token) never leaves the helper with a
+// stale cached value.
+func (c *kubeManagerSessionClient) fetchAuthToken(ctx context.Context) (string, error) {
+	secret, err := c.client.Clientset.CoreV1().Secrets(defaultManagerNamespace).Get(ctx, authSecretName, metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("read manager auth secret: %w", err)
+	}
+	token := strings.TrimSpace(string(secret.Data[authSecretKey]))
+	if token == "" {
+		return "", errors.New("manager auth secret has no token")
+	}
+	return token, nil
 }
 
 func (c *kubeManagerSessionClient) serviceProxyName() string {

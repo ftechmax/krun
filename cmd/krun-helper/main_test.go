@@ -413,6 +413,10 @@ func (f *fakePortForwardRegistry) Clear() error {
 	return nil
 }
 
+func (f *fakePortForwardRegistry) BoundLocalPort(_ string, forward contracts.PortForward) (int, bool) {
+	return forward.LocalPort, true
+}
+
 type fakeManagerSessionClient struct {
 	createCalls          int
 	listCalls            int
