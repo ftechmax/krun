@@ -87,7 +87,7 @@ func RemoveEnvFile(service cfg.Service, config cfg.Config) error {
 
 func parseEnvVars(raw string) []envVar {
 	var vars []envVar
-	for _, line := range strings.Split(raw, "\n") {
+	for line := range strings.SplitSeq(raw, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue

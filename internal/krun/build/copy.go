@@ -346,7 +346,7 @@ func deleteRemoteFiles(ctx context.Context, client *kube.Client, remoteRoot stri
 
 func parseRemoteFindOutput(output string) map[string]remoteEntry {
 	entries := map[string]remoteEntry{}
-	for _, line := range strings.Split(output, "\n") {
+	for line := range strings.SplitSeq(output, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue

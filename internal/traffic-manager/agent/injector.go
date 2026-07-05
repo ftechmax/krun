@@ -16,7 +16,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
-	"k8s.io/utils/ptr"
 )
 
 const (
@@ -25,11 +24,11 @@ const (
 	DefaultImagePullPolicy = "IfNotPresent"
 	DefaultManagerAddress  = "http://krun-traffic-manager.krun-system.svc:8080"
 	DefaultProbePort       = 8082
-	InjectedLabelKey   = "krun.ftechmax.com/traffic-agent-injected"
-	injectedLabelValue = "true"
+	InjectedLabelKey       = "krun.ftechmax.net/traffic-agent-injected"
+	injectedLabelValue     = "true"
 	// OriginalProbesAnnotation stores the pre-rewrite probe specs so
 	// Remove/Cleanup can restore them when the sidecar is taken out.
-	OriginalProbesAnnotation = "krun.ftechmax.com/original-probes"
+	OriginalProbesAnnotation = "krun.ftechmax.net/original-probes"
 )
 
 var ErrWorkloadNotFound = errors.New("target workload not found")
@@ -178,7 +177,6 @@ func (i *WorkloadInjector) cleanupLabeledByKind(ctx context.Context, kind worklo
 
 	var errs []error
 	for _, target := range targets {
-		target := target
 		err := i.mutateWorkload(
 			ctx,
 			target.namespace,
@@ -391,7 +389,7 @@ func (i *WorkloadInjector) buildContainer(session contracts.DebugSession) corev1
 			{Name: "KRUN_AGENT_PROBE_PORT", Value: strconv.Itoa(i.options.ProbePort)},
 		},
 		SecurityContext: &corev1.SecurityContext{
-			RunAsUser: ptr.To(int64(0)),
+			RunAsUser: new(int64(0)),
 			Capabilities: &corev1.Capabilities{
 				Add: []corev1.Capability{"NET_ADMIN"},
 			},

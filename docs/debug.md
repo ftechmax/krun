@@ -136,7 +136,7 @@ Streaming (same port, upgraded protocol):
 5. Serve kubelet probes on the probe port (default `:8082`,
    `KRUN_AGENT_PROBE_PORT`): the injector rewrites workload probes that
    target the intercepted port to this port (originals are preserved in the
-   `krun.ftechmax.com/original-probes` annotation and restored on removal).
+   `krun.ftechmax.net/original-probes` annotation and restored on removal).
    The pod stays Ready while the developer's local app is stopped or paused
    on a breakpoint.
 
