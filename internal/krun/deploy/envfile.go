@@ -3,6 +3,7 @@ package deploy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -132,7 +133,29 @@ func writeDotEnv(dir string, vars []envVar) error {
 	for _, v := range vars {
 		fmt.Fprintf(&buf, "%s=%s\n", v.Key, v.Value)
 	}
-	return os.WriteFile(filepath.Join(dir, ".env"), []byte(buf.String()), 0644)
+	path := filepath.Join(dir, ".env")
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", path, err)
+	}
+	if err := file.Chmod(0o600); err != nil {
+		closeErr := file.Close()
+		if closeErr != nil {
+			closeErr = fmt.Errorf("close %s: %w", path, closeErr)
+		}
+		return errors.Join(fmt.Errorf("set %s permissions: %w", path, err), closeErr)
+	}
+	if _, err := file.WriteString(buf.String()); err != nil {
+		closeErr := file.Close()
+		if closeErr != nil {
+			closeErr = fmt.Errorf("close %s: %w", path, closeErr)
+		}
+		return errors.Join(fmt.Errorf("write %s: %w", path, err), closeErr)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", path, err)
+	}
+	return nil
 }
 
 func serviceDir(service cfg.Service, config cfg.Config) (string, error) {

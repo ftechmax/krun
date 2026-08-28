@@ -1,8 +1,6 @@
 package session
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
@@ -11,17 +9,19 @@ import (
 	"time"
 
 	"github.com/ftechmax/krun/internal/contracts"
-	"github.com/ftechmax/krun/internal/sessionkey"
+	"github.com/ftechmax/krun/internal/securetoken"
 )
 
 type DebugSessionRegistry struct {
-	mu       sync.RWMutex
-	sessions map[string]contracts.DebugSession
+	mu        sync.RWMutex
+	sessions  map[string]contracts.DebugSession
+	randomHex func(int) (string, error)
 }
 
 func NewDebugSessionRegistry() *DebugSessionRegistry {
 	return &DebugSessionRegistry{
-		sessions: map[string]contracts.DebugSession{},
+		sessions:  map[string]contracts.DebugSession{},
+		randomHex: securetoken.Hex,
 	}
 }
 
@@ -49,6 +49,15 @@ func (s *DebugSessionRegistry) Create(req contracts.CreateDebugSessionRequest) (
 		workload = serviceName
 	}
 
+	sessionID, err := s.randomHex(8)
+	if err != nil {
+		return contracts.DebugSession{}, fmt.Errorf("generate session id: %w", err)
+	}
+	sessionToken, err := s.randomHex(16)
+	if err != nil {
+		return contracts.DebugSession{}, fmt.Errorf("generate session token: %w", err)
+	}
+
 	// Supersede any earlier session for the same workload: the new sidecar
 	// injection overwrites the old one in place, so the old registry entry
 	// can only go stale (e.g. after a helper restart skipped the delete).
@@ -59,8 +68,8 @@ func (s *DebugSessionRegistry) Create(req contracts.CreateDebugSessionRequest) (
 	}
 
 	session := contracts.DebugSession{
-		SessionID:    "sess_" + randomHex(8),
-		SessionToken: randomHex(16),
+		SessionID:    "sess_" + sessionID,
+		SessionToken: sessionToken,
 		Namespace:    namespace,
 		ServiceName:  serviceName,
 		Workload:     workload,
@@ -98,7 +107,7 @@ func (s *DebugSessionRegistry) Get(sessionID string) (contracts.DebugSession, bo
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	key := sessionkey.Trim(sessionID)
+	key := strings.TrimSpace(sessionID)
 	if key == "" {
 		return contracts.DebugSession{}, false
 	}
@@ -113,7 +122,7 @@ func (s *DebugSessionRegistry) Delete(sessionID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	key := sessionkey.Trim(sessionID)
+	key := strings.TrimSpace(sessionID)
 	if key == "" {
 		return false
 	}
@@ -128,12 +137,4 @@ func (s *DebugSessionRegistry) Clear() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sessions = map[string]contracts.DebugSession{}
-}
-
-func randomHex(length int) string {
-	buffer := make([]byte, length)
-	if _, err := rand.Read(buffer); err != nil {
-		return fmt.Sprintf("%d", time.Now().UnixNano())
-	}
-	return hex.EncodeToString(buffer)
 }

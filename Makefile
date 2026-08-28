@@ -38,10 +38,10 @@ build-krun-linux:
 build-krun-cross: build-krun-windows build-krun-linux
 
 build-helper-windows:
-	$(GOENV_WINDOWS) $(GO) build -buildvcs=$(BUILDVCS) -o $(WINDOWS_HELPER_BIN) ./cmd/krun-helper
+	$(GOENV_WINDOWS) $(GO) build -ldflags "$(LDFLAGS)" -buildvcs=$(BUILDVCS) -o $(WINDOWS_HELPER_BIN) ./cmd/krun-helper
 
 build-helper-linux:
-	$(GOENV_LINUX) $(GO) build -buildvcs=$(BUILDVCS) -o $(LINUX_HELPER_BIN) ./cmd/krun-helper
+	$(GOENV_LINUX) $(GO) build -ldflags "$(LDFLAGS)" -buildvcs=$(BUILDVCS) -o $(LINUX_HELPER_BIN) ./cmd/krun-helper
 
 build-helper-cross: build-helper-windows build-helper-linux
 

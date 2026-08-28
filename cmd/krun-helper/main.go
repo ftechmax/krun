@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -22,61 +21,30 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const (
-	managerAPIForwardSessionKey      = "__manager_api__"
-	defaultManagerForwardNamespace   = "krun-system"
-	defaultManagerForwardServiceName = "krun-traffic-manager"
-	defaultManagerForwardRemotePort  = 8080
-)
+// The manager port-forward is not tied to any debug session, so it gets a
+// reserved key of its own in the port-forward registry.
+const managerForwardKey = "__manager_api__"
 
-type sessionPortForwardRegistry interface {
-	Upsert(sessionKey string, forwards []contracts.PortForward) error
-	Remove(sessionKey string) error
-	Clear() error
-	BoundLocalPort(sessionKey string, forward contracts.PortForward) (int, bool)
+var version = "debug" // will be set by the build system
+
+type daemon struct {
+	sessions   *session.Manager
+	shutdownCh chan<- struct{}
 }
 
-type sessionStreamRegistry interface {
-	Upsert(sessionKey string, sessionID string, sessionToken string, interceptPort int) error
-	Remove(sessionKey string) error
-	Clear() error
-}
-
-type noopPortForwardRegistry struct{}
-
-func (noopPortForwardRegistry) Upsert(_ string, _ []contracts.PortForward) error { return nil }
-func (noopPortForwardRegistry) Remove(_ string) error                            { return nil }
-func (noopPortForwardRegistry) Clear() error                                     { return nil }
-func (noopPortForwardRegistry) BoundLocalPort(_ string, _ contracts.PortForward) (int, bool) {
-	return 0, false
-}
-
-type noopStreamRegistry struct{}
-
-func (noopStreamRegistry) Upsert(_ string, _ string, _ string, _ int) error { return nil }
-func (noopStreamRegistry) Remove(_ string) error                            { return nil }
-func (noopStreamRegistry) Clear() error                                     { return nil }
-
-var (
-	hostfileUpdate                                     = hostfile.Update
-	hostfileRemove                                     = hostfile.Remove
-	hostsRegistry                                      = hostfile.NewSessionHostsRegistry()
-	sessionsRegistry                                   = session.NewDebugSessionRegistry()
-	managerSessionsRegistry                            = session.NewManagerSessionRegistry()
-	portForwardRegistry     sessionPortForwardRegistry = noopPortForwardRegistry{}
-	streamRegistry          sessionStreamRegistry      = noopStreamRegistry{}
-	managerSessionClient    managerclient.SessionAPI   = managerclient.NoopSessionClient{}
-	newPortForwardRegistry                             = newHelperPortForwardRegistry
-	newManagerClient                                   = managerclient.NewSessionClient
-	newStreamRegistry                                  = newHelperStreamRegistry
-)
-
-func newHelperPortForwardRegistry(kubeConfigPath string) (sessionPortForwardRegistry, error) {
-	return helperportforward.NewSessionRegistry(kubeConfigPath)
-}
-
-func newHelperStreamRegistry(managerAddress string) sessionStreamRegistry {
-	return helperstream.NewSessionRegistry(managerAddress)
+// warnOnManagerSkew reports mixed helper/runtime builds without rejecting them.
+func warnOnManagerSkew(api *managerclient.Client) {
+	managerVersion, err := api.Health()
+	if err != nil {
+		fmt.Printf("warning: could not read traffic-manager version: %v\n", err)
+		return
+	}
+	if managerVersion != version {
+		fmt.Printf("WARNING: version skew - krun-helper is %q but traffic-manager is %q\n", version, managerVersion)
+		fmt.Printf("         reinstall the cluster runtime with: krun debug runtime install\n")
+		return
+	}
+	fmt.Printf("traffic-manager version %s\n", managerVersion)
 }
 
 func main() {
@@ -109,38 +77,31 @@ func startHelperDaemon(socketEndpoint string, kubeConfigPath string) error {
 		endpoint = helperipc.DefaultEndpoint
 	}
 
-	registry, err := newPortForwardRegistry(kubeConfigPath)
+	forwards, err := helperportforward.NewSessionRegistry(kubeConfigPath)
 	if err != nil {
 		return fmt.Errorf("failed to initialize port-forward registry: %w", err)
 	}
-	portForwardRegistry = registry
 
-	// Local port 0: the OS picks a free port, so a busy port can never
-	// block helper startup. The bound port is queried back afterwards.
-	managerForward := contracts.PortForward{
-		Namespace:  defaultManagerForwardNamespace,
-		Service:    defaultManagerForwardServiceName,
-		LocalPort:  0,
-		RemotePort: defaultManagerForwardRemotePort,
+	managerAddress, err := startManagerForward(forwards)
+	if err != nil {
+		return err
 	}
-	if err := portForwardRegistry.Upsert(managerAPIForwardSessionKey, []contracts.PortForward{managerForward}); err != nil {
-		return fmt.Errorf("failed to initialize manager api port-forward: %w", err)
-	}
+	fmt.Printf("manager api forwarded to %s\n", managerAddress)
 
-	managerForwardPort, ok := portForwardRegistry.BoundLocalPort(managerAPIForwardSessionKey, managerForward)
-	if !ok || managerForwardPort <= 0 {
-		return fmt.Errorf("manager api port-forward reported no bound local port")
-	}
-	managerForwardAddress := fmt.Sprintf("127.0.0.1:%d", managerForwardPort)
-	fmt.Printf("manager api forwarded to %s\n", managerForwardAddress)
-
-	streamRegistry = newStreamRegistry("http://" + managerForwardAddress)
-
-	managerClient, err := newManagerClient(kubeConfigPath)
+	api, err := managerclient.NewSessionClient(kubeConfigPath, managerAddress)
 	if err != nil {
 		return fmt.Errorf("failed to initialize manager session client: %w", err)
 	}
-	managerSessionClient = managerClient
+	warnOnManagerSkew(api)
+
+	sessions := session.NewManager(session.Options{
+		Hosts:    hostfile.File{},
+		Forwards: forwards,
+		API:      api,
+		Attach: func(sessionID string, sessionToken string, interceptPort int) (session.Stream, error) {
+			return helperstream.Attach(managerAddress, sessionID, sessionToken, interceptPort)
+		},
+	})
 
 	shutdownCh := make(chan struct{}, 1)
 
@@ -150,9 +111,10 @@ func startHelperDaemon(socketEndpoint string, kubeConfigPath string) error {
 	}
 
 	server := &http.Server{
-		Handler: newHandler(shutdownCh),
+		Handler:           newHandler(&daemon{sessions: sessions, shutdownCh: shutdownCh}),
+		ReadHeaderTimeout: 5 * time.Second,
 	}
-	fmt.Printf("krun-helper listening on %s\n", endpoint)
+	fmt.Printf("krun-helper %s listening on %s\n", version, endpoint)
 
 	serverErrCh := make(chan error, 1)
 	go func() {
@@ -175,7 +137,7 @@ func startHelperDaemon(socketEndpoint string, kubeConfigPath string) error {
 			return err
 		}
 		helperipc.Cleanup(endpoint)
-		return cleanupHelperState()
+		return sessions.Close()
 	}
 
 	select {
@@ -192,438 +154,119 @@ func startHelperDaemon(socketEndpoint string, kubeConfigPath string) error {
 	}
 }
 
-func newHandler(shutdownCh chan<- struct{}) http.Handler {
+// startManagerForward brings up the port-forward that carries both the session
+// REST calls and the traffic streams, and reports its local address. Local
+// port 0 lets the OS pick a free port, so a busy port can never block helper
+// startup; the bound port is queried back afterwards.
+func startManagerForward(forwards *helperportforward.SessionRegistry) (string, error) {
+	forward := contracts.PortForward{
+		Namespace:  managerclient.ManagerNamespace,
+		Service:    managerclient.ManagerServiceName,
+		LocalPort:  0,
+		RemotePort: managerclient.ManagerServicePort,
+	}
+	if err := forwards.Upsert(managerForwardKey, []contracts.PortForward{forward}); err != nil {
+		return "", fmt.Errorf("failed to initialize manager api port-forward: %w", err)
+	}
+
+	boundPort, ok := forwards.BoundLocalPort(managerForwardKey, forward)
+	if !ok || boundPort <= 0 {
+		return "", fmt.Errorf("manager api port-forward reported no bound local port")
+	}
+	return fmt.Sprintf("http://127.0.0.1:%d", boundPort), nil
+}
+
+func newHandler(d *daemon) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", handleHealthz)
-	mux.HandleFunc("/v1/debug/sessions", handleDebugSessionsList)
-	mux.HandleFunc("/v1/debug/enable", handleDebugEnable)
-	mux.HandleFunc("/v1/debug/disable", handleDebugDisable)
-	mux.HandleFunc("/v1/shutdown", handleShutdown(shutdownCh))
+	mux.HandleFunc("/healthz", only(http.MethodGet, d.handleHealthz))
+	mux.HandleFunc("/v1/debug/sessions", only(http.MethodGet, d.handleSessionsList))
+	mux.HandleFunc("/v1/debug/enable", only(http.MethodPost, d.handleEnable))
+	mux.HandleFunc("/v1/debug/disable", only(http.MethodPost, d.handleDisable))
+	mux.HandleFunc("/v1/shutdown", only(http.MethodPost, d.handleShutdown))
 	return mux
 }
 
-func handleHealthz(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeJSON(w, http.StatusMethodNotAllowed, contracts.HelperResponse{
-			Success: false,
-			Message: "method not allowed",
-		})
-		return
-	}
-	writeJSON(w, http.StatusOK, contracts.HelperResponse{
-		Success: true,
-		Message: "ok",
-	})
-}
-
-func handleShutdown(shutdownCh chan<- struct{}) http.HandlerFunc {
+func only(method string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
+		if r.Method != method {
 			writeJSON(w, http.StatusMethodNotAllowed, contracts.HelperResponse{
 				Success: false,
 				Message: "method not allowed",
 			})
 			return
 		}
-		writeJSON(w, http.StatusOK, contracts.HelperResponse{
-			Success: true,
-			Message: "shutting down",
-		})
-		select {
-		case shutdownCh <- struct{}{}:
-		default:
-		}
+		next(w, r)
 	}
 }
 
-func handleDebugEnable(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, contracts.HelperResponse{
-			Success: false,
-			Message: "method not allowed",
-		})
-		return
-	}
+func (d *daemon) handleHealthz(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, contracts.HelperResponse{Success: true, Message: "ok", Version: version})
+}
 
-	req, sessionKey, err := parseDebugCommandRequest(r)
+func (d *daemon) handleShutdown(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, contracts.HelperResponse{Success: true, Message: "shutting down"})
+	select {
+	case d.shutdownCh <- struct{}{}:
+	default:
+	}
+}
+
+func (d *daemon) handleSessionsList(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, contracts.HelperDebugSessionsResponse{Sessions: d.sessions.List()})
+}
+
+func (d *daemon) handleEnable(w http.ResponseWriter, r *http.Request) {
+	request, err := parseDebugCommandRequest(r)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, contracts.HelperResponse{
-			Success: false,
-			Message: err.Error(),
-		})
+		writeJSON(w, http.StatusBadRequest, contracts.HelperResponse{Success: false, Message: err.Error()})
 		return
 	}
 
-	// Each step appends a rollback function. On failure, all rollbacks
-	// run in reverse order so every completed step is undone cleanly.
-	var rollbacks []func() error
-
-	rollbackAll := func() error {
-		var failures []string
-		for i := len(rollbacks) - 1; i >= 0; i-- {
-			if err := rollbacks[i](); err != nil {
-				failures = append(failures, err.Error())
-			}
-		}
-		if len(failures) > 0 {
-			return fmt.Errorf("rollback failed: %s", strings.Join(failures, "; "))
-		}
-		return nil
-	}
-
-	fail := func(w http.ResponseWriter, step string, err error) {
-		if rollbackErr := rollbackAll(); rollbackErr != nil {
-			writeJSON(w, http.StatusInternalServerError, contracts.HelperResponse{
-				Success: false,
-				Message: fmt.Sprintf("%s: %v (%v)", step, err, rollbackErr),
-			})
-			return
-		}
-		writeJSON(w, http.StatusInternalServerError, contracts.HelperResponse{
-			Success: false,
-			Message: fmt.Sprintf("%s: %v", step, err),
-		})
-	}
-
-	// 1. update hostfile
-	entries := buildDebugHostEntries(req.Context)
-	mergedEntries := hostsRegistry.Upsert(sessionKey, entries)
-	if err := hostfileUpdate(mergedEntries); err != nil {
-		fail(w, "hostfile update failed", err)
+	if err := d.sessions.Enable(request.SessionKey, request.Context); err != nil {
+		writeJSON(w, http.StatusInternalServerError, contracts.HelperResponse{Success: false, Message: err.Error()})
 		return
 	}
-	rollbacks = append(rollbacks, func() error {
-		restored := hostsRegistry.Remove(sessionKey)
-		return hostfileUpdate(restored)
-	})
 
-	// 2. set up port-forwards
-	forwards := buildDebugPortForwards(req.Context)
-	if err := portForwardRegistry.Upsert(sessionKey, forwards); err != nil {
-		fail(w, "port-forward update failed", err)
-		return
-	}
-	rollbacks = append(rollbacks, func() error {
-		return portForwardRegistry.Remove(sessionKey)
-	})
+	writeJSON(w, http.StatusOK, contracts.HelperResponse{Success: true, Message: "debug enable applied"})
+}
 
-	// 3. clean up previous manager session if one exists for this key
-	if previousManagerSessionID, ok := managerSessionsRegistry.Get(sessionKey); ok {
-		_ = streamRegistry.Remove(sessionKey)
-		_ = managerSessionClient.DeleteSession(previousManagerSessionID)
-		managerSessionsRegistry.Remove(sessionKey)
-	}
-
-	// 4. create manager session
-	managerSession, err := managerSessionClient.CreateSession(req.Context)
+func (d *daemon) handleDisable(w http.ResponseWriter, r *http.Request) {
+	request, err := parseDebugCommandRequest(r)
 	if err != nil {
-		fail(w, "manager session create failed", err)
-		return
-	}
-	rollbacks = append(rollbacks, func() error {
-		return managerSessionClient.DeleteSession(managerSession.SessionID)
-	})
-
-	// 5. attach traffic stream
-	if err := streamRegistry.Upsert(sessionKey, managerSession.SessionID, managerSession.SessionToken, req.Context.InterceptPort); err != nil {
-		fail(w, "manager stream attach failed", err)
+		writeJSON(w, http.StatusBadRequest, contracts.HelperResponse{Success: false, Message: err.Error()})
 		return
 	}
 
-	// register the session.
-	managerSessionsRegistry.Upsert(sessionKey, managerSession.SessionID)
-	sessionsRegistry.Upsert(sessionKey, req.Context)
-
-	writeJSON(w, http.StatusOK, contracts.HelperResponse{
-		Success: true,
-		Message: "debug enable applied",
-	})
-}
-
-func handleDebugDisable(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, contracts.HelperResponse{
-			Success: false,
-			Message: "method not allowed",
-		})
-		return
-	}
-
-	req, sessionKey, err := parseDebugCommandRequest(r)
+	found, err := d.sessions.Disable(request.SessionKey, request.Context)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, contracts.HelperResponse{
-			Success: false,
-			Message: err.Error(),
-		})
+		writeJSON(w, http.StatusInternalServerError, contracts.HelperResponse{Success: false, Message: err.Error()})
 		return
 	}
-	if strings.TrimSpace(sessionKey) == "" {
-		writeJSON(w, http.StatusBadRequest, contracts.HelperResponse{
-			Success: false,
-			Message: "invalid payload: session key or context.service_name is required",
-		})
+	if !found {
+		writeJSON(w, http.StatusOK, contracts.HelperResponse{Success: true, Message: "no active session"})
 		return
 	}
 
-	if !sessionsRegistry.Has(sessionKey) {
-		writeJSON(w, http.StatusOK, contracts.HelperResponse{
-			Success: true,
-			Message: "no active session",
-		})
-		return
-	}
-
-	var failures []string
-	managerDeleteFailed := false
-
-	if err := streamRegistry.Remove(sessionKey); err != nil {
-		failures = append(failures, fmt.Sprintf("stream detach failed: %v", err))
-	}
-
-	managerSessionID, ok := managerSessionsRegistry.Get(sessionKey)
-	if !ok {
-		resolvedManagerSessionID, resolveErr := resolveManagerSessionIDForDisable(req.Context)
-		if resolveErr != nil {
-			failures = append(failures, fmt.Sprintf("manager session lookup failed: %v", resolveErr))
-		} else if strings.TrimSpace(resolvedManagerSessionID) != "" {
-			managerSessionID = resolvedManagerSessionID
-			ok = true
-		}
-	}
-
-	if ok {
-		if err := managerSessionClient.DeleteSession(managerSessionID); err != nil {
-			failures = append(failures, fmt.Sprintf("manager session delete failed: %v", err))
-			managerDeleteFailed = true
-		}
-	}
-
-	if err := portForwardRegistry.Remove(sessionKey); err != nil {
-		failures = append(failures, fmt.Sprintf("port-forward remove failed: %v", err))
-	}
-
-	mergedEntries := hostsRegistry.Remove(sessionKey)
-	if err := hostfileUpdate(mergedEntries); err != nil {
-		failures = append(failures, fmt.Sprintf("hostfile remove failed: %v", err))
-	}
-
-	if len(failures) > 0 {
-		writeJSON(w, http.StatusInternalServerError, contracts.HelperResponse{
-			Success: false,
-			Message: strings.Join(failures, "; "),
-		})
-		return
-	}
-
-	sessionsRegistry.Remove(sessionKey)
-	if !managerDeleteFailed {
-		managerSessionsRegistry.Remove(sessionKey)
-	}
-
-	writeJSON(w, http.StatusOK, contracts.HelperResponse{
-		Success: true,
-		Message: "debug disable applied",
-	})
+	writeJSON(w, http.StatusOK, contracts.HelperResponse{Success: true, Message: "debug disable applied"})
 }
 
-func handleDebugSessionsList(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeJSON(w, http.StatusMethodNotAllowed, contracts.HelperResponse{
-			Success: false,
-			Message: "method not allowed",
-		})
-		return
+func parseDebugCommandRequest(r *http.Request) (contracts.DebugSessionCommandRequest, error) {
+	defer r.Body.Close()
+
+	var request contracts.DebugSessionCommandRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		return contracts.DebugSessionCommandRequest{}, fmt.Errorf("invalid payload: %w", err)
 	}
-
-	writeJSONAny(w, http.StatusOK, contracts.HelperDebugSessionsResponse{
-		Sessions: sessionsRegistry.List(),
-	})
+	if strings.TrimSpace(request.SessionKey) == "" && strings.TrimSpace(request.Context.ServiceName) == "" {
+		return contracts.DebugSessionCommandRequest{}, fmt.Errorf("invalid payload: session key or context.service_name is required")
+	}
+	return request, nil
 }
 
-func writeJSON(w http.ResponseWriter, code int, response contracts.HelperResponse) {
-	writeJSONAny(w, code, response)
-}
-
-func writeJSONAny(w http.ResponseWriter, code int, payload any) {
+func writeJSON(w http.ResponseWriter, code int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(payload)
-}
-
-func cleanupHelperState() error {
-	if err := streamRegistry.Clear(); err != nil {
-		return fmt.Errorf("clear streams: %w", err)
-	}
-	if err := portForwardRegistry.Clear(); err != nil {
-		return fmt.Errorf("clear port-forwards: %w", err)
-	}
-	hostsRegistry.Clear()
-	sessionsRegistry.Clear()
-	managerSessionsRegistry.Clear()
-	if err := hostfileRemove(); err != nil {
-		return fmt.Errorf("remove hosts entries: %w", err)
-	}
-	return nil
-}
-
-func resolveManagerSessionIDForDisable(ctx contracts.DebugServiceContext) (string, error) {
-	sessions, err := managerSessionClient.ListSessions()
-	if err != nil {
-		return "", err
-	}
-
-	targetService := strings.TrimSpace(ctx.ServiceName)
-	targetNamespace := managerclient.NormalizeNamespace(ctx.Namespace)
-	if targetService == "" {
-		return "", nil
-	}
-
-	var matched contracts.DebugSession
-	for _, managerSession := range sessions {
-		if strings.TrimSpace(managerSession.ServiceName) != targetService {
-			continue
-		}
-		if managerclient.NormalizeNamespace(managerSession.Namespace) != targetNamespace {
-			continue
-		}
-		if strings.TrimSpace(managerSession.ClientID) != managerclient.ManagerClientID {
-			continue
-		}
-		if strings.Compare(strings.TrimSpace(managerSession.CreatedAt), strings.TrimSpace(matched.CreatedAt)) > 0 {
-			matched = managerSession
-		}
-	}
-
-	return strings.TrimSpace(matched.SessionID), nil
-}
-
-func parseDebugCommandRequest(r *http.Request) (contracts.DebugSessionCommandRequest, string, error) {
-	var req contracts.DebugSessionCommandRequest
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&req); err != nil {
-		return contracts.DebugSessionCommandRequest{}, "", fmt.Errorf("invalid payload: %w", err)
-	}
-
-	sessionKey := resolveDebugSessionKey(req.SessionKey, req.Context.Project, req.Context.ServiceName)
-	if strings.TrimSpace(req.SessionKey) == "" && strings.TrimSpace(req.Context.ServiceName) == "" {
-		return contracts.DebugSessionCommandRequest{}, "", fmt.Errorf("invalid payload: session key or context.service_name is required")
-	}
-	return req, sessionKey, nil
-}
-
-func resolveDebugSessionKey(sessionKey string, project string, serviceName string) string {
-	if trimmed := strings.TrimSpace(sessionKey); trimmed != "" {
-		return trimmed
-	}
-
-	trimmedProject := strings.TrimSpace(project)
-	trimmedService := strings.TrimSpace(serviceName)
-	switch {
-	case trimmedProject == "" && trimmedService == "":
-		return ""
-	case trimmedProject == "":
-		return trimmedService
-	case trimmedService == "":
-		return trimmedProject
-	default:
-		return trimmedProject + "/" + trimmedService
-	}
-}
-
-func buildDebugHostEntries(ctx contracts.DebugServiceContext) []contracts.HostsEntry {
-	entries := make([]contracts.HostsEntry, 0, len(ctx.ServiceDependencies))
-	indexByHost := map[string]int{}
-
-	addHost := func(host string) {
-		host = strings.TrimSpace(host)
-		if host == "" {
-			return
-		}
-		entry := contracts.HostsEntry{
-			IP:       "127.0.0.1",
-			Hostname: host,
-		}
-		if idx, ok := indexByHost[host]; ok {
-			entries[idx] = entry
-			return
-		}
-		indexByHost[host] = len(entries)
-		entries = append(entries, entry)
-	}
-
-	for _, dependency := range ctx.ServiceDependencies {
-		addHost(dependency.Host)
-		for _, alias := range dependency.Aliases {
-			addHost(alias)
-		}
-	}
-	return entries
-}
-
-func buildDebugPortForwards(ctx contracts.DebugServiceContext) []contracts.PortForward {
-	forwards := make([]contracts.PortForward, 0, len(ctx.ServiceDependencies))
-	seen := map[string]bool{}
-
-	appendForward := func(forward contracts.PortForward) {
-		namespace := strings.TrimSpace(forward.Namespace)
-		serviceName := strings.TrimSpace(forward.Service)
-		if namespace == "" {
-			namespace = "default"
-		}
-		if serviceName == "" || forward.LocalPort <= 0 || forward.RemotePort <= 0 {
-			return
-		}
-
-		normalized := contracts.PortForward{
-			Namespace:  namespace,
-			Service:    serviceName,
-			LocalPort:  forward.LocalPort,
-			RemotePort: forward.RemotePort,
-		}
-		key := fmt.Sprintf("%s|%s|%d|%d", normalized.Namespace, normalized.Service, normalized.LocalPort, normalized.RemotePort)
-		if seen[key] {
-			return
-		}
-		seen[key] = true
-		forwards = append(forwards, normalized)
-	}
-
-	for _, dependency := range ctx.ServiceDependencies {
-		serviceName, namespace := dependencyServiceTarget(dependency)
-		appendForward(contracts.PortForward{
-			Namespace:  namespace,
-			Service:    serviceName,
-			LocalPort:  dependency.Port,
-			RemotePort: dependency.Port,
-		})
-	}
-
-	return forwards
-}
-
-func dependencyServiceTarget(dependency contracts.DebugServiceDependencyContext) (string, string) {
-	serviceName := strings.TrimSpace(dependency.Service)
-	namespace := strings.TrimSpace(dependency.Namespace)
-	host := strings.TrimSpace(dependency.Host)
-
-	if host != "" {
-		if parsedHost, _, err := net.SplitHostPort(host); err == nil {
-			host = parsedHost
-		}
-	}
-
-	hostParts := strings.Split(host, ".")
-	if serviceName == "" && len(hostParts) > 0 {
-		serviceName = strings.TrimSpace(hostParts[0])
-	}
-
-	if namespace == "" && len(hostParts) >= 3 && strings.TrimSpace(hostParts[2]) == "svc" {
-		namespace = strings.TrimSpace(hostParts[1])
-	}
-	if namespace == "" {
-		namespace = "default"
-	}
-
-	return serviceName, namespace
 }

@@ -27,7 +27,7 @@ krun (CLI)                                 krun-system namespace
   -> krun-helper (daemon)                    -> traffic-manager (controller+relay :8080)
        - /etc/hosts management
        - dependency port-forward registry   target workload namespace
-       - manager API proxy + stream client    -> traffic-agent (injected sidecar)
+       - manager port-forward (REST + WS)     -> traffic-agent (injected sidecar)
        - local connection bridge                    - iptables REDIRECT
                                                     - intercepted TCP listener
                                                     - probe server (:8082)
@@ -85,8 +85,7 @@ helper) or, on Linux,
 
 ### List
 
-1. CLI asks helper for local view.
-2. Helper can enrich output with manager session state if connected.
+1. CLI asks helper for its local view of active sessions.
 
 ## Manager API
 
@@ -96,12 +95,16 @@ REST (HTTP on `:8080`):
 2. `GET /v1/sessions`
 3. `DELETE /v1/sessions/{id}`
 
+The helper reaches these over the same port-forward that carries the traffic
+streams, so there is one transport to the manager and one failure mode to
+diagnose.
+
 Session CRUD requires the shared token from Secret
-`krun-system/krun-manager-auth` in the `X-Krun-Auth-Token` header (a custom
-header because the API-server service proxy consumes `Authorization` for its
-own authentication). The manager generates the token on first start; the
-helper reads the Secret through the user's kubeconfig. Network reach to the
-Service alone is not enough to create sessions (= inject root+NET_ADMIN
+`krun-system/krun-manager-auth` in the `X-Krun-Auth-Token` header. The custom
+header avoids collision with `Authorization` handling by Kubernetes and HTTP
+intermediaries. The manager generates the token on first start; the helper
+reads the Secret through the user's kubeconfig on every call rather than
+caching it. Network reach to the Service alone is not enough to create sessions (= inject root+NET_ADMIN
 sidecars). `/healthz` and the stream endpoints are exempt; streams
 authenticate with their per-session token.
 
@@ -119,6 +122,10 @@ Streaming (same port, upgraded protocol):
    30s cadence and reads carry a 60s deadline, so half-open connections
    (e.g. through a dropped port-forward) are detected and re-dialed instead
    of silently eating traffic.
+6. Every peer runs its reads and writes on separate goroutines
+   (`streamlink.Serve`). A receive handler routinely answers an envelope by
+   sending one back, so a single combined pump would deadlock against its own
+   full outbound queue.
 
 ## traffic-agent Responsibilities
 
@@ -150,10 +157,17 @@ Security/runtime requirements remain:
 
 1. Own hosts-file lifecycle for dependencies.
 2. Own dependency port-forward lifecycle.
-3. Maintain manager API port-forward.
+3. Maintain the manager port-forward that carries both REST and streams.
 4. Maintain session stream attachment(s).
 5. Bridge each incoming tunneled connection to `127.0.0.1:<intercept_port>`.
-6. Clean up all resources on shutdown.
+6. Clean up all local resources on shutdown. Manager-side sessions and
+   sidecars remain, but the helper does not persist enough local state to keep
+   traffic flowing across a restart. Re-enabling replaces the manager session;
+   manager startup also sweeps orphaned sidecars.
+
+All state for one session — hosts entries, port-forwards, manager session id
+and stream — lives on a single `session.Session` value, so enable and disable
+move one object instead of keeping separate registries in step.
 
 ## Failure Handling
 
@@ -164,7 +178,8 @@ Security/runtime requirements remain:
 3. Manager restart:
    - session state is lost; helper reports inactive sessions; user re-enables debug.
 4. Helper restart:
-   - helper rebuilds local state only from explicit user action (`disable`/`enable`).
+   - local state is lost and traffic stops; re-enable to replace the retained
+     manager session and sidecar.
 
 ## Runtime Manifests (Target State)
 
@@ -178,10 +193,13 @@ Security/runtime requirements remain:
 
 1. The helper's manager-API port-forward requests local port 0 (OS-picked),
    so a busy port can never block helper startup.
-2. Per-connection TCP writes carry a 10s deadline on both bridge ends; a
-   peer that stops reading costs at most that before its connection is
-   closed with an error, instead of stalling the whole session pump.
-3. Possible future improvement: per-connection writer goroutines in the
+2. Per-connection TCP writes carry a 10s deadline on both bridge ends. Writes
+   are currently dispatched synchronously, so one blocked connection can delay
+   the session pump for up to that deadline before being closed with an error.
+3. The envelope protocol and the reconnecting websocket peer live in
+   `internal/streamlink`, shared by the agent (cluster side) and the helper
+   (dev-machine side) so the half-close rules have one definition.
+4. Possible future improvement: per-connection writer goroutines in the
    helper/agent bridges for higher throughput under many concurrent
    connections (correctness does not require it).
 

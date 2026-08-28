@@ -64,7 +64,13 @@ type DebugSessionCommandRequest struct {
 type HelperDebugSession struct {
 	SessionKey string              `json:"session_key"`
 	Context    DebugServiceContext `json:"context"`
+	State      string              `json:"state,omitempty"`
 }
+
+const (
+	HelperSessionStateActive         = "active"
+	HelperSessionStateCleanupPending = "cleanup-pending"
+)
 
 type HelperDebugSessionsResponse struct {
 	Sessions []HelperDebugSession `json:"sessions"`
@@ -73,6 +79,9 @@ type HelperDebugSessionsResponse struct {
 type HelperResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
+	// Version is the helper's build version, reported on /healthz so the CLI
+	// can detect a helper started by a different krun build.
+	Version string `json:"version,omitempty"`
 }
 
 const (

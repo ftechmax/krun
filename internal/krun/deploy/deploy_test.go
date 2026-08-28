@@ -2,8 +2,11 @@ package deploy
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +21,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	kubefake "k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 var (
@@ -288,6 +293,131 @@ spec:
 	}
 }
 
+func TestHandleDefaultDeployMakesNoNamespaceAPICalls(t *testing.T) {
+	root := t.TempDir()
+	overlay := filepath.Join(root, "app", "k8s", "overlays", "local")
+	mkdirAll(t, overlay)
+	writeFile(t, filepath.Join(overlay, "kustomization.yaml"), `
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - configmap.yaml
+`)
+	writeFile(t, filepath.Join(overlay, "configmap.yaml"), `
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: application
+data:
+  MODE: local
+`)
+
+	client := newFakeKubeClient(seedConfigMap("application", "app-config", map[string]string{"MODE": "old"}))
+	client.DynamicClient.(*dynamicfake.FakeDynamicClient).PrependReactor("patch", "configmaps", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, newConfigMap("application", "app-config", map[string]string{"MODE": "local"}), nil
+	})
+	clientset := kubefake.NewSimpleClientset()
+	client.Clientset = clientset
+	config := cfg.Config{KrunConfig: cfg.KrunConfig{KrunSourceConfig: cfg.KrunSourceConfig{Path: root}}}
+
+	if _, err := handle(context.Background(), client, config, "app", false, false); err != nil {
+		t.Fatalf("handle default deploy: %v", err)
+	}
+	for _, action := range clientset.Actions() {
+		if action.GetResource().Resource == "namespaces" {
+			t.Fatalf("default deploy made Namespace API call: %s %s", action.GetVerb(), action.GetResource().Resource)
+		}
+	}
+}
+
+func TestEnsureNamespacesCreatesMissingInSortedOrder(t *testing.T) {
+	clientset := kubefake.NewSimpleClientset()
+	client := &kube.Client{Clientset: clientset}
+	objects := []*unstructured.Unstructured{
+		newConfigMap("zeta", "z", nil),
+		newConfigMap("alpha", "a", nil),
+		newConfigMap("zeta", "duplicate", nil),
+	}
+
+	if err := EnsureNamespaces(context.Background(), client, objects); err != nil {
+		t.Fatalf("EnsureNamespaces: %v", err)
+	}
+	var created []string
+	for _, action := range clientset.Actions() {
+		if action.GetVerb() != "create" || action.GetResource().Resource != "namespaces" {
+			continue
+		}
+		created = append(created, action.(k8stesting.CreateAction).GetObject().(*corev1.Namespace).Name)
+	}
+	if !slices.Equal(created, []string{"alpha", "zeta"}) {
+		t.Fatalf("created namespaces = %v, want [alpha zeta]", created)
+	}
+}
+
+func TestEnsureNamespacesIgnoresExistingAndManifestNamespaces(t *testing.T) {
+	clientset := kubefake.NewSimpleClientset(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "existing"}})
+	client := &kube.Client{Clientset: clientset}
+	namespaceObject := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Namespace",
+		"metadata":   map[string]any{"name": "supplied"},
+	}}
+	objects := []*unstructured.Unstructured{
+		newConfigMap("existing", "one", nil),
+		namespaceObject,
+		newConfigMap("supplied", "two", nil),
+	}
+
+	if err := EnsureNamespaces(context.Background(), client, objects); err != nil {
+		t.Fatalf("EnsureNamespaces: %v", err)
+	}
+	for _, action := range clientset.Actions() {
+		if action.GetVerb() == "create" {
+			t.Fatalf("unexpected create action: %+v", action)
+		}
+		if action.GetVerb() == "get" && action.(k8stesting.GetAction).GetName() == "supplied" {
+			t.Fatal("manifest-supplied namespace was queried")
+		}
+	}
+}
+
+func TestEnsureNamespacesIgnoresAlreadyExistsRace(t *testing.T) {
+	clientset := kubefake.NewSimpleClientset()
+	clientset.PrependReactor("create", "namespaces", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, k8serrors.NewAlreadyExists(schema.GroupResource{Resource: "namespaces"}, "racing")
+	})
+	client := &kube.Client{Clientset: clientset}
+
+	if err := EnsureNamespaces(context.Background(), client, []*unstructured.Unstructured{newConfigMap("racing", "cfg", nil)}); err != nil {
+		t.Fatalf("EnsureNamespaces: %v", err)
+	}
+}
+
+func TestEnsureNamespacesReturnsActionableForbiddenErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		verb     string
+		resource string
+		want     string
+	}{
+		{name: "get", verb: "get", resource: "namespaces", want: "grant get access to namespaces"},
+		{name: "create", verb: "create", resource: "namespaces", want: "kubectl create namespace locked"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clientset := kubefake.NewSimpleClientset()
+			clientset.PrependReactor(tc.verb, tc.resource, func(k8stesting.Action) (bool, runtime.Object, error) {
+				return true, nil, k8serrors.NewForbidden(schema.GroupResource{Resource: "namespaces"}, "locked", errors.New("denied"))
+			})
+			client := &kube.Client{Clientset: clientset}
+			err := EnsureNamespaces(context.Background(), client, []*unstructured.Unstructured{newConfigMap("locked", "cfg", nil)})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("EnsureNamespaces error = %v, want text %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestHandleDelete(t *testing.T) {
 	root := t.TempDir()
 	overlay := filepath.Join(root, "awesome", "k8s", "overlays", "local")
@@ -326,7 +456,7 @@ metadata:
 		seedDeployment("default", "awesome-api", "registry:5000/awesome-api:latest"),
 	)
 
-	if _, err := handle(context.Background(), client, config, "awesome", true); err != nil {
+	if _, err := handle(context.Background(), client, config, "awesome", true, false); err != nil {
 		t.Fatalf("handle delete returned error: %v", err)
 	}
 	if _, err := client.DynamicClient.Resource(deployGVR).Namespace("default").Get(context.Background(), "awesome-api", metav1.GetOptions{}); !k8serrors.IsNotFound(err) {
@@ -393,6 +523,7 @@ func newFakeKubeClient(objects ...runtime.Object) *kube.Client {
 	mapper.Add(stsGVK, apimeta.RESTScopeNamespace)
 
 	return &kube.Client{
+		Clientset:     kubefake.NewSimpleClientset(),
 		DynamicClient: dynamicfake.NewSimpleDynamicClient(scheme, objects...),
 		Mapper:        mapper,
 	}

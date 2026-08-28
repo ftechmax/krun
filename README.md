@@ -109,9 +109,9 @@ krun [global options] <command> [command options] <service>
   krun build --flush awesome-app
   ```
 
-- `deploy [--use-remote-registry, --no-restart] <project>`  
+- `deploy [--use-remote-registry, --no-restart, --create-namespace] <project>`
   Deploy a project.  
-  Use `--use-remote-registry` to deploy using the remote Docker registry defined in `krun-config.json`. If not specified, it will use the local Docker registry. Use `--no-restart` to skip the rollout restart after applying manifests.
+  Use `--use-remote-registry` to deploy using the remote Docker registry defined in `krun-config.json`. If not specified, it will use the local Docker registry. Use `--no-restart` to skip the rollout restart after applying manifests. Use `--create-namespace` to discover and create missing target namespaces; without the flag, deploy does not require cluster-scoped Namespace access.
 
   ```sh
   krun deploy awesome-app

@@ -63,6 +63,9 @@ func List(config cfg.Config) {
 		}
 
 		fmt.Printf("Service: %s (namespace: %s)\n", serviceName, namespace)
+		if session.State == contracts.HelperSessionStateCleanupPending {
+			fmt.Println(utils.Colorize("State: cleanup pending", utils.Yellow))
+		}
 		fmt.Printf("Intercept port: %d\n", session.Context.InterceptPort)
 		fmt.Println("Service dependencies:")
 
@@ -99,7 +102,7 @@ func Enable(service cfg.Service, config cfg.Config, containerName string) {
 	request := contracts.DebugSessionCommandRequest{
 		Context: buildDebugServiceContext(service),
 	}
-	response, err := helperRequest(http.MethodPost, "/v1/debug/enable", request, commandTimeout)
+	response, err := helperCall[contracts.HelperResponse](http.MethodPost, "/v1/debug/enable", request, commandTimeout)
 	if err != nil {
 		fmt.Println(utils.Colorize(fmt.Sprintf("cannot apply debug enable via helper: %v", err), utils.Red))
 		return
@@ -122,7 +125,7 @@ func Disable(service cfg.Service, config cfg.Config) {
 		return
 	}
 
-	response, err := helperRequest(http.MethodPost, "/v1/debug/disable", contracts.DebugSessionCommandRequest{
+	response, err := helperCall[contracts.HelperResponse](http.MethodPost, "/v1/debug/disable", contracts.DebugSessionCommandRequest{
 		Context: buildDebugServiceContext(service),
 	}, commandTimeout)
 	if err != nil {
@@ -147,7 +150,8 @@ func Disable(service cfg.Service, config cfg.Config) {
 // HelperStatus reports the helper's state without side effects: unlike the
 // other commands it never starts the helper.
 func HelperStatus(config cfg.Config) {
-	if err := helperCheckHealth(); err != nil {
+	helperVersion, err := helperCheckHealth()
+	if err != nil {
 		fmt.Println(utils.Colorize("helper is not running", utils.Yellow))
 		fmt.Printf("endpoint: %s\n", helperipc.DefaultEndpoint)
 		return
@@ -156,6 +160,10 @@ func HelperStatus(config cfg.Config) {
 	fmt.Println(utils.Colorize("helper is running", utils.Green))
 	fmt.Printf("endpoint: %s\n", helperipc.DefaultEndpoint)
 	fmt.Printf("kubeconfig: %s\n", config.KubeConfig)
+	if strings.TrimSpace(helperVersion) != "" {
+		fmt.Printf("helper version: %s\n", helperVersion)
+	}
+	warnOnHelperSkew(config.Version, helperVersion)
 
 	sessions, err := helperListSessions()
 	if err != nil {
@@ -168,17 +176,21 @@ func HelperStatus(config cfg.Config) {
 	}
 	fmt.Println("Active debug sessions:")
 	for _, session := range sessions {
-		fmt.Printf("  - %s (intercept port %d)\n", session.Context.ServiceName, session.Context.InterceptPort)
+		suffix := ""
+		if session.State == contracts.HelperSessionStateCleanupPending {
+			suffix = " [cleanup pending]"
+		}
+		fmt.Printf("  - %s (intercept port %d)%s\n", session.Context.ServiceName, session.Context.InterceptPort, suffix)
 	}
 }
 
 func HelperStop() {
-	if err := helperCheckHealth(); err != nil {
+	if _, err := helperCheckHealth(); err != nil {
 		fmt.Println(utils.Colorize("helper is not running", utils.Yellow))
 		return
 	}
 
-	response, err := helperRequest(http.MethodPost, "/v1/shutdown", nil, listTimeout)
+	response, err := helperCall[contracts.HelperResponse](http.MethodPost, "/v1/shutdown", nil, listTimeout)
 	if err != nil {
 		fmt.Println(utils.Colorize(fmt.Sprintf("failed to stop helper: %v", err), utils.Red))
 		return
@@ -325,13 +337,15 @@ func fetchRemoteManifestObjects(version string) ([]*unstructured.Unstructured, e
 }
 
 func ensureHelperStarted(config cfg.Config) error {
-	if err := helperCheckHealth(); err == nil {
+	if helperVersion, err := helperCheckHealth(); err == nil {
+		warnOnHelperSkew(config.Version, helperVersion)
 		return nil
 	}
 
 	if err := startHelperProcess(config); err != nil {
 		// Handle races where another process started the helper concurrently.
-		if checkErr := helperCheckHealth(); checkErr == nil {
+		if helperVersion, checkErr := helperCheckHealth(); checkErr == nil {
+			warnOnHelperSkew(config.Version, helperVersion)
 			return nil
 		}
 		return err
@@ -339,7 +353,8 @@ func ensureHelperStarted(config cfg.Config) error {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := helperCheckHealth(); err == nil {
+		if helperVersion, err := helperCheckHealth(); err == nil {
+			warnOnHelperSkew(config.Version, helperVersion)
 			return nil
 		}
 		time.Sleep(200 * time.Millisecond)
@@ -395,102 +410,83 @@ func resolveHelperBinaryPath() (string, error) {
 	return "", fmt.Errorf("%s not found next to krun executable, in current directory, or in PATH", helperBinaryName)
 }
 
-func helperCheckHealth() error {
-	client := helperipc.NewClient(healthTimeout)
-	resp, err := client.Get(helperipc.BaseURL + "/healthz")
+// helperCheckHealth probes the running helper and reports the version it is
+// built from. A helper older than this contract reports an empty version.
+func helperCheckHealth() (string, error) {
+	response, err := helperCall[contracts.HelperResponse](http.MethodGet, "/healthz", nil, healthTimeout)
 	if err != nil {
-		return err
+		return "", err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("status %d", resp.StatusCode)
-	}
-	return nil
+	return response.Version, nil
 }
 
-func helperRequest(method string, path string, payload any, timeout time.Duration) (contracts.HelperResponse, error) {
+// warnOnHelperSkew reports mixed CLI/helper builds without rejecting them.
+func warnOnHelperSkew(cliVersion string, helperVersion string) {
+	if helperVersion == cliVersion {
+		return
+	}
+
+	reported := helperVersion
+	if strings.TrimSpace(reported) == "" {
+		reported = "unknown (predates version reporting)"
+	}
+	fmt.Println(utils.Colorize(fmt.Sprintf("WARNING: version skew - krun is %q but the running helper is %s", cliVersion, reported), utils.Yellow))
+	fmt.Println(utils.Colorize("         a different krun build started the helper; restart it with: krun debug helper stop", utils.Yellow))
+}
+
+// helperCall sends one request to the helper over the local IPC endpoint and
+// decodes its JSON reply. A 4xx/5xx is returned as an error carrying the
+// helper's own message, which is what the CLI shows the user.
+func helperCall[T any](method string, path string, payload any, timeout time.Duration) (T, error) {
+	var result T
+
 	var body io.Reader
 	if payload != nil {
-		marshaledBody, err := json.Marshal(payload)
+		encoded, err := json.Marshal(payload)
 		if err != nil {
-			return contracts.HelperResponse{}, err
+			return result, err
 		}
-		body = bytes.NewReader(marshaledBody)
+		body = bytes.NewReader(encoded)
 	}
 
 	request, err := http.NewRequest(method, helperipc.BaseURL+path, body)
 	if err != nil {
-		return contracts.HelperResponse{}, err
+		return result, err
 	}
 	if payload != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
 
-	client := helperipc.NewClient(timeout)
-	response, err := client.Do(request)
+	response, err := helperipc.NewClient(timeout).Do(request)
 	if err != nil {
-		return contracts.HelperResponse{}, err
+		return result, err
 	}
 	defer response.Body.Close()
 
 	responseBody, err := io.ReadAll(response.Body)
 	if err != nil {
-		return contracts.HelperResponse{}, err
+		return result, err
 	}
-
-	var helperResponse contracts.HelperResponse
 	if len(responseBody) > 0 {
-		if err := json.Unmarshal(responseBody, &helperResponse); err != nil {
-			return contracts.HelperResponse{}, fmt.Errorf("invalid helper response: %w", err)
+		if err := json.Unmarshal(responseBody, &result); err != nil {
+			return result, fmt.Errorf("invalid helper response: %w", err)
 		}
-	}
-	if response.StatusCode >= 400 {
-		if helperResponse.Message != "" {
-			return helperResponse, errors.New(helperResponse.Message)
-		}
-		return helperResponse, fmt.Errorf("helper request failed with status %d", response.StatusCode)
-	}
-
-	return helperResponse, nil
-}
-
-func helperListSessions() ([]contracts.HelperDebugSession, error) {
-	request, err := http.NewRequest(http.MethodGet, helperipc.BaseURL+"/v1/debug/sessions", nil)
-	if err != nil {
-		return nil, err
-	}
-
-	client := helperipc.NewClient(listTimeout)
-	response, err := client.Do(request)
-	if err != nil {
-		return nil, err
-	}
-	defer response.Body.Close()
-
-	responseBody, err := io.ReadAll(response.Body)
-	if err != nil {
-		return nil, err
 	}
 
 	if response.StatusCode >= 400 {
 		var helperResponse contracts.HelperResponse
-		if len(responseBody) > 0 {
-			_ = json.Unmarshal(responseBody, &helperResponse)
-		}
+		_ = json.Unmarshal(responseBody, &helperResponse)
 		if helperResponse.Message != "" {
-			return nil, errors.New(helperResponse.Message)
+			return result, errors.New(helperResponse.Message)
 		}
-		return nil, fmt.Errorf("helper request failed with status %d", response.StatusCode)
+		return result, fmt.Errorf("helper request failed with status %d", response.StatusCode)
 	}
+	return result, nil
+}
 
-	var listResponse contracts.HelperDebugSessionsResponse
-	if len(responseBody) > 0 {
-		if err := json.Unmarshal(responseBody, &listResponse); err != nil {
-			return nil, fmt.Errorf("invalid helper response: %w", err)
-		}
-	}
-
-	return listResponse.Sessions, nil
+func helperListSessions() ([]contracts.HelperDebugSession, error) {
+	response, err := helperCall[contracts.HelperDebugSessionsResponse](http.MethodGet, "/v1/debug/sessions", nil, listTimeout)
+	return response.Sessions, err
 }
 
 func buildDebugServiceContext(service cfg.Service) contracts.DebugServiceContext {

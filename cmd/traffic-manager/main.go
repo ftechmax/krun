@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +18,7 @@ import (
 
 	"github.com/ftechmax/krun/internal/contracts"
 	"github.com/ftechmax/krun/internal/kube"
+	"github.com/ftechmax/krun/internal/securetoken"
 	"github.com/ftechmax/krun/internal/traffic-manager/agent"
 	sessionregistry "github.com/ftechmax/krun/internal/traffic-manager/session"
 	streamrelay "github.com/ftechmax/krun/internal/traffic-manager/stream"
@@ -31,17 +30,30 @@ import (
 )
 
 var (
-	version                        = "debug" // will be set by the build system
-	sessionRegistry                = sessionregistry.NewDebugSessionRegistry()
-	sidecarBridge   agent.Injector = agent.NoopInjector{}
-	relayRegistry                  = streamrelay.NewSessionRelayRegistry()
-	streamUpgrader                 = websocket.Upgrader{
+	version = "debug" // will be set by the build system
+
+	streamUpgrader = websocket.Upgrader{
 		CheckOrigin: func(_ *http.Request) bool { return true },
 	}
 	errStreamSessionNotFound = errors.New("session not found")
 	errStreamUnauthorized    = errors.New("invalid session token")
-	managerAuthToken         string
 )
+
+type server struct {
+	sessions  *sessionregistry.DebugSessionRegistry
+	injector  agent.Injector
+	relay     *streamrelay.SessionRelayRegistry
+	authToken string
+}
+
+func newServer(injector agent.Injector, authToken string) *server {
+	return &server{
+		sessions:  sessionregistry.NewDebugSessionRegistry(),
+		injector:  injector,
+		relay:     streamrelay.NewSessionRelayRegistry(),
+		authToken: authToken,
+	}
+}
 
 const (
 	defaultListenAddress = ":8080"
@@ -55,13 +67,13 @@ const (
 	streamSessionTokenQuery  = "session_token"
 	streamSessionIDHeader    = "X-Krun-Session-ID"
 	streamSessionTokenHeader = "X-Krun-Session-Token"
+	streamAgentVersionHeader = "X-Krun-Agent-Version"
 
 	managerNamespace = "krun-system"
 	authSecretName   = "krun-manager-auth"
 	authSecretKey    = "token"
-	// Session CRUD requires this shared-token header. A custom header is
-	// used because the API server consumes Authorization for its own
-	// authentication and does not forward it through the service proxy.
+	// The custom header avoids collision with Authorization handling by
+	// Kubernetes and HTTP intermediaries.
 	authTokenHeader = "X-Krun-Auth-Token"
 )
 
@@ -77,23 +89,26 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("initialize kubernetes client: %w", err)
 	}
-	initializeInjector(client.Clientset)
 
 	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelStartup()
 
-	if err := initializeAuthToken(startupCtx, client.Clientset); err != nil {
+	authToken, err := initializeAuthToken(startupCtx, client.Clientset)
+	if err != nil {
 		return err
 	}
 
+	manager := newServer(newInjector(client.Clientset), authToken)
+
 	log.Printf("cleaning up dangling traffic-agent sidecars")
-	if err := cleanupDanglingAgents(startupCtx); err != nil {
+	if err := manager.cleanupDanglingAgents(startupCtx); err != nil {
 		return err
 	}
 
 	server := &http.Server{
-		Addr:    defaultListenAddress,
-		Handler: newHandler(),
+		Addr:              defaultListenAddress,
+		Handler:           newHandler(manager),
+		ReadHeaderTimeout: 5 * time.Second,
 	}
 	log.Printf("krun traffic-manager listening on %s", defaultListenAddress)
 	log.Printf("version: %s", version)
@@ -126,16 +141,16 @@ func run() error {
 	}
 }
 
-func newHandler() http.Handler {
+func newHandler(s *server) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", handleHealthz)
-	mux.HandleFunc("/v1/sessions", requireAuthToken(handleSessions))
-	mux.HandleFunc("/v1/sessions/", requireAuthToken(handleSessionByID))
+	mux.HandleFunc("/v1/sessions", s.requireAuthToken(s.handleSessions))
+	mux.HandleFunc("/v1/sessions/", s.requireAuthToken(s.handleSessionByID))
 	mux.HandleFunc("/v1/stream/agent", func(w http.ResponseWriter, r *http.Request) {
-		handleStreamAttach(w, r, contracts.StreamRoleAgent)
+		s.handleStreamAttach(w, r, contracts.StreamRoleAgent)
 	})
 	mux.HandleFunc("/v1/stream/client", func(w http.ResponseWriter, r *http.Request) {
-		handleStreamAttach(w, r, contracts.StreamRoleClient)
+		s.handleStreamAttach(w, r, contracts.StreamRoleClient)
 	})
 	return mux
 }
@@ -145,23 +160,23 @@ func handleHealthz(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": version})
 }
 
-func handleSessions(w http.ResponseWriter, r *http.Request) {
+func (s *server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
-		handleCreateSession(w, r)
+		s.handleCreateSession(w, r)
 	case http.MethodGet:
 		writeJSON(w, http.StatusOK, contracts.ListDebugSessionsResponse{
-			Sessions: sessionRegistry.List(),
+			Sessions: s.sessions.List(),
 		})
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 
-func handleSessionByID(w http.ResponseWriter, r *http.Request) {
+func (s *server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -173,22 +188,22 @@ func handleSessionByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	debugSession, ok := sessionRegistry.Get(id)
+	debugSession, ok := s.sessions.Get(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
 
-	if err := sidecarBridge.Remove(r.Context(), debugSession); err != nil && !errors.Is(err, agent.ErrWorkloadNotFound) {
+	if err := s.injector.Remove(r.Context(), debugSession); err != nil && !errors.Is(err, agent.ErrWorkloadNotFound) {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to remove traffic-agent sidecar: %v", err))
 		return
 	}
 
-	sessionRegistry.Delete(id)
+	s.sessions.Delete(id)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func handleCreateSession(w http.ResponseWriter, r *http.Request) {
+func (s *server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	var request contracts.CreateDebugSessionRequest
@@ -203,14 +218,14 @@ func handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session, err := sessionRegistry.Create(request)
+	session, err := s.sessions.Create(request)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	if err := sidecarBridge.Inject(r.Context(), session); err != nil {
-		sessionRegistry.Delete(session.SessionID)
+	if err := s.injector.Inject(r.Context(), session); err != nil {
+		s.sessions.Delete(session.SessionID)
 		statusCode := http.StatusInternalServerError
 		if errors.Is(err, agent.ErrWorkloadNotFound) {
 			statusCode = http.StatusNotFound
@@ -222,13 +237,13 @@ func handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, session)
 }
 
-func handleStreamAttach(w http.ResponseWriter, r *http.Request, role string) {
+func (s *server) handleStreamAttach(w http.ResponseWriter, r *http.Request, role string) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
-	debugSession, err := resolveStreamSession(r)
+	debugSession, err := s.resolveStreamSession(r)
 	if err != nil {
 		statusCode := http.StatusBadRequest
 		if errors.Is(err, errStreamSessionNotFound) {
@@ -247,8 +262,16 @@ func handleStreamAttach(w http.ResponseWriter, r *http.Request, role string) {
 		return
 	}
 
+	if role == contracts.StreamRoleAgent {
+		// A stale agent image (a re-pulled :latest, a workload never rolled)
+		// speaks the same protocol and looks healthy, so surface the skew
+		// rather than letting it pass as a working session.
+		if agentVersion := strings.TrimSpace(r.Header.Get(streamAgentVersionHeader)); agentVersion != "" && agentVersion != version {
+			log.Printf("WARNING: version skew - traffic-agent is %q but traffic-manager is %q (session_id=%s)", agentVersion, version, debugSession.SessionID)
+		}
+	}
 	log.Printf("stream attached (role=%s session_id=%s)", role, debugSession.SessionID)
-	relayRegistry.ServePeer(role, debugSession.SessionID, conn)
+	s.relay.ServePeer(role, debugSession.SessionID, conn)
 }
 
 func parseSessionID(path string) (string, error) {
@@ -267,7 +290,7 @@ func parseSessionID(path string) (string, error) {
 	return trimmed, nil
 }
 
-func resolveStreamSession(r *http.Request) (contracts.DebugSession, error) {
+func (s *server) resolveStreamSession(r *http.Request) (contracts.DebugSession, error) {
 	sessionID := strings.TrimSpace(r.URL.Query().Get(streamSessionIDQuery))
 	if sessionID == "" {
 		sessionID = strings.TrimSpace(r.Header.Get(streamSessionIDHeader))
@@ -276,7 +299,7 @@ func resolveStreamSession(r *http.Request) (contracts.DebugSession, error) {
 		return contracts.DebugSession{}, errors.New("session id is required")
 	}
 
-	debugSession, ok := sessionRegistry.Get(sessionID)
+	debugSession, ok := s.sessions.Get(sessionID)
 	if !ok {
 		return contracts.DebugSession{}, errStreamSessionNotFound
 	}
@@ -305,10 +328,10 @@ func writeJSON(w http.ResponseWriter, code int, payload any) {
 	_ = json.NewEncoder(w).Encode(payload)
 }
 
-func initializeInjector(clientset kubernetes.Interface) {
+func newInjector(clientset kubernetes.Interface) agent.Injector {
 	probePort, _ := strconv.Atoi(strings.TrimSpace(os.Getenv(envAgentProbePort)))
 
-	sidecarBridge = agent.NewWorkloadInjector(clientset, agent.Options{
+	return agent.NewWorkloadInjector(clientset, agent.Options{
 		ContainerName:   strings.TrimSpace(os.Getenv(envAgentContainerName)),
 		Image:           strings.TrimSpace(os.Getenv(envAgentImage)),
 		ImagePullPolicy: strings.TrimSpace(os.Getenv(envAgentImagePullPolicy)),
@@ -321,30 +344,38 @@ func initializeInjector(clientset kubernetes.Interface) {
 // generating and persisting a fresh one on first start. Requiring the token
 // (or kube API access to read it) means network reach to the manager Service
 // alone is no longer enough to inject root+NET_ADMIN sidecars.
-func initializeAuthToken(ctx context.Context, clientset kubernetes.Interface) error {
+func initializeAuthToken(ctx context.Context, clientset kubernetes.Interface) (string, error) {
+	return initializeAuthTokenWithGenerator(ctx, clientset, newAuthToken)
+}
+
+func initializeAuthTokenWithGenerator(ctx context.Context, clientset kubernetes.Interface, generate func() (string, error)) (string, error) {
 	secret, err := clientset.CoreV1().Secrets(managerNamespace).Get(ctx, authSecretName, metav1.GetOptions{})
 	if err == nil {
 		if token := strings.TrimSpace(string(secret.Data[authSecretKey])); token != "" {
-			managerAuthToken = token
-			return nil
+			return token, nil
 		}
-		token := newAuthToken()
+		token, err := generate()
+		if err != nil {
+			return "", fmt.Errorf("generate auth token: %w", err)
+		}
 		updated := secret.DeepCopy()
 		if updated.Data == nil {
 			updated.Data = map[string][]byte{}
 		}
 		updated.Data[authSecretKey] = []byte(token)
 		if _, err := clientset.CoreV1().Secrets(managerNamespace).Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
-			return fmt.Errorf("update auth secret: %w", err)
+			return "", fmt.Errorf("update auth secret: %w", err)
 		}
-		managerAuthToken = token
-		return nil
+		return token, nil
 	}
 	if !apierrors.IsNotFound(err) {
-		return fmt.Errorf("get auth secret: %w", err)
+		return "", fmt.Errorf("get auth secret: %w", err)
 	}
 
-	token := newAuthToken()
+	token, err := generate()
+	if err != nil {
+		return "", fmt.Errorf("generate auth token: %w", err)
+	}
 	_, err = clientset.CoreV1().Secrets(managerNamespace).Create(ctx, &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      authSecretName,
@@ -357,26 +388,21 @@ func initializeAuthToken(ctx context.Context, clientset kubernetes.Interface) er
 	if err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			// Lost a create race against another replica; adopt its token.
-			return initializeAuthToken(ctx, clientset)
+			return initializeAuthTokenWithGenerator(ctx, clientset, generate)
 		}
-		return fmt.Errorf("create auth secret: %w", err)
+		return "", fmt.Errorf("create auth secret: %w", err)
 	}
-	managerAuthToken = token
-	return nil
+	return token, nil
 }
 
-func newAuthToken() string {
-	buffer := make([]byte, 32)
-	if _, err := rand.Read(buffer); err != nil {
-		return fmt.Sprintf("%d", time.Now().UnixNano())
-	}
-	return hex.EncodeToString(buffer)
+func newAuthToken() (string, error) {
+	return securetoken.Hex(32)
 }
 
-func requireAuthToken(next http.HandlerFunc) http.HandlerFunc {
+func (s *server) requireAuthToken(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := strings.TrimSpace(r.Header.Get(authTokenHeader))
-		if managerAuthToken == "" || token != managerAuthToken {
+		if s.authToken == "" || token != s.authToken {
 			writeError(w, http.StatusUnauthorized, "invalid or missing auth token")
 			return
 		}
@@ -384,8 +410,10 @@ func requireAuthToken(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func cleanupDanglingAgents(ctx context.Context) error {
-	if err := sidecarBridge.Cleanup(ctx); err != nil {
+// cleanupDanglingAgents removes sidecars left behind by a previous manager
+// instance, whose sessions did not survive the restart.
+func (s *server) cleanupDanglingAgents(ctx context.Context) error {
+	if err := s.injector.Cleanup(ctx); err != nil {
 		return fmt.Errorf("cleanup dangling traffic-agent sidecars: %w", err)
 	}
 	return nil

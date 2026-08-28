@@ -10,7 +10,6 @@ import (
 
 	"github.com/ftechmax/krun/internal/contracts"
 	"github.com/ftechmax/krun/internal/kube"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -23,7 +22,7 @@ func TestManagerClientCreateSession(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("unexpected method: %s", r.Method)
 		}
-		if !strings.HasSuffix(r.URL.Path, "/proxy/v1/sessions") {
+		if r.URL.Path != "/v1/sessions" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		if err := json.NewDecoder(r.Body).Decode(&createReq); err != nil {
@@ -93,32 +92,36 @@ func TestManagerClientCreateSessionValidation(t *testing.T) {
 	}
 }
 
-func TestManagerClientListSessions(t *testing.T) {
-	client, closeFn := newTestManagerClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			t.Fatalf("unexpected method: %s", r.Method)
-		}
-		if !strings.HasSuffix(r.URL.Path, "/proxy/v1/sessions") {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
-		}
-		writeJSONResponse(t, w, http.StatusOK, contracts.ListDebugSessionsResponse{
-			Sessions: []contracts.DebugSession{
-				{SessionID: "mgr-1", ServiceName: "orders-api"},
-				{SessionID: "mgr-2", ServiceName: "payments-api"},
-			},
+func TestManagerClientCreateSessionRejectsEmptySessionID(t *testing.T) {
+	client, closeFn := newTestManagerClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSONResponse(t, w, http.StatusCreated, contracts.DebugSession{ServiceName: "orders-api"})
+	})
+	defer closeFn()
+
+	if _, err := client.CreateSession(contracts.DebugServiceContext{
+		ServiceName:   "orders-api",
+		ContainerPort: 8080,
+		InterceptPort: 5000,
+	}); err == nil {
+		t.Fatal("expected an error when the manager returns no session id")
+	}
+}
+
+func TestManagerClientCreateSessionSurfacesManagerError(t *testing.T) {
+	client, closeFn := newTestManagerClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSONResponse(t, w, http.StatusNotFound, map[string]string{
+			"message": "failed to inject traffic-agent sidecar",
 		})
 	})
 	defer closeFn()
 
-	sessions, err := client.ListSessions()
-	if err != nil {
-		t.Fatalf("list sessions failed: %v", err)
-	}
-	if len(sessions) != 2 {
-		t.Fatalf("expected 2 sessions, got %+v", sessions)
-	}
-	if sessions[0].SessionID != "mgr-1" || sessions[1].SessionID != "mgr-2" {
-		t.Fatalf("unexpected sessions list: %+v", sessions)
+	_, err := client.CreateSession(contracts.DebugServiceContext{
+		ServiceName:   "orders-api",
+		ContainerPort: 8080,
+		InterceptPort: 5000,
+	})
+	if err == nil {
+		t.Fatal("expected an error when the manager rejects the create")
 	}
 }
 
@@ -136,24 +139,30 @@ func TestManagerClientDeleteSession(t *testing.T) {
 	if err := client.DeleteSession("mgr-delete-1"); err != nil {
 		t.Fatalf("delete session failed: %v", err)
 	}
-	if !strings.HasSuffix(deletePath, "/proxy/v1/sessions/mgr-delete-1") {
+	if deletePath != "/v1/sessions/mgr-delete-1" {
 		t.Fatalf("unexpected delete path: %s", deletePath)
 	}
 }
 
 func TestManagerClientDeleteSessionNotFoundIsIgnored(t *testing.T) {
-	client, closeFn := newTestManagerClient(t, func(w http.ResponseWriter, r *http.Request) {
-		writeJSONResponse(t, w, http.StatusNotFound, metav1.Status{
-			Status:  metav1.StatusFailure,
-			Reason:  metav1.StatusReasonNotFound,
-			Message: "session not found",
-			Code:    http.StatusNotFound,
-		})
+	client, closeFn := newTestManagerClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSONResponse(t, w, http.StatusNotFound, map[string]string{"message": "session not found"})
 	})
 	defer closeFn()
 
 	if err := client.DeleteSession("mgr-missing"); err != nil {
 		t.Fatalf("expected 404 to be ignored, got %v", err)
+	}
+}
+
+func TestManagerClientDeleteSessionIgnoresBlankID(t *testing.T) {
+	client, closeFn := newTestManagerClient(t, func(_ http.ResponseWriter, r *http.Request) {
+		t.Fatalf("expected no request for a blank session id, got %s %s", r.Method, r.URL.Path)
+	})
+	defer closeFn()
+
+	if err := client.DeleteSession("  "); err != nil {
+		t.Fatalf("expected blank session id to be a no-op, got %v", err)
 	}
 }
 
@@ -168,19 +177,20 @@ func TestNormalizeNamespace(t *testing.T) {
 
 const testAuthToken = "test-auth-token"
 
-func newTestManagerClient(t *testing.T, handler http.HandlerFunc) (*kubeManagerSessionClient, func()) {
+// newTestManagerClient serves both roles from one httptest server: the kube
+// API paths that hand out the auth Secret, and the manager's own session API
+// reached over the port-forward.
+func newTestManagerClient(t *testing.T, handler http.HandlerFunc) (*Client, func()) {
 	t.Helper()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Serve the manager auth Secret that every session call fetches
-		// before hitting the service proxy.
 		if strings.HasSuffix(r.URL.Path, "/secrets/"+authSecretName) {
 			writeJSONResponse(t, w, http.StatusOK, map[string]any{
 				"apiVersion": "v1",
 				"kind":       "Secret",
 				"metadata": map[string]any{
 					"name":      authSecretName,
-					"namespace": defaultManagerNamespace,
+					"namespace": ManagerNamespace,
 				},
 				"data": map[string]string{
 					authSecretKey: base64.StdEncoding.EncodeToString([]byte(testAuthToken)),
@@ -188,10 +198,8 @@ func newTestManagerClient(t *testing.T, handler http.HandlerFunc) (*kubeManagerS
 			})
 			return
 		}
-		if strings.Contains(r.URL.Path, "/proxy/") {
-			if got := r.Header.Get(authTokenHeader); got != testAuthToken {
-				t.Errorf("proxy request missing auth token header, got %q", got)
-			}
+		if got := r.Header.Get(authTokenHeader); got != testAuthToken {
+			t.Errorf("manager request missing auth token header, got %q", got)
 		}
 		handler(w, r)
 	}))
@@ -212,11 +220,10 @@ func newTestManagerClient(t *testing.T, handler http.HandlerFunc) (*kubeManagerS
 		t.Fatalf("create kubernetes clientset: %v", err)
 	}
 
-	return &kubeManagerSessionClient{
-		client: &kube.Client{
-			RestConfig: restConfig,
-			Clientset:  clientset,
-		},
+	return &Client{
+		baseURL: server.URL,
+		kube:    &kube.Client{RestConfig: restConfig, Clientset: clientset},
+		http:    server.Client(),
 	}, server.Close
 }
 

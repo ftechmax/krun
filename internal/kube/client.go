@@ -14,7 +14,7 @@ import (
 
 type Client struct {
 	RestConfig    *rest.Config
-	Clientset     *kubernetes.Clientset
+	Clientset     kubernetes.Interface
 	DynamicClient dynamic.Interface
 	Mapper        meta.RESTMapper
 }

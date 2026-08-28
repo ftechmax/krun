@@ -8,12 +8,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	cfg "github.com/ftechmax/krun/internal/config"
 	"github.com/ftechmax/krun/internal/kube"
 	"github.com/ftechmax/krun/internal/utils"
+	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,7 +34,7 @@ const (
 	restartedAtAnnotation = "kubectl.kubernetes.io/restartedAt"
 )
 
-func Deploy(projectName string, config cfg.Config, restart bool) {
+func Deploy(projectName string, config cfg.Config, restart bool, createNamespace bool) {
 	fmt.Printf("Deploying %s (use remote registry: %v)\n", projectName, config.Registry == config.RemoteRegistry)
 
 	client, err := kube.NewClient(config.KubeConfig)
@@ -41,7 +43,7 @@ func Deploy(projectName string, config cfg.Config, restart bool) {
 		return
 	}
 
-	targets, err := handle(context.Background(), client, config, projectName, false)
+	targets, err := handle(context.Background(), client, config, projectName, false, createNamespace)
 	if err != nil {
 		fmt.Println(utils.Colorize(fmt.Sprintf("Deploy failed: %s", err.Error()), utils.Red))
 		return
@@ -62,12 +64,12 @@ func Delete(projectName string, config cfg.Config) {
 		return
 	}
 
-	if _, err := handle(context.Background(), client, config, projectName, true); err != nil {
+	if _, err := handle(context.Background(), client, config, projectName, true, false); err != nil {
 		fmt.Println(utils.Colorize(fmt.Sprintf("Delete failed: %s", err.Error()), utils.Red))
 	}
 }
 
-func handle(ctx context.Context, client *kube.Client, config cfg.Config, projectName string, deleteMode bool) ([]restartTarget, error) {
+func handle(ctx context.Context, client *kube.Client, config cfg.Config, projectName string, deleteMode bool, createNamespace bool) ([]restartTarget, error) {
 	overlayPaths, err := resolveOverlayPaths(config, projectName)
 	if err != nil {
 		return nil, err
@@ -86,6 +88,12 @@ func handle(ctx context.Context, client *kube.Client, config cfg.Config, project
 				return nil, fmt.Errorf("delete objects from %s: %w", overlayPath, err)
 			}
 			continue
+		}
+
+		if createNamespace {
+			if err := EnsureNamespaces(ctx, client, objs); err != nil {
+				return nil, err
+			}
 		}
 
 		if err := ApplyObjects(ctx, client, objs); err != nil {
@@ -216,6 +224,64 @@ func replaceRegistryInValue(value any, from, to string) any {
 	default:
 		return value
 	}
+}
+
+// EnsureNamespaces creates missing target namespaces for an explicitly
+// requested --create-namespace deployment.
+func EnsureNamespaces(ctx context.Context, client *kube.Client, objs []*unstructured.Unstructured) error {
+	provided := map[string]bool{}
+	for _, obj := range objs {
+		if obj.GetKind() == "Namespace" {
+			provided[strings.TrimSpace(obj.GetName())] = true
+		}
+	}
+
+	seen := map[string]bool{}
+	var required []string
+	for _, obj := range objs {
+		namespace := strings.TrimSpace(obj.GetNamespace())
+		if namespace == "" || provided[namespace] || seen[namespace] {
+			continue
+		}
+		seen[namespace] = true
+		required = append(required, namespace)
+	}
+	sort.Strings(required)
+
+	var missing []string
+	for _, namespace := range required {
+		_, err := client.Clientset.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
+		if err == nil {
+			continue
+		}
+		if !k8serrors.IsNotFound(err) {
+			if k8serrors.IsForbidden(err) {
+				return fmt.Errorf("check namespace %s: access forbidden; grant get access to namespaces or create it before deploying: %w", namespace, err)
+			}
+			return fmt.Errorf("check namespace %s: %w", namespace, err)
+		}
+		missing = append(missing, namespace)
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+
+	for _, namespace := range missing {
+		_, err := client.Clientset.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{Name: namespace},
+		}, metav1.CreateOptions{})
+		if k8serrors.IsAlreadyExists(err) {
+			continue
+		}
+		if k8serrors.IsForbidden(err) {
+			return fmt.Errorf("create namespace %s: access forbidden; grant create access to namespaces or run kubectl create namespace %s: %w", namespace, namespace, err)
+		}
+		if err != nil {
+			return fmt.Errorf("create namespace %s: %w", namespace, err)
+		}
+		fmt.Printf("Created namespace %s\n", namespace)
+	}
+	return nil
 }
 
 func ApplyObjects(ctx context.Context, client *kube.Client, objs []*unstructured.Unstructured) error {

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/ftechmax/krun/internal/contracts"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -39,20 +40,6 @@ type Injector interface {
 	Cleanup(ctx context.Context) error
 }
 
-type NoopInjector struct{}
-
-func (NoopInjector) Inject(context.Context, contracts.DebugSession) error {
-	return nil
-}
-
-func (NoopInjector) Remove(context.Context, contracts.DebugSession) error {
-	return nil
-}
-
-func (NoopInjector) Cleanup(context.Context) error {
-	return nil
-}
-
 type Options struct {
 	ContainerName   string
 	Image           string
@@ -62,8 +49,8 @@ type Options struct {
 }
 
 type WorkloadInjector struct {
-	client  kubernetes.Interface
-	options Options
+	operations map[workloadKind]workloadOperation
+	options    Options
 }
 
 type workloadKind string
@@ -74,6 +61,12 @@ const (
 	workloadKindDaemonSet   workloadKind = "daemonset"
 )
 
+var workloadKinds = []workloadKind{
+	workloadKindDeployment,
+	workloadKindStatefulSet,
+	workloadKindDaemonSet,
+}
+
 type workloadTarget struct {
 	kind     workloadKind
 	object   metav1.Object
@@ -81,10 +74,17 @@ type workloadTarget struct {
 	update   func(ctx context.Context) error
 }
 
+type workloadFinder func(ctx context.Context, namespace string, workload string) (*workloadTarget, error)
+
+type workloadOperation struct {
+	list func(context.Context) ([]workloadIdentifier, error)
+	find workloadFinder
+}
+
 func NewWorkloadInjector(client kubernetes.Interface, options Options) *WorkloadInjector {
 	return &WorkloadInjector{
-		client:  client,
-		options: normalizeOptions(options),
+		operations: newWorkloadOperations(client),
+		options:    normalizeOptions(options),
 	}
 }
 
@@ -129,39 +129,12 @@ func (i *WorkloadInjector) Remove(ctx context.Context, session contracts.DebugSe
 		return err
 	}
 
-	return i.mutateWorkload(ctx, namespace, workload, i.findWorkloadTarget, "removing traffic-agent sidecar", func(target *workloadTarget) bool {
-		filtered := make([]corev1.Container, 0, len(target.template.Spec.Containers))
-		removed := false
-		for _, container := range target.template.Spec.Containers {
-			if container.Name == i.options.ContainerName {
-				removed = true
-				continue
-			}
-			filtered = append(filtered, container)
-		}
-		changed := false
-		if removed {
-			target.template.Spec.Containers = filtered
-			changed = true
-		}
-		if removeInjectedLabel(target.object) {
-			changed = true
-		}
-		if restoreProbes(target) {
-			changed = true
-		}
-		return changed
-	})
+	return i.mutateWorkload(ctx, namespace, workload, i.findWorkloadTarget, "removing traffic-agent sidecar", i.removeInjectedSidecar)
 }
 
 func (i *WorkloadInjector) Cleanup(ctx context.Context) error {
-	kinds := []workloadKind{
-		workloadKindDeployment,
-		workloadKindStatefulSet,
-		workloadKindDaemonSet,
-	}
 	var errs []error
-	for _, kind := range kinds {
+	for _, kind := range workloadKinds {
 		if err := i.cleanupLabeledByKind(ctx, kind); err != nil {
 			errs = append(errs, err)
 		}
@@ -185,9 +158,7 @@ func (i *WorkloadInjector) cleanupLabeledByKind(ctx context.Context, kind worklo
 				return i.findWorkloadTargetByKind(ctx, kind, namespace, workload)
 			},
 			"removing traffic-agent sidecar during startup cleanup",
-			func(target *workloadTarget) bool {
-				return i.removeInjectedSidecarAndAnnotation(target)
-			},
+			i.removeInjectedSidecar,
 		)
 		if err != nil && !errors.Is(err, ErrWorkloadNotFound) {
 			errs = append(errs, err)
@@ -196,7 +167,9 @@ func (i *WorkloadInjector) cleanupLabeledByKind(ctx context.Context, kind worklo
 	return errors.Join(errs...)
 }
 
-func (i *WorkloadInjector) removeInjectedSidecarAndAnnotation(target *workloadTarget) bool {
+// removeInjectedSidecar drops the agent container, the injected label and the
+// probe rewrites, reporting whether anything changed.
+func (i *WorkloadInjector) removeInjectedSidecar(target *workloadTarget) bool {
 	filtered := make([]corev1.Container, 0, len(target.template.Spec.Containers))
 	removed := false
 	for _, container := range target.template.Spec.Containers {
@@ -227,44 +200,31 @@ type workloadIdentifier struct {
 }
 
 func (i *WorkloadInjector) listLabeledWorkloadsByKind(ctx context.Context, kind workloadKind) ([]workloadIdentifier, error) {
-	opts := metav1.ListOptions{LabelSelector: InjectedLabelKey + "=" + injectedLabelValue}
-	switch kind {
-	case workloadKindDeployment:
-		list, err := i.client.AppsV1().Deployments(metav1.NamespaceAll).List(ctx, opts)
-		if err != nil {
-			return nil, fmt.Errorf("list %ss for startup cleanup: %w", kind, err)
-		}
-		workloads := make([]workloadIdentifier, 0, len(list.Items))
-		for _, item := range list.Items {
-			workloads = append(workloads, workloadIdentifier{namespace: item.Namespace, workload: item.Name})
-		}
-		return workloads, nil
-	case workloadKindStatefulSet:
-		list, err := i.client.AppsV1().StatefulSets(metav1.NamespaceAll).List(ctx, opts)
-		if err != nil {
-			return nil, fmt.Errorf("list %ss for startup cleanup: %w", kind, err)
-		}
-		workloads := make([]workloadIdentifier, 0, len(list.Items))
-		for _, item := range list.Items {
-			workloads = append(workloads, workloadIdentifier{namespace: item.Namespace, workload: item.Name})
-		}
-		return workloads, nil
-	case workloadKindDaemonSet:
-		list, err := i.client.AppsV1().DaemonSets(metav1.NamespaceAll).List(ctx, opts)
-		if err != nil {
-			return nil, fmt.Errorf("list %ss for startup cleanup: %w", kind, err)
-		}
-		workloads := make([]workloadIdentifier, 0, len(list.Items))
-		for _, item := range list.Items {
-			workloads = append(workloads, workloadIdentifier{namespace: item.Namespace, workload: item.Name})
-		}
-		return workloads, nil
-	default:
+	operation, ok := i.operations[kind]
+	if !ok {
 		return nil, fmt.Errorf("unsupported workload kind: %s", kind)
 	}
+	workloads, err := operation.list(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list %ss for startup cleanup: %w", kind, err)
+	}
+	return workloads, nil
 }
 
-type workloadFinder func(ctx context.Context, namespace string, workload string) (*workloadTarget, error)
+func identifiers[T any, PT interface {
+	*T
+	metav1.Object
+}](items []T) []workloadIdentifier {
+	workloads := make([]workloadIdentifier, 0, len(items))
+	for index := range items {
+		object := PT(&items[index])
+		workloads = append(workloads, workloadIdentifier{
+			namespace: object.GetNamespace(),
+			workload:  object.GetName(),
+		})
+	}
+	return workloads
+}
 
 func (i *WorkloadInjector) mutateWorkload(
 	ctx context.Context,
@@ -296,12 +256,7 @@ func (i *WorkloadInjector) mutateWorkload(
 }
 
 func (i *WorkloadInjector) findWorkloadTarget(ctx context.Context, namespace string, workload string) (*workloadTarget, error) {
-	kinds := []workloadKind{
-		workloadKindDeployment,
-		workloadKindStatefulSet,
-		workloadKindDaemonSet,
-	}
-	for _, kind := range kinds {
+	for _, kind := range workloadKinds {
 		target, err := i.findWorkloadTargetByKind(ctx, kind, namespace, workload)
 		if err == nil {
 			return target, nil
@@ -314,64 +269,100 @@ func (i *WorkloadInjector) findWorkloadTarget(ctx context.Context, namespace str
 }
 
 func (i *WorkloadInjector) findWorkloadTargetByKind(ctx context.Context, kind workloadKind, namespace string, workload string) (*workloadTarget, error) {
-	switch kind {
-	case workloadKindDeployment:
-		deployment, err := i.client.AppsV1().Deployments(namespace).Get(ctx, workload, metav1.GetOptions{})
-		if err == nil {
-			updated := deployment.DeepCopy()
-			return &workloadTarget{
-				kind:     workloadKindDeployment,
-				object:   updated,
-				template: &updated.Spec.Template,
-				update: func(ctx context.Context) error {
-					_, err := i.client.AppsV1().Deployments(namespace).Update(ctx, updated, metav1.UpdateOptions{})
-					return err
-				},
-			}, nil
-		}
-		if apierrors.IsNotFound(err) {
-			return nil, fmt.Errorf("%w: %s %s/%s", ErrWorkloadNotFound, kind, namespace, workload)
-		}
-		return nil, fmt.Errorf("get %s %s/%s: %w", kind, namespace, workload, err)
-	case workloadKindStatefulSet:
-		statefulSet, err := i.client.AppsV1().StatefulSets(namespace).Get(ctx, workload, metav1.GetOptions{})
-		if err == nil {
-			updated := statefulSet.DeepCopy()
-			return &workloadTarget{
-				kind:     workloadKindStatefulSet,
-				object:   updated,
-				template: &updated.Spec.Template,
-				update: func(ctx context.Context) error {
-					_, err := i.client.AppsV1().StatefulSets(namespace).Update(ctx, updated, metav1.UpdateOptions{})
-					return err
-				},
-			}, nil
-		}
-		if apierrors.IsNotFound(err) {
-			return nil, fmt.Errorf("%w: %s %s/%s", ErrWorkloadNotFound, kind, namespace, workload)
-		}
-		return nil, fmt.Errorf("get %s %s/%s: %w", kind, namespace, workload, err)
-	case workloadKindDaemonSet:
-		daemonSet, err := i.client.AppsV1().DaemonSets(namespace).Get(ctx, workload, metav1.GetOptions{})
-		if err == nil {
-			updated := daemonSet.DeepCopy()
-			return &workloadTarget{
-				kind:     workloadKindDaemonSet,
-				object:   updated,
-				template: &updated.Spec.Template,
-				update: func(ctx context.Context) error {
-					_, err := i.client.AppsV1().DaemonSets(namespace).Update(ctx, updated, metav1.UpdateOptions{})
-					return err
-				},
-			}, nil
-		}
-		if apierrors.IsNotFound(err) {
-			return nil, fmt.Errorf("%w: %s %s/%s", ErrWorkloadNotFound, kind, namespace, workload)
-		}
-		return nil, fmt.Errorf("get %s %s/%s: %w", kind, namespace, workload, err)
-	default:
+	operation, ok := i.operations[kind]
+	if !ok {
 		return nil, fmt.Errorf("unsupported workload kind: %s", kind)
 	}
+	return operation.find(ctx, namespace, workload)
+}
+
+func newWorkloadOperations(client kubernetes.Interface) map[workloadKind]workloadOperation {
+	listOptions := metav1.ListOptions{LabelSelector: InjectedLabelKey + "=" + injectedLabelValue}
+	return map[workloadKind]workloadOperation{
+		workloadKindDeployment: {
+			list: func(ctx context.Context) ([]workloadIdentifier, error) {
+				list, err := client.AppsV1().Deployments(metav1.NamespaceAll).List(ctx, listOptions)
+				if err != nil {
+					return nil, err
+				}
+				return identifiers(list.Items), nil
+			},
+			find: func(ctx context.Context, namespace string, workload string) (*workloadTarget, error) {
+				api := client.AppsV1().Deployments(namespace)
+				return fetchWorkload(ctx, workloadKindDeployment, namespace, workload, api.Get,
+					func(obj *appsv1.Deployment) *corev1.PodTemplateSpec { return &obj.Spec.Template },
+					func(ctx context.Context, obj *appsv1.Deployment) error {
+						_, err := api.Update(ctx, obj, metav1.UpdateOptions{})
+						return err
+					})
+			},
+		},
+		workloadKindStatefulSet: {
+			list: func(ctx context.Context) ([]workloadIdentifier, error) {
+				list, err := client.AppsV1().StatefulSets(metav1.NamespaceAll).List(ctx, listOptions)
+				if err != nil {
+					return nil, err
+				}
+				return identifiers(list.Items), nil
+			},
+			find: func(ctx context.Context, namespace string, workload string) (*workloadTarget, error) {
+				api := client.AppsV1().StatefulSets(namespace)
+				return fetchWorkload(ctx, workloadKindStatefulSet, namespace, workload, api.Get,
+					func(obj *appsv1.StatefulSet) *corev1.PodTemplateSpec { return &obj.Spec.Template },
+					func(ctx context.Context, obj *appsv1.StatefulSet) error {
+						_, err := api.Update(ctx, obj, metav1.UpdateOptions{})
+						return err
+					})
+			},
+		},
+		workloadKindDaemonSet: {
+			list: func(ctx context.Context) ([]workloadIdentifier, error) {
+				list, err := client.AppsV1().DaemonSets(metav1.NamespaceAll).List(ctx, listOptions)
+				if err != nil {
+					return nil, err
+				}
+				return identifiers(list.Items), nil
+			},
+			find: func(ctx context.Context, namespace string, workload string) (*workloadTarget, error) {
+				api := client.AppsV1().DaemonSets(namespace)
+				return fetchWorkload(ctx, workloadKindDaemonSet, namespace, workload, api.Get,
+					func(obj *appsv1.DaemonSet) *corev1.PodTemplateSpec { return &obj.Spec.Template },
+					func(ctx context.Context, obj *appsv1.DaemonSet) error {
+						_, err := api.Update(ctx, obj, metav1.UpdateOptions{})
+						return err
+					})
+			},
+		},
+	}
+}
+
+func fetchWorkload[T interface {
+	metav1.Object
+	DeepCopy() T
+}](
+	ctx context.Context,
+	kind workloadKind,
+	namespace string,
+	workload string,
+	get func(context.Context, string, metav1.GetOptions) (T, error),
+	template func(T) *corev1.PodTemplateSpec,
+	update func(context.Context, T) error,
+) (*workloadTarget, error) {
+	found, err := get(ctx, workload, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("%w: %s %s/%s", ErrWorkloadNotFound, kind, namespace, workload)
+		}
+		return nil, fmt.Errorf("get %s %s/%s: %w", kind, namespace, workload, err)
+	}
+
+	updated := found.DeepCopy()
+	return &workloadTarget{
+		kind:     kind,
+		object:   updated,
+		template: template(updated),
+		update:   func(ctx context.Context) error { return update(ctx, updated) },
+	}, nil
 }
 
 func (i *WorkloadInjector) buildContainer(session contracts.DebugSession) corev1.Container {
@@ -529,10 +520,10 @@ func probeTargetsPort(probe *corev1.Probe, container corev1.Container, targetPor
 
 func rewriteProbePort(probe *corev1.Probe, probePort int) {
 	if probe.HTTPGet != nil {
-		probe.HTTPGet.Port = intstr.FromInt32(int32(probePort))
+		probe.HTTPGet.Port = intstr.FromInt(probePort)
 	}
 	if probe.TCPSocket != nil {
-		probe.TCPSocket.Port = intstr.FromInt32(int32(probePort))
+		probe.TCPSocket.Port = intstr.FromInt(probePort)
 	}
 }
 

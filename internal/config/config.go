@@ -47,6 +47,9 @@ type Config struct {
 	KubeConfig   string
 	Registry     string
 	ProjectPaths map[string]string
+	// Version is the krun build version, used to detect a helper or cluster
+	// runtime built from a different version.
+	Version string
 }
 
 func ParseKrunConfig() (KrunConfig, error) {

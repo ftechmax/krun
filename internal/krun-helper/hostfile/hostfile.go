@@ -1,6 +1,7 @@
 package hostfile
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +17,14 @@ const (
 )
 
 var hostsFilePathResolver = defaultHostsFilePath
+
+// File is the machine's hosts file as a value, so callers can depend on the
+// behaviour rather than on this package's functions.
+type File struct{}
+
+func (File) Write(entries []contracts.HostsEntry) error { return Update(entries) }
+
+func (File) Remove() error { return Remove() }
 
 func Update(entries []contracts.HostsEntry) error {
 	path, err := hostsFilePathResolver()
@@ -96,12 +105,18 @@ func writeHosts(path string, content string) error {
 	defer os.Remove(tempName)
 
 	if _, err := tempFile.WriteString(content); err != nil {
-		tempFile.Close()
-		return fmt.Errorf("failed to write temp hosts file: %w", err)
+		closeErr := tempFile.Close()
+		if closeErr != nil {
+			closeErr = fmt.Errorf("failed to close temp hosts file: %w", closeErr)
+		}
+		return errors.Join(fmt.Errorf("failed to write temp hosts file: %w", err), closeErr)
 	}
 	if err := tempFile.Chmod(perm); err != nil {
-		tempFile.Close()
-		return fmt.Errorf("failed to set temp hosts file permissions: %w", err)
+		closeErr := tempFile.Close()
+		if closeErr != nil {
+			closeErr = fmt.Errorf("failed to close temp hosts file: %w", closeErr)
+		}
+		return errors.Join(fmt.Errorf("failed to set temp hosts file permissions: %w", err), closeErr)
 	}
 	if err := tempFile.Close(); err != nil {
 		return fmt.Errorf("failed to close temp hosts file: %w", err)

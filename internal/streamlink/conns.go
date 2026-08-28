@@ -1,9 +1,14 @@
-// Package streamconn tracks the TCP connections bridged over a debug session
-// stream, including half-close state for each direction. A connection is
-// fully torn down once both its read side (local EOF observed) and write
-// side (peer sent close-write) are closed, so protocols where one end
-// half-closes and then waits for a response keep working.
-package streamconn
+// Package streamlink carries a debug session's intercepted traffic over a
+// websocket to the traffic-manager. Both ends of the bridge use it: the
+// traffic-agent (cluster side, intercepting) and the krun-helper (dev-machine
+// side, serving the local app), so the envelope protocol has one definition.
+//
+// Conns tracks the TCP connections bridged over a session stream, including
+// half-close state for each direction. A connection is fully torn down once
+// both its read side (local EOF observed) and write side (peer sent
+// close-write) are closed, so protocols where one end half-closes and then
+// waits for a response keep working.
+package streamlink
 
 import (
 	"net"
@@ -11,7 +16,7 @@ import (
 	"sync"
 )
 
-type Registry struct {
+type Conns struct {
 	mu    sync.Mutex
 	conns map[string]*entry
 }
@@ -22,14 +27,14 @@ type entry struct {
 	writeClosed bool
 }
 
-func NewRegistry() *Registry {
-	return &Registry{
+func NewConns() *Conns {
+	return &Conns{
 		conns: map[string]*entry{},
 	}
 }
 
 // Set registers a connection, closing any previous one under the same id.
-func (r *Registry) Set(connectionID string, conn net.Conn) {
+func (r *Conns) Set(connectionID string, conn net.Conn) {
 	r.mu.Lock()
 	previous, ok := r.conns[connectionID]
 	r.conns[connectionID] = &entry{conn: conn}
@@ -39,7 +44,7 @@ func (r *Registry) Set(connectionID string, conn net.Conn) {
 	}
 }
 
-func (r *Registry) Get(connectionID string) net.Conn {
+func (r *Conns) Get(connectionID string) net.Conn {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if e, ok := r.conns[connectionID]; ok {
@@ -51,7 +56,7 @@ func (r *Registry) Get(connectionID string) net.Conn {
 // MarkReadClosed records that the local read side hit EOF. It reports true
 // when the write side was already closed, in which case the connection has
 // been removed and closed and the caller should emit a final close envelope.
-func (r *Registry) MarkReadClosed(connectionID string) bool {
+func (r *Conns) MarkReadClosed(connectionID string) bool {
 	r.mu.Lock()
 	e, ok := r.conns[connectionID]
 	if !ok {
@@ -73,7 +78,7 @@ func (r *Registry) MarkReadClosed(connectionID string) bool {
 // It reports true when the read side was already closed, in which case the
 // connection has been removed and closed and the caller should emit a final
 // close envelope.
-func (r *Registry) CloseWriteHalf(connectionID string) bool {
+func (r *Conns) CloseWriteHalf(connectionID string) bool {
 	r.mu.Lock()
 	e, ok := r.conns[connectionID]
 	if !ok {
@@ -96,7 +101,7 @@ func (r *Registry) CloseWriteHalf(connectionID string) bool {
 	return false
 }
 
-func (r *Registry) CloseAndDelete(connectionID string) {
+func (r *Conns) CloseAndDelete(connectionID string) {
 	if strings.TrimSpace(connectionID) == "" {
 		return
 	}
@@ -111,7 +116,7 @@ func (r *Registry) CloseAndDelete(connectionID string) {
 	}
 }
 
-func (r *Registry) CloseAll() {
+func (r *Conns) CloseAll() {
 	r.mu.Lock()
 	entries := make([]*entry, 0, len(r.conns))
 	for _, e := range r.conns {

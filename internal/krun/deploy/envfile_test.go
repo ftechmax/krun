@@ -3,6 +3,7 @@ package deploy
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	cfg "github.com/ftechmax/krun/internal/config"
@@ -243,5 +244,35 @@ func TestWriteDotEnv(t *testing.T) {
 	want := "KEY1=value1\nKEY2=value2\n"
 	if string(data) != want {
 		t.Fatalf("got %q, want %q", string(data), want)
+	}
+	assertOwnerOnlyMode(t, filepath.Join(dir, ".env"))
+}
+
+func TestWriteDotEnvCorrectsExistingPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose Unix permission bits")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+	if err := os.WriteFile(path, []byte("OLD=value\n"), 0o644); err != nil {
+		t.Fatalf("seed .env: %v", err)
+	}
+	if err := writeDotEnv(dir, []envVar{{Key: "NEW", Value: "value"}}); err != nil {
+		t.Fatalf("writeDotEnv: %v", err)
+	}
+	assertOwnerOnlyMode(t, path)
+}
+
+func assertOwnerOnlyMode(t *testing.T, path string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("%s permissions = %o, want 600", path, got)
 	}
 }

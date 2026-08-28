@@ -1,19 +1,18 @@
 package stream
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/ftechmax/krun/internal/contracts"
-	"github.com/ftechmax/krun/internal/sessionkey"
-	"github.com/ftechmax/krun/internal/wskeepalive"
+	"github.com/ftechmax/krun/internal/streamlink"
 	"github.com/gorilla/websocket"
 )
 
 const (
 	peerSendQueueSize = 1024
-	writeTimeout      = 10 * time.Second
 	sendGraceTimeout  = 5 * time.Second
 )
 
@@ -47,49 +46,22 @@ func NewSessionRelayRegistry() *SessionRelayRegistry {
 	}
 }
 
+// ServePeer relays one attached peer until it disconnects. It blocks for the
+// lifetime of the websocket connection.
 func (h *SessionRelayRegistry) ServePeer(role string, sessionID string, conn *websocket.Conn) {
 	peer := &relayPeer{
-		role:      sessionkey.Trim(role),
-		sessionID: sessionkey.Trim(sessionID),
+		role:      strings.TrimSpace(role),
+		sessionID: strings.TrimSpace(sessionID),
 		conn:      conn,
 		sendCh:    make(chan contracts.StreamEnvelope, peerSendQueueSize),
 	}
 
 	h.register(peer)
 	defer h.unregister(peer)
-	defer peer.conn.Close()
 
-	wskeepalive.Configure(peer.conn)
-	pingDone := make(chan struct{})
-	defer close(pingDone)
-	go wskeepalive.Ping(peer.conn, pingDone)
-
-	readErrCh := make(chan error, 1)
-	envelopeCh := make(chan contracts.StreamEnvelope, 128)
-	go func() {
-		for {
-			var envelope contracts.StreamEnvelope
-			if err := peer.conn.ReadJSON(&envelope); err != nil {
-				readErrCh <- err
-				return
-			}
-			envelopeCh <- envelope
-		}
-	}()
-
-	for {
-		select {
-		case envelope := <-envelopeCh:
-			h.routeFromPeer(peer, envelope)
-		case outbound := <-peer.sendCh:
-			_ = peer.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-			if err := peer.conn.WriteJSON(outbound); err != nil {
-				return
-			}
-		case <-readErrCh:
-			return
-		}
-	}
+	_ = streamlink.Serve(context.Background(), peer.conn, peer.sendCh, func(envelope contracts.StreamEnvelope) {
+		h.routeFromPeer(peer, envelope)
+	})
 }
 
 func (h *SessionRelayRegistry) register(peer *relayPeer) {

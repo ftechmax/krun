@@ -68,6 +68,7 @@ func main() {
 	}
 	deployCmd.Flags().Bool("use-remote-registry", false, "Use remote registry for deploy")
 	deployCmd.Flags().Bool("no-restart", false, "Skip rollout restart after apply")
+	deployCmd.Flags().Bool("create-namespace", false, "Create target namespaces if they do not exist")
 	rootCmd.AddCommand(deployCmd)
 
 	deleteCmd := &cobra.Command{
@@ -166,6 +167,7 @@ func initialize(_ *cobra.Command, optKubeConfig string) {
 
 	config = cfg.Config{
 		KrunConfig: krunConfig,
+		Version:    version,
 	}
 
 	if optKubeConfig != "" {
@@ -254,6 +256,7 @@ func handleBuild(cmd *cobra.Command, args []string) {
 func handleDeploy(cmd *cobra.Command, args []string) {
 	useRemote, _ := cmd.Flags().GetBool("use-remote-registry")
 	noRestart, _ := cmd.Flags().GetBool("no-restart")
+	createNamespace, _ := cmd.Flags().GetBool("create-namespace")
 	argServiceName := args[0]
 	if useRemote {
 		config.Registry = config.RemoteRegistry
@@ -263,7 +266,7 @@ func handleDeploy(cmd *cobra.Command, args []string) {
 		fmt.Println(utils.Colorize(err.Error(), utils.Red))
 		return
 	}
-	deploy.Deploy(projectName, config, !noRestart)
+	deploy.Deploy(projectName, config, !noRestart, createNamespace)
 }
 
 func handleDelete(cmd *cobra.Command, args []string) {
@@ -283,37 +286,31 @@ func handleDebugList(cmd *cobra.Command, args []string) {
 func handleDebugEnable(cmd *cobra.Command, args []string) {
 	containerName, _ := cmd.Flags().GetString("container")
 
-	argServiceName := args[0]
-	service := cfg.Service{}
-	for _, s := range services {
-		if s.Name == argServiceName {
-			service = s
-			break
-		}
-	}
-	if service.Name == "" {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Service not found: %s", argServiceName), utils.Red))
+	service, ok := findService(args[0])
+	if !ok {
 		return
 	}
-	fmt.Printf("Enabling debug mode for service %s\n", argServiceName)
+	fmt.Printf("Enabling debug mode for service %s\n", service.Name)
 	debug.Enable(service, config, containerName)
 }
 
 func handleDebugDisable(cmd *cobra.Command, args []string) {
-	argServiceName := args[0]
-	service := cfg.Service{}
-	for _, s := range services {
-		if s.Name == argServiceName {
-			service = s
-			break
-		}
-	}
-	if service.Name == "" {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Service not found: %s", argServiceName), utils.Red))
+	service, ok := findService(args[0])
+	if !ok {
 		return
 	}
-	fmt.Printf("Disabling debug mode for service %s\n", argServiceName)
+	fmt.Printf("Disabling debug mode for service %s\n", service.Name)
 	debug.Disable(service, config)
+}
+
+func findService(name string) (cfg.Service, bool) {
+	for _, service := range services {
+		if service.Name == name {
+			return service, true
+		}
+	}
+	fmt.Println(utils.Colorize(fmt.Sprintf("Service not found: %s", name), utils.Red))
+	return cfg.Service{}, false
 }
 
 func handleDebugHelperStatus(cmd *cobra.Command, args []string) {

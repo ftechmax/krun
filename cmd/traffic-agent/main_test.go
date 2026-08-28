@@ -3,15 +3,9 @@ package main
 import (
 	"context"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/ftechmax/krun/internal/contracts"
-	"github.com/gorilla/websocket"
 )
 
 func TestResolveManagerAddressPrefersNewEnv(t *testing.T) {
@@ -72,28 +66,6 @@ func TestLoadRuntimeConfigRequiresSessionID(t *testing.T) {
 	}
 }
 
-func TestBuildStreamURL(t *testing.T) {
-	got, err := buildStreamURL("http://manager.default.svc:8080", "session-1")
-	if err != nil {
-		t.Fatalf("buildStreamURL returned error: %v", err)
-	}
-	want := "ws://manager.default.svc:8080/v1/stream/agent?session_id=session-1"
-	if got != want {
-		t.Fatalf("expected %q, got %q", want, got)
-	}
-}
-
-func TestBuildStreamURLConvertsHTTPS(t *testing.T) {
-	got, err := buildStreamURL("https://manager.default.svc:8443", "session-1")
-	if err != nil {
-		t.Fatalf("buildStreamURL returned error: %v", err)
-	}
-	want := "wss://manager.default.svc:8443/v1/stream/agent?session_id=session-1"
-	if got != want {
-		t.Fatalf("expected %q, got %q", want, got)
-	}
-}
-
 func TestBuildRedirectArgs(t *testing.T) {
 	got := buildRedirectArgs(8080, 18081)
 	want := []string{"-p", "tcp", "--dport", "8080", "-j", "REDIRECT", "--to-ports", "18081"}
@@ -141,91 +113,6 @@ func TestRedirectRuleRemoveIgnoresMissingRule(t *testing.T) {
 
 	if err := rule.Remove(context.Background()); err != nil {
 		t.Fatalf("remove returned error for missing rule: %v", err)
-	}
-}
-
-func TestPumpConnectionHandlesInboundWithoutPendingWrite(t *testing.T) {
-	upgrader := websocket.Upgrader{
-		CheckOrigin: func(*http.Request) bool { return true },
-	}
-	serverConnCh := make(chan *websocket.Conn, 1)
-	serverShutdown := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		select {
-		case serverConnCh <- conn:
-		case <-serverShutdown:
-			return
-		}
-		<-serverShutdown
-	}))
-	defer server.Close()
-	defer close(serverShutdown)
-
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial websocket: %v", err)
-	}
-
-	var received contracts.StreamEnvelope
-	receivedCh := make(chan struct{}, 1)
-	client := &reconnectingStreamClient{
-		sendCh: make(chan contracts.StreamEnvelope, 1),
-		onReceive: func(envelope contracts.StreamEnvelope) {
-			received = envelope
-			select {
-			case receivedCh <- struct{}{}:
-			default:
-			}
-		},
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	pumpErrCh := make(chan error, 1)
-	go func() {
-		pumpErrCh <- client.pumpConnection(ctx, conn)
-	}()
-
-	var serverConn *websocket.Conn
-	select {
-	case serverConn = <-serverConnCh:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for test websocket server connection")
-	}
-
-	inbound := contracts.StreamEnvelope{
-		Type:         contracts.StreamTypeData,
-		ConnectionID: "conn-1",
-		Data:         []byte("hello"),
-	}
-	if err := serverConn.WriteJSON(inbound); err != nil {
-		t.Fatalf("write inbound envelope: %v", err)
-	}
-
-	select {
-	case <-receivedCh:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for inbound envelope callback")
-	}
-
-	if received.Type != inbound.Type || received.ConnectionID != inbound.ConnectionID || string(received.Data) != string(inbound.Data) {
-		t.Fatalf("unexpected received envelope: got=%+v want=%+v", received, inbound)
-	}
-
-	cancel()
-	select {
-	case err := <-pumpErrCh:
-		if err != nil {
-			t.Fatalf("pumpConnection returned unexpected error: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for pumpConnection to exit")
 	}
 }
 

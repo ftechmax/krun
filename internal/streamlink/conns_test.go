@@ -1,4 +1,4 @@
-package streamconn
+package streamlink
 
 import (
 	"net"
@@ -16,7 +16,7 @@ func newPipeConn(t *testing.T) net.Conn {
 }
 
 func TestHalfCloseReadThenWrite(t *testing.T) {
-	registry := NewRegistry()
+	registry := NewConns()
 	registry.Set("c1", newPipeConn(t))
 
 	if registry.MarkReadClosed("c1") {
@@ -34,7 +34,7 @@ func TestHalfCloseReadThenWrite(t *testing.T) {
 }
 
 func TestHalfCloseWriteThenRead(t *testing.T) {
-	registry := NewRegistry()
+	registry := NewConns()
 	registry.Set("c1", newPipeConn(t))
 
 	if registry.CloseWriteHalf("c1") {
@@ -52,7 +52,7 @@ func TestHalfCloseWriteThenRead(t *testing.T) {
 }
 
 func TestUnknownConnectionIsNoop(t *testing.T) {
-	registry := NewRegistry()
+	registry := NewConns()
 	if registry.MarkReadClosed("missing") || registry.CloseWriteHalf("missing") {
 		t.Fatal("unknown connection ids must report not-fully-closed")
 	}
@@ -60,7 +60,7 @@ func TestUnknownConnectionIsNoop(t *testing.T) {
 }
 
 func TestSetReplacesPreviousConnection(t *testing.T) {
-	registry := NewRegistry()
+	registry := NewConns()
 	first := newPipeConn(t)
 	second := newPipeConn(t)
 

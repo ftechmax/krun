@@ -1,11 +1,45 @@
 package session
 
 import (
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/ftechmax/krun/internal/contracts"
 )
+
+func TestCreateEntropyFailureDoesNotSupersedeExistingSession(t *testing.T) {
+	registry := NewDebugSessionRegistry()
+	request := contracts.CreateDebugSessionRequest{
+		Namespace:   "shop",
+		ServiceName: "orders-api",
+		ServicePort: 8080,
+		LocalPort:   5005,
+	}
+	existing, err := registry.Create(request)
+	if err != nil {
+		t.Fatalf("create existing session: %v", err)
+	}
+
+	entropyErr := errors.New("entropy unavailable")
+	calls := 0
+	registry.randomHex = func(int) (string, error) {
+		calls++
+		if calls == 2 {
+			return "", entropyErr
+		}
+		return "new-session-id", nil
+	}
+	if _, err := registry.Create(request); !errors.Is(err, entropyErr) {
+		t.Fatalf("Create error = %v, want %v", err, entropyErr)
+	}
+	if _, ok := registry.Get(existing.SessionID); !ok {
+		t.Fatal("existing session was removed after token generation failed")
+	}
+	if got := len(registry.List()); got != 1 {
+		t.Fatalf("registry contains %d sessions, want 1", got)
+	}
+}
 
 func TestDebugSessionRegistryCreateListDelete(t *testing.T) {
 	registry := NewDebugSessionRegistry()

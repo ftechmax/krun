@@ -2,6 +2,7 @@ package portforward
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"fmt"
 	"io"
@@ -14,7 +15,6 @@ import (
 
 	"github.com/ftechmax/krun/internal/contracts"
 	"github.com/ftechmax/krun/internal/kube"
-	"github.com/ftechmax/krun/internal/sessionkey"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -71,7 +71,7 @@ func (r *SessionRegistry) Upsert(sessionKey string, forwards []contracts.PortFor
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	key := sessionkey.Normalize(sessionKey)
+	key := normalizeSessionKey(sessionKey)
 	normalized := normalizePortForwards(forwards)
 	if len(normalized) == 0 {
 		return r.removeLocked(key)
@@ -138,7 +138,7 @@ func (r *SessionRegistry) BoundLocalPort(sessionKey string, forward contracts.Po
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	handles, ok := r.sessions[sessionkey.Normalize(sessionKey)]
+	handles, ok := r.sessions[normalizeSessionKey(sessionKey)]
 	if !ok {
 		return 0, false
 	}
@@ -165,7 +165,7 @@ func (r *SessionRegistry) Clear() error {
 }
 
 func (r *SessionRegistry) removeLocked(sessionKey string) error {
-	if sessionkey.IsBlank(sessionKey) {
+	if strings.TrimSpace(sessionKey) == "" {
 		for _, handles := range r.sessions {
 			for forwardKey, handle := range handles {
 				fmt.Printf("Stopping port-forward %s/%s:%d -> 127.0.0.1:%d\n", handle.spec.Namespace, handle.spec.Service, handle.spec.RemotePort, handle.spec.LocalPort)
@@ -176,7 +176,7 @@ func (r *SessionRegistry) removeLocked(sessionKey string) error {
 		return nil
 	}
 
-	key := sessionkey.Normalize(sessionKey)
+	key := normalizeSessionKey(sessionKey)
 	handles, ok := r.sessions[key]
 	if !ok {
 		return nil
@@ -502,30 +502,12 @@ func normalizePortForwards(forwards []contracts.PortForward) []contracts.PortFor
 	}
 
 	slices.SortFunc(normalized, func(a, b contracts.PortForward) int {
-		if a.Namespace == b.Namespace {
-			if a.Service == b.Service {
-				if a.LocalPort == b.LocalPort {
-					switch {
-					case a.RemotePort < b.RemotePort:
-						return -1
-					case a.RemotePort > b.RemotePort:
-						return 1
-					default:
-						return 0
-					}
-				}
-				switch {
-				case a.LocalPort < b.LocalPort:
-					return -1
-				case a.LocalPort > b.LocalPort:
-					return 1
-				default:
-					return 0
-				}
-			}
-			return strings.Compare(a.Service, b.Service)
-		}
-		return strings.Compare(a.Namespace, b.Namespace)
+		return cmp.Or(
+			strings.Compare(a.Namespace, b.Namespace),
+			strings.Compare(a.Service, b.Service),
+			cmp.Compare(a.LocalPort, b.LocalPort),
+			cmp.Compare(a.RemotePort, b.RemotePort),
+		)
 	})
 
 	return normalized
@@ -533,4 +515,13 @@ func normalizePortForwards(forwards []contracts.PortForward) []contracts.PortFor
 
 func portForwardKey(forward contracts.PortForward) string {
 	return fmt.Sprintf("%s|%s|%d|%d", forward.Namespace, forward.Service, forward.LocalPort, forward.RemotePort)
+}
+
+// normalizeSessionKey gives unkeyed forwards a stable bucket of their own so
+// they cannot collide with a real session.
+func normalizeSessionKey(sessionKey string) string {
+	if trimmed := strings.TrimSpace(sessionKey); trimmed != "" {
+		return trimmed
+	}
+	return "__default__"
 }

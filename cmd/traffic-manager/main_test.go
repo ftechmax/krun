@@ -12,15 +12,33 @@ import (
 
 	"github.com/ftechmax/krun/internal/contracts"
 	"github.com/ftechmax/krun/internal/traffic-manager/agent"
-	sessionregistry "github.com/ftechmax/krun/internal/traffic-manager/session"
-	streamrelay "github.com/ftechmax/krun/internal/traffic-manager/stream"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kubefake "k8s.io/client-go/kubernetes/fake"
 )
 
+func TestInitializeAuthTokenEntropyFailureDoesNotCreateSecret(t *testing.T) {
+	clientset := kubefake.NewSimpleClientset()
+	entropyErr := errors.New("entropy unavailable")
+
+	_, err := initializeAuthTokenWithGenerator(context.Background(), clientset, func() (string, error) {
+		return "", entropyErr
+	})
+	if !errors.Is(err, entropyErr) {
+		t.Fatalf("initializeAuthToken error = %v, want %v", err, entropyErr)
+	}
+	secrets, err := clientset.CoreV1().Secrets(managerNamespace).List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("list secrets: %v", err)
+	}
+	if len(secrets.Items) != 0 {
+		t.Fatalf("created secrets after entropy failure: %+v", secrets.Items)
+	}
+}
+
 func TestSessionsLifecycle(t *testing.T) {
-	resetSessionState(t)
 	fake := &fakeInjector{}
-	sidecarBridge = fake
-	handler := newHandler()
+	s := newTestServer(fake)
+	handler := newHandler(s)
 
 	createPayload, _ := json.Marshal(contracts.CreateDebugSessionRequest{
 		ServiceName: "orders-api",
@@ -95,9 +113,7 @@ func TestSessionsLifecycle(t *testing.T) {
 }
 
 func TestCreateSessionValidation(t *testing.T) {
-	resetSessionState(t)
-	sidecarBridge = &fakeInjector{}
-	handler := newHandler()
+	handler := newHandler(newTestServer(&fakeInjector{}))
 
 	payload := []byte(`{"service_name":"orders-api","service_port":8080}`)
 	req := newAuthedRequest(http.MethodPost, "/v1/sessions", bytes.NewReader(payload))
@@ -110,9 +126,7 @@ func TestCreateSessionValidation(t *testing.T) {
 }
 
 func TestSessionMethodsAndNotFound(t *testing.T) {
-	resetSessionState(t)
-	sidecarBridge = &fakeInjector{}
-	handler := newHandler()
+	handler := newHandler(newTestServer(&fakeInjector{}))
 
 	methodReq := newAuthedRequest(http.MethodPut, "/v1/sessions", nil)
 	methodRec := httptest.NewRecorder()
@@ -130,11 +144,10 @@ func TestSessionMethodsAndNotFound(t *testing.T) {
 }
 
 func TestCreateSessionRollsBackWhenInjectFails(t *testing.T) {
-	resetSessionState(t)
-	sidecarBridge = &fakeInjector{
+	s := newTestServer(&fakeInjector{
 		injectErr: errors.New("inject failed"),
-	}
-	handler := newHandler()
+	})
+	handler := newHandler(s)
 
 	createPayload, _ := json.Marshal(contracts.CreateDebugSessionRequest{
 		ServiceName: "orders-api",
@@ -163,12 +176,9 @@ func TestCreateSessionRollsBackWhenInjectFails(t *testing.T) {
 }
 
 func TestDeleteSessionReturnsServerErrorWhenRemoveFails(t *testing.T) {
-	resetSessionState(t)
-	fake := &fakeInjector{
+	handler := newHandler(newTestServer(&fakeInjector{
 		removeErr: errors.New("remove failed"),
-	}
-	sidecarBridge = fake
-	handler := newHandler()
+	}))
 
 	createPayload, _ := json.Marshal(contracts.CreateDebugSessionRequest{
 		ServiceName: "orders-api",
@@ -207,11 +217,10 @@ func TestDeleteSessionReturnsServerErrorWhenRemoveFails(t *testing.T) {
 }
 
 func TestDeleteSessionIgnoresMissingWorkloadOnRemove(t *testing.T) {
-	resetSessionState(t)
-	sidecarBridge = &fakeInjector{
+	s := newTestServer(&fakeInjector{
 		removeErr: agent.ErrWorkloadNotFound,
-	}
-	handler := newHandler()
+	})
+	handler := newHandler(s)
 
 	createPayload, _ := json.Marshal(contracts.CreateDebugSessionRequest{
 		ServiceName: "orders-api",
@@ -239,8 +248,7 @@ func TestDeleteSessionIgnoresMissingWorkloadOnRemove(t *testing.T) {
 }
 
 func TestStreamAttachMethodNotAllowed(t *testing.T) {
-	resetSessionState(t)
-	handler := newHandler()
+	handler := newHandler(newTestServer(&fakeInjector{}))
 
 	req := newAuthedRequest(http.MethodPost, "/v1/stream/agent", nil)
 	rec := httptest.NewRecorder()
@@ -251,9 +259,9 @@ func TestStreamAttachMethodNotAllowed(t *testing.T) {
 }
 
 func TestStreamAttachRequiresValidSessionAndToken(t *testing.T) {
-	resetSessionState(t)
+	s := newTestServer(&fakeInjector{})
 
-	created, err := sessionRegistry.Create(contracts.CreateDebugSessionRequest{
+	created, err := s.sessions.Create(contracts.CreateDebugSessionRequest{
 		ServiceName: "orders-api",
 		ServicePort: 8080,
 		LocalPort:   5000,
@@ -265,25 +273,23 @@ func TestStreamAttachRequiresValidSessionAndToken(t *testing.T) {
 
 	missingToken := newAuthedRequest(http.MethodGet, "/v1/stream/agent?session_id="+created.SessionID, nil)
 	missingTokenRec := httptest.NewRecorder()
-	handleStreamAttach(missingTokenRec, missingToken, contracts.StreamRoleAgent)
+	s.handleStreamAttach(missingTokenRec, missingToken, contracts.StreamRoleAgent)
 	if missingTokenRec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected status 401, got %d", missingTokenRec.Code)
 	}
 
 	invalidSession := newAuthedRequest(http.MethodGet, "/v1/stream/agent?session_id=unknown&session_token=abc", nil)
 	invalidSessionRec := httptest.NewRecorder()
-	handleStreamAttach(invalidSessionRec, invalidSession, contracts.StreamRoleAgent)
+	s.handleStreamAttach(invalidSessionRec, invalidSession, contracts.StreamRoleAgent)
 	if invalidSessionRec.Code != http.StatusNotFound {
 		t.Fatalf("expected status 404, got %d", invalidSessionRec.Code)
 	}
 }
 
 func TestCleanupDanglingAgents(t *testing.T) {
-	resetSessionState(t)
 	fake := &fakeInjector{}
-	sidecarBridge = fake
 
-	if err := cleanupDanglingAgents(context.Background()); err != nil {
+	if err := newTestServer(fake).cleanupDanglingAgents(context.Background()); err != nil {
 		t.Fatalf("cleanup dangling agents: %v", err)
 	}
 	if fake.cleanupCalls != 1 {
@@ -292,24 +298,19 @@ func TestCleanupDanglingAgents(t *testing.T) {
 }
 
 func TestCleanupDanglingAgentsReturnsError(t *testing.T) {
-	resetSessionState(t)
 	cleanupErr := errors.New("cleanup failed")
 	fake := &fakeInjector{
 		cleanupErr: cleanupErr,
 	}
-	sidecarBridge = fake
 
-	err := cleanupDanglingAgents(context.Background())
+	err := newTestServer(fake).cleanupDanglingAgents(context.Background())
 	if !errors.Is(err, cleanupErr) {
 		t.Fatalf("expected cleanup error %v, got %v", cleanupErr, err)
 	}
 }
 
-func resetSessionState(t *testing.T) {
-	t.Helper()
-	sessionRegistry = sessionregistry.NewDebugSessionRegistry()
-	sidecarBridge = agent.NoopInjector{}
-	relayRegistry = streamrelay.NewSessionRelayRegistry()
+func newTestServer(injector agent.Injector) *server {
+	return newServer(injector, testAuthToken)
 }
 
 type fakeInjector struct {
@@ -338,10 +339,6 @@ func (f *fakeInjector) Cleanup(_ context.Context) error {
 
 const testAuthToken = "test-auth-token"
 
-func init() {
-	managerAuthToken = testAuthToken
-}
-
 // newAuthedRequest builds a test request carrying the session-API auth
 // token. Harmless on unauthenticated routes (healthz, streams).
 func newAuthedRequest(method string, target string, body io.Reader) *http.Request {
@@ -351,8 +348,7 @@ func newAuthedRequest(method string, target string, body io.Reader) *http.Reques
 }
 
 func TestSessionsRequireAuthToken(t *testing.T) {
-	sessionRegistry.Clear()
-	handler := newHandler()
+	handler := newHandler(newTestServer(&fakeInjector{}))
 
 	noToken := httptest.NewRequest(http.MethodGet, "/v1/sessions", nil)
 	rec := httptest.NewRecorder()

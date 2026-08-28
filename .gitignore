@@ -9,6 +9,8 @@
 *.dylib
 /krun
 /krun-helper
+/traffic-manager
+/traffic-agent
 !scripts/*.exe
 !scripts/*.dll
 
