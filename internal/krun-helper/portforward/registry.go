@@ -91,7 +91,6 @@ func (r *SessionRegistry) Upsert(sessionKey string, forwards []contracts.PortFor
 			continue
 		}
 
-		// Check if another session already owns this forward.
 		if sf, ok := r.shared[forwardKey]; ok {
 			sf.refCount++
 			next[forwardKey] = sf.handle

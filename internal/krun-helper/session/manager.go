@@ -68,7 +68,11 @@ type Options struct {
 }
 
 type Manager struct {
-	mu       sync.Mutex
+	// ops serializes lifecycle mutations. mu protects only the sessions map;
+	// when both are needed the order is ops then mu. Slow external operations
+	// must never run while mu is held, so List remains responsive during them.
+	ops      sync.Mutex
+	mu       sync.RWMutex
 	sessions map[string]*Session
 
 	hosts    HostsFile
@@ -95,11 +99,12 @@ func (m *Manager) Enable(sessionKey string, serviceContext contracts.DebugServic
 		return errors.New("session key or context.service_name is required")
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.ops.Lock()
+	defer m.ops.Unlock()
 
-	if previous, ok := m.sessions[key]; ok {
-		if err := m.removeForReplacementLocked(previous); err != nil {
+	previous, replacing := m.session(key)
+	if replacing {
+		if err := m.removeForReplacement(previous); err != nil {
 			return err
 		}
 	}
@@ -115,6 +120,24 @@ func (m *Manager) Enable(sessionKey string, serviceContext contracts.DebugServic
 		run  func() error
 	}
 	var undo []rollback
+	if replacing {
+		// The previous manager session and stream are gone, but its hosts and
+		// forwards deliberately remain so Upsert can reuse live handles. Own
+		// their cleanup before the first fallible replacement write.
+		undo = append(undo, rollback{
+			step: "remove preserved replacement local state",
+			run: func() error {
+				var failures []error
+				if err := m.forwards.Remove(key); err != nil {
+					failures = append(failures, fmt.Errorf("remove port-forwards: %w", err))
+				}
+				if err := m.hosts.Write(m.mergedHosts(nil)); err != nil {
+					failures = append(failures, fmt.Errorf("restore hosts file: %w", err))
+				}
+				return errors.Join(failures...)
+			},
+		})
+	}
 	fail := func(step string, err error) error {
 		var rollbackFailures []string
 		for i := len(undo) - 1; i >= 0; i-- {
@@ -124,27 +147,31 @@ func (m *Manager) Enable(sessionKey string, serviceContext contracts.DebugServic
 		}
 		if len(rollbackFailures) > 0 {
 			session.State = contracts.HelperSessionStateCleanupPending
-			m.sessions[key] = session
+			m.storeSession(session)
 			return fmt.Errorf("%s: %w (rollback failed: %s)", step, err, strings.Join(rollbackFailures, "; "))
 		}
 		return fmt.Errorf("%s: %w", step, err)
 	}
 
-	if err := m.hosts.Write(m.mergedHostsLocked(session)); err != nil {
+	if err := m.hosts.Write(m.mergedHosts(session)); err != nil {
 		return fail("hostfile update failed", err)
 	}
-	undo = append(undo, rollback{
-		step: "restore hosts file",
-		run:  func() error { return m.hosts.Write(m.mergedHostsLocked(nil)) },
-	})
+	if !replacing {
+		undo = append(undo, rollback{
+			step: "restore hosts file",
+			run:  func() error { return m.hosts.Write(m.mergedHosts(nil)) },
+		})
+	}
 
 	if err := m.forwards.Upsert(key, portForwardsFor(serviceContext)); err != nil {
 		return fail("port-forward update failed", err)
 	}
-	undo = append(undo, rollback{
-		step: "remove port-forwards",
-		run:  func() error { return m.forwards.Remove(key) },
-	})
+	if !replacing {
+		undo = append(undo, rollback{
+			step: "remove port-forwards",
+			run:  func() error { return m.forwards.Remove(key) },
+		})
+	}
 
 	managerSession, err := m.api.CreateSession(serviceContext)
 	if err != nil {
@@ -168,7 +195,7 @@ func (m *Manager) Enable(sessionKey string, serviceContext contracts.DebugServic
 	}
 	session.stream = stream
 
-	m.sessions[key] = session
+	m.storeSession(session)
 	return nil
 }
 
@@ -180,26 +207,25 @@ func (m *Manager) Disable(sessionKey string, serviceContext contracts.DebugServi
 		return false, errors.New("session key or context.service_name is required")
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.ops.Lock()
+	defer m.ops.Unlock()
 
-	session, ok := m.sessions[key]
+	session, ok := m.takeSession(key)
 	if !ok {
 		return false, nil
 	}
-	delete(m.sessions, key)
 
-	if failures := m.teardownLocked(session); len(failures) > 0 {
+	if failures := m.teardown(session); len(failures) > 0 {
 		session.State = contracts.HelperSessionStateCleanupPending
-		m.sessions[key] = session
+		m.storeSession(session)
 		return true, errors.New(strings.Join(failures, "; "))
 	}
 	return true, nil
 }
 
 func (m *Manager) List() []contracts.HelperDebugSession {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
 	list := make([]contracts.HelperDebugSession, 0, len(m.sessions))
 	for _, session := range m.sessions {
@@ -218,12 +244,16 @@ func (m *Manager) List() []contracts.HelperDebugSession {
 // Close releases local resources. Manager-side sessions remain until a later
 // enable replaces them or manager startup cleanup removes their sidecars.
 func (m *Manager) Close() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.ops.Lock()
+	defer m.ops.Unlock()
 
-	for key, session := range m.sessions {
+	m.mu.Lock()
+	sessions := m.sessions
+	m.sessions = map[string]*Session{}
+	m.mu.Unlock()
+
+	for _, session := range sessions {
 		session.closeStream()
-		delete(m.sessions, key)
 	}
 	var failures []error
 	if err := m.forwards.Clear(); err != nil {
@@ -235,36 +265,25 @@ func (m *Manager) Close() error {
 	return errors.Join(failures...)
 }
 
-func (m *Manager) removeForReplacementLocked(previous *Session) error {
+func (m *Manager) removeForReplacement(previous *Session) error {
 	// Delete the manager session before touching its stream or local state. If
 	// deletion succeeds, replacement is destructive even if later cleanup fails.
 	if previous.ManagerID != "" {
 		if err := m.api.DeleteSession(previous.ManagerID); err != nil {
 			return fmt.Errorf("replace previous manager session: %w", err)
 		}
-		previous.ManagerID = ""
 	}
 
+	// Once the manager deletion succeeds, replacement is destructive. Remove
+	// the old value from List before closing its stream or doing more network
+	// work; reporting it as active from this point would be stale.
+	m.takeSession(previous.Key)
+	previous.ManagerID = ""
 	previous.closeStream()
-	delete(m.sessions, previous.Key)
-
-	var failures []string
-	if err := m.forwards.Remove(previous.Key); err != nil {
-		failures = append(failures, fmt.Sprintf("port-forward remove failed: %v", err))
-	}
-	if err := m.hosts.Write(m.mergedHostsLocked(nil)); err != nil {
-		failures = append(failures, fmt.Sprintf("hostfile remove failed: %v", err))
-	}
-	if len(failures) == 0 {
-		return nil
-	}
-
-	previous.State = contracts.HelperSessionStateCleanupPending
-	m.sessions[previous.Key] = previous
-	return fmt.Errorf("replace previous session cleanup failed: %s", strings.Join(failures, "; "))
+	return nil
 }
 
-func (m *Manager) teardownLocked(session *Session) []string {
+func (m *Manager) teardown(session *Session) []string {
 	var failures []string
 
 	session.closeStream()
@@ -279,16 +298,19 @@ func (m *Manager) teardownLocked(session *Session) []string {
 	if err := m.forwards.Remove(session.Key); err != nil {
 		failures = append(failures, fmt.Sprintf("port-forward remove failed: %v", err))
 	}
-	if err := m.hosts.Write(m.mergedHostsLocked(nil)); err != nil {
+	if err := m.hosts.Write(m.mergedHosts(nil)); err != nil {
 		failures = append(failures, fmt.Sprintf("hostfile remove failed: %v", err))
 	}
 	return failures
 }
 
-// mergedHostsLocked is the union of hosts entries across every stored session
-// plus pending, if given. krun keeps one block in the hosts file for all
-// sessions, so every change rewrites the whole union.
-func (m *Manager) mergedHostsLocked(pending *Session) []contracts.HostsEntry {
+// mergedHosts snapshots the union of hosts entries across every stored
+// session plus pending, if given. krun keeps one block in the hosts file for
+// all sessions, so every change rewrites the whole union.
+func (m *Manager) mergedHosts(pending *Session) []contracts.HostsEntry {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
 	contexts := make([]contracts.DebugServiceContext, 0, len(m.sessions)+1)
 	for _, session := range m.sessions {
 		contexts = append(contexts, session.Context)
@@ -297,6 +319,29 @@ func (m *Manager) mergedHostsLocked(pending *Session) []contracts.HostsEntry {
 		contexts = append(contexts, pending.Context)
 	}
 	return mergeHostEntries(contexts)
+}
+
+func (m *Manager) session(key string) (*Session, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	session, ok := m.sessions[key]
+	return session, ok
+}
+
+func (m *Manager) storeSession(session *Session) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sessions[session.Key] = session
+}
+
+func (m *Manager) takeSession(key string) (*Session, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	session, ok := m.sessions[key]
+	if ok {
+		delete(m.sessions, key)
+	}
+	return session, ok
 }
 
 func normalizedState(state string) string {

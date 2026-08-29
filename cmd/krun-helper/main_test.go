@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -122,6 +124,67 @@ func TestShutdownSignalsTheDaemon(t *testing.T) {
 	}
 }
 
+func TestUnexpectedServeErrorStillCleansResources(t *testing.T) {
+	serveErr := errors.New("serve failed")
+	cleanupErr := errors.New("cleanup failed")
+	serverErrors := make(chan error, 1)
+	serverErrors <- serveErr
+	cleanupCalls := 0
+
+	err := runHelperServer(
+		&fakeServerControl{},
+		serverErrors,
+		make(chan os.Signal),
+		make(chan struct{}),
+		func() error {
+			cleanupCalls++
+			return cleanupErr
+		},
+	)
+	if !errors.Is(err, serveErr) || !errors.Is(err, cleanupErr) {
+		t.Fatalf("expected joined serve and cleanup errors, got %v", err)
+	}
+	if cleanupCalls != 1 {
+		t.Fatalf("cleanup calls = %d, want 1", cleanupCalls)
+	}
+}
+
+func TestShutdownFailureClosesServerAndStillCleansResources(t *testing.T) {
+	shutdownErr := errors.New("shutdown timed out")
+	closeErr := errors.New("forced close failed")
+	cleanupErr := errors.New("cleanup failed")
+	serverErrors := make(chan error, 1)
+	control := &fakeServerControl{
+		shutdownErr: shutdownErr,
+		closeErr:    closeErr,
+		onShutdown: func() {
+			serverErrors <- http.ErrServerClosed
+		},
+	}
+	shutdown := make(chan struct{}, 1)
+	shutdown <- struct{}{}
+	cleanupCalls := 0
+
+	err := runHelperServer(
+		control,
+		serverErrors,
+		make(chan os.Signal),
+		shutdown,
+		func() error {
+			cleanupCalls++
+			return cleanupErr
+		},
+	)
+	for _, target := range []error{shutdownErr, closeErr, cleanupErr} {
+		if !errors.Is(err, target) {
+			t.Fatalf("expected error %v in %v", target, err)
+		}
+	}
+	if control.shutdownCalls != 1 || control.closeCalls != 1 || cleanupCalls != 1 {
+		t.Fatalf("calls: shutdown=%d close=%d cleanup=%d", control.shutdownCalls, control.closeCalls, cleanupCalls)
+	}
+}
+
 func TestMethodGuard(t *testing.T) {
 	handler, _ := newTestDaemon(t, nil)
 
@@ -222,3 +285,24 @@ func (stubAPI) DeleteSession(string) error { return nil }
 type stubStream struct{}
 
 func (stubStream) Close() {}
+
+type fakeServerControl struct {
+	shutdownErr   error
+	closeErr      error
+	onShutdown    func()
+	shutdownCalls int
+	closeCalls    int
+}
+
+func (f *fakeServerControl) Shutdown(context.Context) error {
+	f.shutdownCalls++
+	if f.onShutdown != nil {
+		f.onShutdown()
+	}
+	return f.shutdownErr
+}
+
+func (f *fakeServerControl) Close() error {
+	f.closeCalls++
+	return f.closeErr
+}

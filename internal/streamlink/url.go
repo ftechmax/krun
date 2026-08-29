@@ -15,9 +15,9 @@ const (
 
 // URL turns a manager address into a websocket stream URL for one session.
 // The address may omit the scheme (http is assumed) and may carry a base path,
-// which the stream path is appended to. A blank sessionToken is omitted from
-// the query rather than sent empty.
-func URL(managerAddress string, path string, sessionID string, sessionToken string) (string, error) {
+// which the stream path is appended to. Authentication belongs in request
+// headers and is never placed in the URL.
+func URL(managerAddress string, path string, sessionID string) (string, error) {
 	rawAddress := strings.TrimSpace(managerAddress)
 	if rawAddress == "" {
 		return "", errors.New("manager address is required")
@@ -47,9 +47,6 @@ func URL(managerAddress string, path string, sessionID string, sessionToken stri
 	parsed.Path = strings.TrimRight(parsed.Path, "/") + path
 	query := parsed.Query()
 	query.Set("session_id", strings.TrimSpace(sessionID))
-	if token := strings.TrimSpace(sessionToken); token != "" {
-		query.Set("session_token", token)
-	}
 	parsed.RawQuery = query.Encode()
 	return parsed.String(), nil
 }

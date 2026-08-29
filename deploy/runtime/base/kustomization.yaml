@@ -5,7 +5,5 @@ resources:
   - serviceaccount.yaml
   - clusterrole.yaml
   - clusterrolebinding.yaml
-  - role.yaml
-  - rolebinding.yaml
   - service.yaml
   - deployment.yaml

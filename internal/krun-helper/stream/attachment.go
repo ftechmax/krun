@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -40,8 +41,12 @@ func Attach(managerAddress string, sessionID string, sessionToken string, interc
 	if interceptPort < 1 || interceptPort > 65535 {
 		return nil, fmt.Errorf("invalid intercept port %d", interceptPort)
 	}
+	trimmedSessionToken := strings.TrimSpace(sessionToken)
+	if trimmedSessionToken == "" {
+		return nil, errors.New("stream session token is required")
+	}
 
-	streamURL, err := streamlink.URL(managerAddress, streamlink.ClientPath, trimmedSessionID, sessionToken)
+	streamURL, err := streamlink.URL(managerAddress, streamlink.ClientPath, trimmedSessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -51,8 +56,11 @@ func Attach(managerAddress string, sessionID string, sessionToken string, interc
 		interceptAddr: net.JoinHostPort("127.0.0.1", strconv.Itoa(interceptPort)),
 		conns:         streamlink.NewConns(),
 	}
+	// Authenticate once during the websocket handshake. Keeping the token out
+	// of the URL and data envelopes prevents it from reaching access logs.
 	attachment.link = streamlink.New(context.Background(), streamlink.Config{
 		URL:       streamURL,
+		Headers:   streamHeaders(trimmedSessionToken),
 		SessionID: trimmedSessionID,
 		LogPrefix: fmt.Sprintf("helper stream (session_id=%s)", trimmedSessionID),
 	})
@@ -61,6 +69,12 @@ func Attach(managerAddress string, sessionID string, sessionToken string, interc
 	attachment.link.Start(attachment.handleInbound, attachment.conns.CloseAll)
 
 	return attachment, nil
+}
+
+func streamHeaders(sessionToken string) http.Header {
+	headers := make(http.Header)
+	headers.Set("X-Krun-Session-Token", strings.TrimSpace(sessionToken))
+	return headers
 }
 
 func (a *Attachment) Close() {
@@ -73,11 +87,8 @@ func (a *Attachment) handleInbound(envelope contracts.StreamEnvelope) {
 		return
 	}
 
-	switch envelope.Type {
-	case contracts.StreamTypeOpen:
+	if envelope.Type == contracts.StreamTypeOpen {
 		a.handleOpen(strings.TrimSpace(envelope.ConnectionID))
-	case contracts.StreamTypePing:
-		_ = a.link.Send(a.link.Envelope("", contracts.StreamTypePing))
 	}
 }
 

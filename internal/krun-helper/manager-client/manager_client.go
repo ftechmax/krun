@@ -15,8 +15,6 @@ import (
 	"time"
 
 	"github.com/ftechmax/krun/internal/contracts"
-	"github.com/ftechmax/krun/internal/kube"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
@@ -27,30 +25,32 @@ const (
 
 	requestTimeout = 10 * time.Second
 
-	authSecretName = "krun-manager-auth"
-	authSecretKey  = "token"
 	// The custom header avoids collision with Authorization handling by
 	// Kubernetes and HTTP intermediaries.
 	authTokenHeader = "X-Krun-Auth-Token"
 )
 
 // Client reaches the manager at baseURL (the local end of the port-forward)
-// and authenticates with the shared token from the manager's Secret.
+// and authenticates with the install-time token supplied by the helper.
 type Client struct {
-	baseURL string
-	kube    *kube.Client
-	http    *http.Client
+	baseURL   string
+	authToken string
+	http      *http.Client
 }
 
-func NewSessionClient(kubeConfigPath string, baseURL string) (*Client, error) {
-	kubeClient, err := kube.NewClient(kubeConfigPath)
-	if err != nil {
-		return nil, err
+func NewSessionClient(baseURL string, authToken string) (*Client, error) {
+	trimmedBaseURL := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if trimmedBaseURL == "" {
+		return nil, errors.New("manager base URL is required")
+	}
+	trimmedToken := strings.TrimSpace(authToken)
+	if trimmedToken == "" {
+		return nil, errors.New("manager auth token is required")
 	}
 	return &Client{
-		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		kube:    kubeClient,
-		http:    &http.Client{Timeout: requestTimeout},
+		baseURL:   trimmedBaseURL,
+		authToken: trimmedToken,
+		http:      &http.Client{Timeout: requestTimeout},
 	}, nil
 }
 
@@ -101,8 +101,7 @@ func (c *Client) DeleteSession(sessionID string) error {
 }
 
 // Health reports the manager's build version. It deliberately skips the
-// shared auth token: /healthz is unauthenticated, so a skew check still works
-// when the token Secret is missing or unreadable.
+// shared auth token: /healthz is intentionally unauthenticated.
 func (c *Client) Health() (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 	defer cancel()
@@ -162,11 +161,7 @@ func do[T any](c *Client, method string, path string, payload any) (T, error) {
 		request.Header.Set("Content-Type", "application/json")
 	}
 
-	authToken, err := c.fetchAuthToken(ctx)
-	if err != nil {
-		return result, err
-	}
-	request.Header.Set(authTokenHeader, authToken)
+	request.Header.Set(authTokenHeader, c.authToken)
 
 	response, err := c.http.Do(request)
 	if err != nil {
@@ -202,20 +197,6 @@ func managerErrorMessage(body []byte) string {
 		return payload.Message
 	}
 	return strings.TrimSpace(string(body))
-}
-
-// fetchAuthToken reads on every call so runtime reinstalls do not leave a
-// cached token in the helper.
-func (c *Client) fetchAuthToken(ctx context.Context) (string, error) {
-	secret, err := c.kube.Clientset.CoreV1().Secrets(ManagerNamespace).Get(ctx, authSecretName, metav1.GetOptions{})
-	if err != nil {
-		return "", fmt.Errorf("read manager auth secret: %w", err)
-	}
-	token := strings.TrimSpace(string(secret.Data[authSecretKey]))
-	if token == "" {
-		return "", errors.New("manager auth secret has no token")
-	}
-	return token, nil
 }
 
 func NormalizeNamespace(namespace string) string {

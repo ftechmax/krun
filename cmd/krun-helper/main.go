@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -18,6 +19,7 @@ import (
 	helperportforward "github.com/ftechmax/krun/internal/krun-helper/portforward"
 	"github.com/ftechmax/krun/internal/krun-helper/session"
 	helperstream "github.com/ftechmax/krun/internal/krun-helper/stream"
+	"github.com/ftechmax/krun/internal/managerauth"
 	"github.com/spf13/cobra"
 )
 
@@ -30,6 +32,11 @@ var version = "debug" // will be set by the build system
 type daemon struct {
 	sessions   *session.Manager
 	shutdownCh chan<- struct{}
+}
+
+type serverControl interface {
+	Shutdown(context.Context) error
+	Close() error
 }
 
 // warnOnManagerSkew reports mixed helper/runtime builds without rejecting them.
@@ -50,12 +57,13 @@ func warnOnManagerSkew(api *managerclient.Client) {
 func main() {
 	var kubeConfigPath string
 	var socketEndpoint string
+	var managerTokenFile string
 
 	rootCmd := &cobra.Command{
 		Use:   "krun-helper",
 		Short: "Elevated daemon helper for krun debug sessions",
 		Run: func(cmd *cobra.Command, args []string) {
-			if err := startHelperDaemon(socketEndpoint, kubeConfigPath); err != nil {
+			if err := startHelperDaemon(socketEndpoint, kubeConfigPath, managerTokenFile); err != nil {
 				fmt.Printf("helper daemon failed: %v\n", err)
 				os.Exit(1)
 			}
@@ -64,6 +72,7 @@ func main() {
 
 	rootCmd.Flags().StringVar(&kubeConfigPath, "kubeconfig", "", "Path to kubeconfig file")
 	rootCmd.Flags().StringVar(&socketEndpoint, "socket", "", "IPC endpoint override (unix socket path / named pipe name)")
+	rootCmd.Flags().StringVar(&managerTokenFile, "manager-token-file", "", "Path to the local traffic-manager bearer token")
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)
@@ -71,16 +80,37 @@ func main() {
 	}
 }
 
-func startHelperDaemon(socketEndpoint string, kubeConfigPath string) error {
+func startHelperDaemon(socketEndpoint string, kubeConfigPath string, managerTokenFile string) (returnErr error) {
 	endpoint := strings.TrimSpace(socketEndpoint)
 	if endpoint == "" {
 		endpoint = helperipc.DefaultEndpoint
+	}
+	authToken, err := managerauth.ReadLocalToken(managerTokenFile)
+	if err != nil {
+		return fmt.Errorf("load manager authentication: %w", err)
 	}
 
 	forwards, err := helperportforward.NewSessionRegistry(kubeConfigPath)
 	if err != nil {
 		return fmt.Errorf("failed to initialize port-forward registry: %w", err)
 	}
+	var sessions *session.Manager
+	ownsEndpoint := false
+	cleanupTransferred := false
+	cleanup := func() error {
+		if ownsEndpoint {
+			helperipc.Cleanup(endpoint)
+		}
+		if sessions != nil {
+			return sessions.Close()
+		}
+		return forwards.Clear()
+	}
+	defer func() {
+		if !cleanupTransferred {
+			returnErr = errors.Join(returnErr, cleanup())
+		}
+	}()
 
 	managerAddress, err := startManagerForward(forwards)
 	if err != nil {
@@ -88,13 +118,13 @@ func startHelperDaemon(socketEndpoint string, kubeConfigPath string) error {
 	}
 	fmt.Printf("manager api forwarded to %s\n", managerAddress)
 
-	api, err := managerclient.NewSessionClient(kubeConfigPath, managerAddress)
+	api, err := managerclient.NewSessionClient(managerAddress, authToken)
 	if err != nil {
 		return fmt.Errorf("failed to initialize manager session client: %w", err)
 	}
 	warnOnManagerSkew(api)
 
-	sessions := session.NewManager(session.Options{
+	sessions = session.NewManager(session.Options{
 		Hosts:    hostfile.File{},
 		Forwards: forwards,
 		API:      api,
@@ -109,6 +139,7 @@ func startHelperDaemon(socketEndpoint string, kubeConfigPath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to listen on helper endpoint: %w", err)
 	}
+	ownsEndpoint = true
 
 	server := &http.Server{
 		Handler:           newHandler(&daemon{sessions: sessions, shutdownCh: shutdownCh}),
@@ -125,24 +156,37 @@ func startHelperDaemon(socketEndpoint string, kubeConfigPath string) error {
 	signal.Notify(signalCh, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signalCh)
 
+	cleanupTransferred = true
+	return runHelperServer(server, serverErrCh, signalCh, shutdownCh, cleanup)
+}
+
+func runHelperServer(server serverControl, serverErrCh <-chan error, signalCh <-chan os.Signal, shutdownCh <-chan struct{}, cleanup func() error) (returnErr error) {
+	defer func() {
+		returnErr = errors.Join(returnErr, cleanup())
+	}()
+
 	doShutdown := func(reason string) error {
 		fmt.Printf("%s, shutting down krun-helper\n", reason)
 
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("shutdown helper server: %w", err)
+		shutdownErr := server.Shutdown(shutdownCtx)
+		var closeErr error
+		if shutdownErr != nil {
+			closeErr = server.Close()
 		}
-		if err := <-serverErrCh; err != nil && err != http.ErrServerClosed {
-			return err
+		serveErr := <-serverErrCh
+		if errors.Is(serveErr, http.ErrServerClosed) {
+			serveErr = nil
 		}
-		helperipc.Cleanup(endpoint)
-		return sessions.Close()
+		if shutdownErr != nil {
+			shutdownErr = fmt.Errorf("shutdown helper server: %w", shutdownErr)
+		}
+		return errors.Join(shutdownErr, closeErr, serveErr)
 	}
 
 	select {
 	case err := <-serverErrCh:
-		helperipc.Cleanup(endpoint)
 		if err == http.ErrServerClosed {
 			return nil
 		}

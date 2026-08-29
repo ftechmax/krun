@@ -117,7 +117,7 @@ func TestApplyInboundErrorClosesConnection(t *testing.T) {
 
 func testQueueLink(t *testing.T) *Link {
 	t.Helper()
-	link := New(context.Background(), Config{SessionID: "session", SessionToken: "token", QueueSize: 8})
+	link := New(context.Background(), Config{SessionID: "session", QueueSize: 8})
 	t.Cleanup(link.cancel)
 	return link
 }

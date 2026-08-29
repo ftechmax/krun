@@ -20,6 +20,7 @@ import (
 	"github.com/ftechmax/krun/internal/helperipc"
 	deploy "github.com/ftechmax/krun/internal/krun/deploy"
 	"github.com/ftechmax/krun/internal/kube"
+	"github.com/ftechmax/krun/internal/managerauth"
 	"github.com/ftechmax/krun/internal/utils"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,9 +32,10 @@ const (
 	// commandTimeout covers enable/disable, whose helper-side work includes
 	// a 10s ready-verify per dependency port-forward, a 10s manager session
 	// call, and the sidecar injection — well beyond a generic 5s budget.
-	healthTimeout  = 2 * time.Second
-	listTimeout    = 5 * time.Second
-	commandTimeout = 60 * time.Second
+	healthTimeout       = 2 * time.Second
+	listTimeout         = 5 * time.Second
+	commandTimeout      = 60 * time.Second
+	managerTokenFileEnv = "KRUN_MANAGER_TOKEN_FILE"
 )
 
 func List(config cfg.Config) {
@@ -216,6 +218,21 @@ func RuntimeInstall(config cfg.Config, version string) {
 		return
 	}
 
+	managerTokenPath, err := resolveManagerTokenPath()
+	if err != nil {
+		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to resolve manager token path: %s", err), utils.Red))
+		return
+	}
+	managerToken, err := managerauth.EnsureLocalToken(managerTokenPath)
+	if err != nil {
+		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to initialize manager token: %s", err), utils.Red))
+		return
+	}
+	if err := configureManagerAuth(objs, managerauth.Digest(managerToken)); err != nil {
+		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to configure manager authentication: %s", err), utils.Red))
+		return
+	}
+
 	if err := deploy.ApplyObjects(context.Background(), client, objs); err != nil {
 		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to apply manifests: %s", err), utils.Red))
 		return
@@ -234,8 +251,12 @@ func RuntimeInstall(config cfg.Config, version string) {
 			if dep.Spec.Replicas != nil {
 				desired = *dep.Spec.Replicas
 			}
-			if dep.Status.ReadyReplicas >= desired {
+			if dep.Status.ObservedGeneration >= dep.Generation &&
+				dep.Status.UpdatedReplicas >= desired &&
+				dep.Status.ReadyReplicas >= desired &&
+				dep.Status.AvailableReplicas >= desired {
 				fmt.Println(utils.Colorize("Traffic manager installed successfully", utils.Green))
+				fmt.Printf("Manager token: %s\n", managerTokenPath)
 				return
 			}
 		}
@@ -304,6 +325,69 @@ func RuntimeUninstall(config cfg.Config, version string) {
 	}
 
 	fmt.Println(utils.Colorize("Traffic manager uninstalled successfully", utils.Green))
+	if managerTokenPath, pathErr := resolveManagerTokenPath(); pathErr == nil {
+		if _, statErr := os.Stat(managerTokenPath); statErr == nil {
+			fmt.Printf("Local manager token retained at %s\n", managerTokenPath)
+		} else if os.IsNotExist(statErr) {
+			fmt.Println("No local manager token existed to retain")
+		}
+	}
+}
+
+func resolveManagerTokenPath() (string, error) {
+	if override := strings.TrimSpace(os.Getenv(managerTokenFileEnv)); override != "" {
+		return filepath.Abs(override)
+	}
+	return managerauth.DefaultTokenPath()
+}
+
+func configureManagerAuth(objects []*unstructured.Unstructured, digest string) error {
+	if _, err := managerauth.ParseDigest(digest); err != nil {
+		return err
+	}
+
+	for _, object := range objects {
+		if object.GetAPIVersion() != "apps/v1" || object.GetKind() != "Deployment" ||
+			object.GetNamespace() != "krun-system" || object.GetName() != "krun-traffic-manager" {
+			continue
+		}
+
+		containers, found, err := unstructured.NestedSlice(object.Object, "spec", "template", "spec", "containers")
+		if err != nil || !found {
+			return errors.New("traffic-manager Deployment has no containers")
+		}
+		for index, item := range containers {
+			container, ok := item.(map[string]any)
+			if !ok || container["name"] != "manager" {
+				continue
+			}
+
+			env, _, err := unstructured.NestedSlice(container, "env")
+			if err != nil {
+				return fmt.Errorf("read traffic-manager environment: %w", err)
+			}
+			filtered := make([]any, 0, len(env)+1)
+			for _, value := range env {
+				entry, ok := value.(map[string]any)
+				if ok && entry["name"] == managerauth.TokenHashEnv {
+					continue
+				}
+				filtered = append(filtered, value)
+			}
+			filtered = append(filtered, map[string]any{
+				"name":  managerauth.TokenHashEnv,
+				"value": digest,
+			})
+			container["env"] = filtered
+			containers[index] = container
+			if err := unstructured.SetNestedSlice(object.Object, containers, "spec", "template", "spec", "containers"); err != nil {
+				return fmt.Errorf("configure traffic-manager environment: %w", err)
+			}
+			return nil
+		}
+		return errors.New("traffic-manager Deployment has no manager container")
+	}
+	return errors.New("traffic-manager Deployment not found in runtime manifests")
 }
 
 func loadManifestObjects(version string) ([]*unstructured.Unstructured, error) {
@@ -369,7 +453,16 @@ func startHelperProcess(config cfg.Config) error {
 		return err
 	}
 
-	args := make([]string, 0, 2)
+	managerTokenPath, err := resolveManagerTokenPath()
+	if err != nil {
+		return fmt.Errorf("resolve manager token path: %w", err)
+	}
+	if _, err := managerauth.ReadLocalToken(managerTokenPath); err != nil {
+		return fmt.Errorf("load manager token (run `krun debug runtime install` first): %w", err)
+	}
+
+	args := make([]string, 0, 4)
+	args = append(args, "--manager-token-file", managerTokenPath)
 	if trimmedKubeConfig := strings.TrimSpace(config.KubeConfig); trimmedKubeConfig != "" {
 		args = append(args, "--kubeconfig", trimmedKubeConfig)
 	}

@@ -1,3 +1,6 @@
+// Package streamlink carries a debug session's intercepted traffic over a
+// websocket to the traffic-manager. Both ends of the bridge use it: the
+// traffic-agent in the cluster and krun-helper on the developer machine.
 package streamlink
 
 import (
@@ -103,10 +106,8 @@ type Config struct {
 	// URL is the websocket endpoint, normally built with URL().
 	URL     string
 	Headers http.Header
-	// SessionID and SessionToken are stamped onto every outbound envelope.
-	// A blank token is omitted from the wire.
-	SessionID    string
-	SessionToken string
+	// SessionID is stamped onto every outbound envelope.
+	SessionID string
 	// LogPrefix identifies this peer in connect/disconnect logs.
 	LogPrefix string
 	// QueueSize bounds the outbound envelope queue; zero picks the default.
@@ -174,7 +175,6 @@ func (l *Link) Envelope(connectionID string, envelopeType string) contracts.Stre
 	return contracts.StreamEnvelope{
 		Type:         envelopeType,
 		SessionID:    l.cfg.SessionID,
-		SessionToken: l.cfg.SessionToken,
 		ConnectionID: connectionID,
 	}
 }

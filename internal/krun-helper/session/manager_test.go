@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ftechmax/krun/internal/contracts"
 )
@@ -145,8 +146,104 @@ func TestEnableReplacesPreviousSession(t *testing.T) {
 	if firstStream.closes != 1 {
 		t.Fatalf("expected the previous stream to be closed once, got %d", firstStream.closes)
 	}
+	if env.forwards.removeCalls != 0 {
+		t.Fatalf("successful replacement must preserve forwards, got %d remove calls", env.forwards.removeCalls)
+	}
 	if len(env.manager.List()) != 1 {
 		t.Fatalf("expected exactly one session after re-enable, got %+v", env.manager.List())
+	}
+}
+
+func TestEnableReplacementUpdatesDependenciesWithoutPreemptiveRemove(t *testing.T) {
+	env := newTestEnv(t)
+	env.api.createIDs = []string{"mgr-session-1", "mgr-session-2"}
+
+	first := dependencyContext("proj", "service", "rabbitmq.default.svc", 5672, 5001)
+	second := dependencyContext("proj", "service", "redis.default.svc", 6379, 5001)
+	if err := env.manager.Enable("", first); err != nil {
+		t.Fatalf("first enable failed: %v", err)
+	}
+	if err := env.manager.Enable("", second); err != nil {
+		t.Fatalf("replacement failed: %v", err)
+	}
+
+	if env.forwards.removeCalls != 0 {
+		t.Fatalf("replacement called Remove %d times", env.forwards.removeCalls)
+	}
+	wantForwards := []contracts.PortForward{{Namespace: "default", Service: "redis", LocalPort: 6379, RemotePort: 6379}}
+	if !slices.Equal(env.forwards.lastForwards, wantForwards) {
+		t.Fatalf("replacement forwards = %+v, want %+v", env.forwards.lastForwards, wantForwards)
+	}
+	wantHosts := []contracts.HostsEntry{{IP: "127.0.0.1", Hostname: "redis.default.svc"}}
+	if !slices.Equal(env.hosts.lastWrite, wantHosts) {
+		t.Fatalf("replacement hosts = %+v, want %+v", env.hosts.lastWrite, wantHosts)
+	}
+}
+
+func TestEnableReplacementHostsFailureCleansPreservedLocalState(t *testing.T) {
+	env := newTestEnv(t)
+	if err := env.manager.Enable("", workerContext()); err != nil {
+		t.Fatalf("first enable failed: %v", err)
+	}
+
+	env.hosts.writeErrors = []error{errors.New("replacement hosts failed"), nil}
+	err := env.manager.Enable("", workerContext())
+	if err == nil || !strings.Contains(err.Error(), "replacement hosts failed") {
+		t.Fatalf("expected replacement hosts error, got %v", err)
+	}
+	if env.forwards.removeCalls != 1 {
+		t.Fatalf("preserved forwards were not cleaned, got %d remove calls", env.forwards.removeCalls)
+	}
+	if len(env.hosts.lastWrite) != 0 {
+		t.Fatalf("preserved hosts were not cleaned: %+v", env.hosts.lastWrite)
+	}
+	if sessions := env.manager.List(); len(sessions) != 0 {
+		t.Fatalf("clean rollback left a tracked session: %+v", sessions)
+	}
+}
+
+func TestEnableReplacementUpsertFailureCleansPreservedLocalState(t *testing.T) {
+	env := newTestEnv(t)
+	if err := env.manager.Enable("", workerContext()); err != nil {
+		t.Fatalf("first enable failed: %v", err)
+	}
+
+	env.forwards.upsertErr = errors.New("replacement forward failed")
+	err := env.manager.Enable("", workerContext())
+	if err == nil || !strings.Contains(err.Error(), "replacement forward failed") {
+		t.Fatalf("expected replacement forward error, got %v", err)
+	}
+	if env.forwards.removeCalls != 1 {
+		t.Fatalf("preserved forwards were not cleaned, got %d remove calls", env.forwards.removeCalls)
+	}
+	if len(env.hosts.lastWrite) != 0 {
+		t.Fatalf("replacement hosts were not cleaned: %+v", env.hosts.lastWrite)
+	}
+	if sessions := env.manager.List(); len(sessions) != 0 {
+		t.Fatalf("clean rollback left a tracked session: %+v", sessions)
+	}
+}
+
+func TestEnableReplacementCleanupFailureIsRetryable(t *testing.T) {
+	env := newTestEnv(t)
+	if err := env.manager.Enable("", workerContext()); err != nil {
+		t.Fatalf("first enable failed: %v", err)
+	}
+
+	env.hosts.writeErrors = []error{errors.New("replacement hosts failed"), nil}
+	env.forwards.removeErr = errors.New("cleanup forward failed")
+	err := env.manager.Enable("", workerContext())
+	if err == nil || !strings.Contains(err.Error(), "rollback failed") {
+		t.Fatalf("expected replacement rollback failure, got %v", err)
+	}
+	sessions := env.manager.List()
+	if len(sessions) != 1 || sessions[0].State != contracts.HelperSessionStateCleanupPending {
+		t.Fatalf("expected cleanup-pending replacement, got %+v", sessions)
+	}
+
+	env.forwards.removeErr = nil
+	if _, err := env.manager.Disable("", workerContext()); err != nil {
+		t.Fatalf("cleanup retry failed: %v", err)
 	}
 }
 
@@ -369,6 +466,60 @@ func TestCloseReleasesLocalStateAndLeavesManagerSessions(t *testing.T) {
 	}
 }
 
+func TestListReturnsWhileEnableIsBlocked(t *testing.T) {
+	env := newTestEnv(t)
+	env.attachStarted = make(chan struct{})
+	env.attachRelease = make(chan struct{})
+	enableDone := make(chan error, 1)
+	go func() { enableDone <- env.manager.Enable("", workerContext()) }()
+
+	<-env.attachStarted
+	listDone := make(chan []contracts.HelperDebugSession, 1)
+	go func() { listDone <- env.manager.List() }()
+	select {
+	case sessions := <-listDone:
+		if len(sessions) != 0 {
+			t.Fatalf("in-flight uncommitted enable was listed: %+v", sessions)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("List blocked behind Enable")
+	}
+
+	close(env.attachRelease)
+	if err := <-enableDone; err != nil {
+		t.Fatalf("enable failed: %v", err)
+	}
+}
+
+func TestCloseWaitsForEnableThenCleansItsResources(t *testing.T) {
+	env := newTestEnv(t)
+	env.attachStarted = make(chan struct{})
+	env.attachRelease = make(chan struct{})
+	enableDone := make(chan error, 1)
+	go func() { enableDone <- env.manager.Enable("", workerContext()) }()
+	<-env.attachStarted
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- env.manager.Close() }()
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close returned before Enable completed: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(env.attachRelease)
+	if err := <-enableDone; err != nil {
+		t.Fatalf("enable failed: %v", err)
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatalf("close failed: %v", err)
+	}
+	if env.lastAttach.closes != 1 || env.forwards.clearCalls != 1 || !env.hosts.removed {
+		t.Fatalf("Close did not clean completed Enable: stream=%d clear=%d hostsRemoved=%v",
+			env.lastAttach.closes, env.forwards.clearCalls, env.hosts.removed)
+	}
+}
+
 func TestEnableRequiresASessionIdentity(t *testing.T) {
 	env := newTestEnv(t)
 
@@ -463,9 +614,11 @@ type testEnv struct {
 	forwards *fakeForwards
 	api      *fakeAPI
 
-	attachErr  error
-	streams    []*fakeStream
-	lastAttach *fakeStream
+	attachErr     error
+	attachStarted chan struct{}
+	attachRelease chan struct{}
+	streams       []*fakeStream
+	lastAttach    *fakeStream
 }
 
 func newTestEnv(t *testing.T) *testEnv {
@@ -481,6 +634,10 @@ func newTestEnv(t *testing.T) *testEnv {
 		Forwards: env.forwards,
 		API:      env.api,
 		Attach: func(sessionID string, sessionToken string, interceptPort int) (Stream, error) {
+			if env.attachStarted != nil {
+				close(env.attachStarted)
+				<-env.attachRelease
+			}
 			if env.attachErr != nil {
 				return nil, env.attachErr
 			}

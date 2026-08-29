@@ -1,13 +1,3 @@
-// Package streamlink carries a debug session's intercepted traffic over a
-// websocket to the traffic-manager. Both ends of the bridge use it: the
-// traffic-agent (cluster side, intercepting) and the krun-helper (dev-machine
-// side, serving the local app), so the envelope protocol has one definition.
-//
-// Conns tracks the TCP connections bridged over a session stream, including
-// half-close state for each direction. A connection is fully torn down once
-// both its read side (local EOF observed) and write side (peer sent
-// close-write) are closed, so protocols where one end half-closes and then
-// waits for a response keep working.
 package streamlink
 
 import (
@@ -16,6 +6,11 @@ import (
 	"sync"
 )
 
+// Conns tracks the TCP connections bridged over a session stream, including
+// half-close state for each direction. A connection is fully torn down once
+// both its read side (local EOF observed) and write side (peer sent
+// close-write) are closed, so protocols where one end half-closes and then
+// waits for a response keep working.
 type Conns struct {
 	mu    sync.Mutex
 	conns map[string]*entry

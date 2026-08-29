@@ -1,19 +1,12 @@
 package managerclient
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/ftechmax/krun/internal/contracts"
-	"github.com/ftechmax/krun/internal/kube"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/rest"
 )
 
 func TestManagerClientCreateSession(t *testing.T) {
@@ -177,54 +170,30 @@ func TestNormalizeNamespace(t *testing.T) {
 
 const testAuthToken = "test-auth-token"
 
-// newTestManagerClient serves both roles from one httptest server: the kube
-// API paths that hand out the auth Secret, and the manager's own session API
-// reached over the port-forward.
 func newTestManagerClient(t *testing.T, handler http.HandlerFunc) (*Client, func()) {
 	t.Helper()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/secrets/"+authSecretName) {
-			writeJSONResponse(t, w, http.StatusOK, map[string]any{
-				"apiVersion": "v1",
-				"kind":       "Secret",
-				"metadata": map[string]any{
-					"name":      authSecretName,
-					"namespace": ManagerNamespace,
-				},
-				"data": map[string]string{
-					authSecretKey: base64.StdEncoding.EncodeToString([]byte(testAuthToken)),
-				},
-			})
-			return
-		}
 		if got := r.Header.Get(authTokenHeader); got != testAuthToken {
 			t.Errorf("manager request missing auth token header, got %q", got)
 		}
 		handler(w, r)
 	}))
 
-	groupVersion := schema.GroupVersion{Version: "v1"}
-	restConfig := &rest.Config{
-		Host:    server.URL,
-		APIPath: "/api",
-		ContentConfig: rest.ContentConfig{
-			GroupVersion:         &groupVersion,
-			NegotiatedSerializer: scheme.Codecs.WithoutConversion(),
-		},
-	}
-
-	clientset, err := kubernetes.NewForConfig(restConfig)
-	if err != nil {
-		server.Close()
-		t.Fatalf("create kubernetes clientset: %v", err)
-	}
-
 	return &Client{
-		baseURL: server.URL,
-		kube:    &kube.Client{RestConfig: restConfig, Clientset: clientset},
-		http:    server.Client(),
+		baseURL:   server.URL,
+		authToken: testAuthToken,
+		http:      server.Client(),
 	}, server.Close
+}
+
+func TestNewSessionClientRequiresConfiguration(t *testing.T) {
+	if _, err := NewSessionClient("", testAuthToken); err == nil {
+		t.Fatal("expected an error for an empty manager URL")
+	}
+	if _, err := NewSessionClient("http://127.0.0.1:8080", "  "); err == nil {
+		t.Fatal("expected an error for an empty manager token")
+	}
 }
 
 func writeJSONResponse(t *testing.T, w http.ResponseWriter, code int, payload any) {

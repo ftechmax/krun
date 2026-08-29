@@ -11,29 +11,9 @@ import (
 	"testing"
 
 	"github.com/ftechmax/krun/internal/contracts"
+	"github.com/ftechmax/krun/internal/managerauth"
 	"github.com/ftechmax/krun/internal/traffic-manager/agent"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	kubefake "k8s.io/client-go/kubernetes/fake"
 )
-
-func TestInitializeAuthTokenEntropyFailureDoesNotCreateSecret(t *testing.T) {
-	clientset := kubefake.NewSimpleClientset()
-	entropyErr := errors.New("entropy unavailable")
-
-	_, err := initializeAuthTokenWithGenerator(context.Background(), clientset, func() (string, error) {
-		return "", entropyErr
-	})
-	if !errors.Is(err, entropyErr) {
-		t.Fatalf("initializeAuthToken error = %v, want %v", err, entropyErr)
-	}
-	secrets, err := clientset.CoreV1().Secrets(managerNamespace).List(context.Background(), metav1.ListOptions{})
-	if err != nil {
-		t.Fatalf("list secrets: %v", err)
-	}
-	if len(secrets.Items) != 0 {
-		t.Fatalf("created secrets after entropy failure: %+v", secrets.Items)
-	}
-}
 
 func TestSessionsLifecycle(t *testing.T) {
 	fake := &fakeInjector{}
@@ -109,6 +89,17 @@ func TestSessionsLifecycle(t *testing.T) {
 	}
 	if len(listAfterDelete.Sessions) != 0 {
 		t.Fatalf("expected no sessions after delete, got %+v", listAfterDelete.Sessions)
+	}
+}
+
+func TestManagerAuthenticationFailsClosedWithoutVerifier(t *testing.T) {
+	t.Setenv(managerauth.TokenHashEnv, "")
+	if _, err := configuredAuthTokenHash(); err == nil {
+		t.Fatal("expected missing manager verifier to fail")
+	}
+	t.Setenv(managerauth.TokenHashEnv, "not-a-digest")
+	if _, err := configuredAuthTokenHash(); err == nil {
+		t.Fatal("expected malformed manager verifier to fail")
 	}
 }
 
@@ -278,7 +269,27 @@ func TestStreamAttachRequiresValidSessionAndToken(t *testing.T) {
 		t.Fatalf("expected status 401, got %d", missingTokenRec.Code)
 	}
 
-	invalidSession := newAuthedRequest(http.MethodGet, "/v1/stream/agent?session_id=unknown&session_token=abc", nil)
+	queryToken := newAuthedRequest(http.MethodGet, "/v1/stream/agent?session_id="+created.SessionID+"&session_token="+created.SessionToken, nil)
+	if _, err := s.resolveStreamSession(queryToken); err != nil {
+		t.Fatalf("legacy query-string token was rejected: %v", err)
+	}
+
+	headerToken := newAuthedRequest(http.MethodGet, "/v1/stream/agent?session_id="+created.SessionID, nil)
+	headerToken.Header.Set(streamSessionTokenHeader, created.SessionToken)
+	if _, err := s.resolveStreamSession(headerToken); err != nil {
+		t.Fatalf("header token was rejected: %v", err)
+	}
+
+	for _, token := range []string{"wrong-token", created.SessionToken[:len(created.SessionToken)-1]} {
+		request := newAuthedRequest(http.MethodGet, "/v1/stream/agent?session_id="+created.SessionID, nil)
+		request.Header.Set(streamSessionTokenHeader, token)
+		if _, err := s.resolveStreamSession(request); !errors.Is(err, errStreamUnauthorized) {
+			t.Fatalf("invalid stream token %q must be rejected, got %v", token, err)
+		}
+	}
+
+	invalidSession := newAuthedRequest(http.MethodGet, "/v1/stream/agent?session_id=unknown", nil)
+	invalidSession.Header.Set(streamSessionTokenHeader, "abc")
 	invalidSessionRec := httptest.NewRecorder()
 	s.handleStreamAttach(invalidSessionRec, invalidSession, contracts.StreamRoleAgent)
 	if invalidSessionRec.Code != http.StatusNotFound {
@@ -310,7 +321,11 @@ func TestCleanupDanglingAgentsReturnsError(t *testing.T) {
 }
 
 func newTestServer(injector agent.Injector) *server {
-	return newServer(injector, testAuthToken)
+	digest, err := managerauth.ParseDigest(managerauth.Digest(testAuthToken))
+	if err != nil {
+		panic(err)
+	}
+	return newServer(injector, digest)
 }
 
 type fakeInjector struct {
@@ -363,6 +378,14 @@ func TestSessionsRequireAuthToken(t *testing.T) {
 	handler.ServeHTTP(rec, wrongToken)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 with wrong token, got %d", rec.Code)
+	}
+
+	truncatedToken := httptest.NewRequest(http.MethodGet, "/v1/sessions", nil)
+	truncatedToken.Header.Set(authTokenHeader, testAuthToken[:len(testAuthToken)-1])
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, truncatedToken)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 with truncated token, got %d", rec.Code)
 	}
 
 	rec = httptest.NewRecorder()

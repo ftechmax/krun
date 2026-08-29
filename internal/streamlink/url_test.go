@@ -3,7 +3,7 @@ package streamlink
 import "testing"
 
 func TestURLBuildsAgentStreamURL(t *testing.T) {
-	got, err := URL("http://manager.default.svc:8080", AgentPath, "session-1", "")
+	got, err := URL("http://manager.default.svc:8080", AgentPath, "session-1")
 	if err != nil {
 		t.Fatalf("URL returned error: %v", err)
 	}
@@ -14,7 +14,7 @@ func TestURLBuildsAgentStreamURL(t *testing.T) {
 }
 
 func TestURLConvertsHTTPS(t *testing.T) {
-	got, err := URL("https://manager.default.svc:8443", AgentPath, "session-1", "")
+	got, err := URL("https://manager.default.svc:8443", AgentPath, "session-1")
 	if err != nil {
 		t.Fatalf("URL returned error: %v", err)
 	}
@@ -25,7 +25,7 @@ func TestURLConvertsHTTPS(t *testing.T) {
 }
 
 func TestURLAssumesHTTPWhenSchemeOmitted(t *testing.T) {
-	got, err := URL("127.0.0.1:39481", ClientPath, "session-1", "")
+	got, err := URL("127.0.0.1:39481", ClientPath, "session-1")
 	if err != nil {
 		t.Fatalf("URL returned error: %v", err)
 	}
@@ -35,22 +35,11 @@ func TestURLAssumesHTTPWhenSchemeOmitted(t *testing.T) {
 	}
 }
 
-func TestURLIncludesSessionTokenWhenSet(t *testing.T) {
-	got, err := URL("http://manager:8080", ClientPath, "session-1", " token-1 ")
-	if err != nil {
-		t.Fatalf("URL returned error: %v", err)
-	}
-	want := "ws://manager:8080/v1/stream/client?session_id=session-1&session_token=token-1"
-	if got != want {
-		t.Fatalf("expected %q, got %q", want, got)
-	}
-}
-
 func TestURLRejectsBadAddresses(t *testing.T) {
-	if _, err := URL("", AgentPath, "session-1", ""); err == nil {
+	if _, err := URL("", AgentPath, "session-1"); err == nil {
 		t.Fatal("expected an error for a blank manager address")
 	}
-	if _, err := URL("ftp://manager:8080", AgentPath, "session-1", ""); err == nil {
+	if _, err := URL("ftp://manager:8080", AgentPath, "session-1"); err == nil {
 		t.Fatal("expected an error for an unsupported scheme")
 	}
 }

@@ -172,7 +172,9 @@ krun [global options] <command> [command options] <service>
   ```
 
 - `debug runtime install`  
-  Install or upgrade the in-cluster debug runtime resources.
+  Install or upgrade the in-cluster debug runtime resources. The command
+  creates or reuses the private local manager token at
+  `~/.krun/manager-token`; only its verifier is installed in the cluster.
 
   ```sh
   krun debug runtime install
@@ -186,7 +188,8 @@ krun [global options] <command> [command options] <service>
   ```
 
 - `debug runtime uninstall`  
-  Remove the in-cluster debug runtime resources.
+  Remove the in-cluster debug runtime resources. The local manager token is
+  retained for a later reinstall.
 
   ```sh
   krun debug runtime uninstall

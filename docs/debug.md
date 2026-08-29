@@ -99,21 +99,36 @@ The helper reaches these over the same port-forward that carries the traffic
 streams, so there is one transport to the manager and one failure mode to
 diagnose.
 
-Session CRUD requires the shared token from Secret
-`krun-system/krun-manager-auth` in the `X-Krun-Auth-Token` header. The custom
-header avoids collision with `Authorization` handling by Kubernetes and HTTP
-intermediaries. The manager generates the token on first start; the helper
-reads the Secret through the user's kubeconfig on every call rather than
-caching it. Network reach to the Service alone is not enough to create sessions (= inject root+NET_ADMIN
-sidecars). `/healthz` and the stream endpoints are exempt; streams
-authenticate with their per-session token.
+Session CRUD requires the bearer token in `~/.krun/manager-token`, sent in the
+`X-Krun-Auth-Token` header. `krun debug runtime install` creates the token with
+private permissions when absent and reuses it on upgrades. Only its SHA-256
+verifier is injected into the traffic-manager Deployment; neither the helper
+nor the manager reads Kubernetes Secrets. Network reach to the Service alone
+is therefore not enough to create sessions (which inject root+`NET_ADMIN`
+sidecars). `/healthz` and the stream endpoints are exempt; streams authenticate
+once during websocket attachment with their per-session token in
+`X-Krun-Session-Token`. Tokens are never put in URLs or data envelopes.
+
+The local manager token lifecycle is explicit:
+
+1. Fresh install creates `~/.krun/manager-token` (`0700` directory and `0600`
+   file on Unix; user-only ACL on Windows).
+2. Upgrade reuses it, so a running helper remains valid.
+3. Uninstall retains it for a later reinstall.
+4. To rotate deliberately, stop the helper, remove the local token file, and
+   run `krun debug runtime install` again. Restarting the helper after the
+   install makes it read the newly generated token. Do not delete the token
+   while a helper is running.
+5. A missing, malformed, or broadly readable token fails locally with an
+   instruction to reinstall the runtime; the credential is never recovered
+   from the cluster.
 
 Streaming (same port, upgraded protocol):
 
 1. Helper attaches as session client.
 2. Agent attaches as session agent.
 3. Messages are typed envelopes (`open`, `data`, `close-write`, `close`,
-   `error`, `ping`).
+   `error`).
 4. `close-write` half-closes one direction (sender saw EOF on its read
    side); the connection is torn down on `close`/`error` or once both
    directions are closed. Protocols that half-close and then await the
@@ -186,8 +201,8 @@ move one object instead of keeping separate registries in step.
 1. `krun-traffic-manager` service exposes only `8080`.
 2. Sidecar env points to manager address on `:8080`.
 3. No separate tunnel service port.
-4. Namespaced Role/RoleBinding in `krun-system` let the manager create and
-   read the `krun-manager-auth` Secret.
+4. The manager receives only the one-way verifier for the locally stored
+   bearer token. Its service account has no Kubernetes Secret permissions.
 
 ## Notes
 

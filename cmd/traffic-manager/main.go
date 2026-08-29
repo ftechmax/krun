@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,14 +20,11 @@ import (
 
 	"github.com/ftechmax/krun/internal/contracts"
 	"github.com/ftechmax/krun/internal/kube"
-	"github.com/ftechmax/krun/internal/securetoken"
+	"github.com/ftechmax/krun/internal/managerauth"
 	"github.com/ftechmax/krun/internal/traffic-manager/agent"
 	sessionregistry "github.com/ftechmax/krun/internal/traffic-manager/session"
 	streamrelay "github.com/ftechmax/krun/internal/traffic-manager/stream"
 	"github.com/gorilla/websocket"
-	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -40,18 +39,18 @@ var (
 )
 
 type server struct {
-	sessions  *sessionregistry.DebugSessionRegistry
-	injector  agent.Injector
-	relay     *streamrelay.SessionRelayRegistry
-	authToken string
+	sessions      *sessionregistry.DebugSessionRegistry
+	injector      agent.Injector
+	relay         *streamrelay.SessionRelayRegistry
+	authTokenHash []byte
 }
 
-func newServer(injector agent.Injector, authToken string) *server {
+func newServer(injector agent.Injector, authTokenHash []byte) *server {
 	return &server{
-		sessions:  sessionregistry.NewDebugSessionRegistry(),
-		injector:  injector,
-		relay:     streamrelay.NewSessionRelayRegistry(),
-		authToken: authToken,
+		sessions:      sessionregistry.NewDebugSessionRegistry(),
+		injector:      injector,
+		relay:         streamrelay.NewSessionRelayRegistry(),
+		authTokenHash: append([]byte(nil), authTokenHash...),
 	}
 }
 
@@ -69,9 +68,6 @@ const (
 	streamSessionTokenHeader = "X-Krun-Session-Token"
 	streamAgentVersionHeader = "X-Krun-Agent-Version"
 
-	managerNamespace = "krun-system"
-	authSecretName   = "krun-manager-auth"
-	authSecretKey    = "token"
 	// The custom header avoids collision with Authorization handling by
 	// Kubernetes and HTTP intermediaries.
 	authTokenHeader = "X-Krun-Auth-Token"
@@ -93,12 +89,12 @@ func run() error {
 	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelStartup()
 
-	authToken, err := initializeAuthToken(startupCtx, client.Clientset)
+	authTokenHash, err := configuredAuthTokenHash()
 	if err != nil {
-		return err
+		return fmt.Errorf("configure manager API authentication: %w", err)
 	}
 
-	manager := newServer(newInjector(client.Clientset), authToken)
+	manager := newServer(newInjector(client.Clientset), authTokenHash)
 
 	log.Printf("cleaning up dangling traffic-agent sidecars")
 	if err := manager.cleanupDanglingAgents(startupCtx); err != nil {
@@ -139,6 +135,10 @@ func run() error {
 		}
 		return nil
 	}
+}
+
+func configuredAuthTokenHash() ([]byte, error) {
+	return managerauth.ParseDigest(os.Getenv(managerauth.TokenHashEnv))
 }
 
 func newHandler(s *server) http.Handler {
@@ -308,7 +308,7 @@ func (s *server) resolveStreamSession(r *http.Request) (contracts.DebugSession, 
 	if sessionToken == "" {
 		sessionToken = strings.TrimSpace(r.Header.Get(streamSessionTokenHeader))
 	}
-	if strings.TrimSpace(debugSession.SessionToken) != "" && sessionToken != debugSession.SessionToken {
+	if strings.TrimSpace(debugSession.SessionToken) != "" && !constantTimeTokenEqual(sessionToken, debugSession.SessionToken) {
 		return contracts.DebugSession{}, errStreamUnauthorized
 	}
 
@@ -340,74 +340,22 @@ func newInjector(clientset kubernetes.Interface) agent.Injector {
 	})
 }
 
-// initializeAuthToken loads the shared session-API token from its Secret,
-// generating and persisting a fresh one on first start. Requiring the token
-// (or kube API access to read it) means network reach to the manager Service
-// alone is no longer enough to inject root+NET_ADMIN sidecars.
-func initializeAuthToken(ctx context.Context, clientset kubernetes.Interface) (string, error) {
-	return initializeAuthTokenWithGenerator(ctx, clientset, newAuthToken)
-}
-
-func initializeAuthTokenWithGenerator(ctx context.Context, clientset kubernetes.Interface, generate func() (string, error)) (string, error) {
-	secret, err := clientset.CoreV1().Secrets(managerNamespace).Get(ctx, authSecretName, metav1.GetOptions{})
-	if err == nil {
-		if token := strings.TrimSpace(string(secret.Data[authSecretKey])); token != "" {
-			return token, nil
-		}
-		token, err := generate()
-		if err != nil {
-			return "", fmt.Errorf("generate auth token: %w", err)
-		}
-		updated := secret.DeepCopy()
-		if updated.Data == nil {
-			updated.Data = map[string][]byte{}
-		}
-		updated.Data[authSecretKey] = []byte(token)
-		if _, err := clientset.CoreV1().Secrets(managerNamespace).Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
-			return "", fmt.Errorf("update auth secret: %w", err)
-		}
-		return token, nil
-	}
-	if !apierrors.IsNotFound(err) {
-		return "", fmt.Errorf("get auth secret: %w", err)
-	}
-
-	token, err := generate()
-	if err != nil {
-		return "", fmt.Errorf("generate auth token: %w", err)
-	}
-	_, err = clientset.CoreV1().Secrets(managerNamespace).Create(ctx, &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      authSecretName,
-			Namespace: managerNamespace,
-		},
-		Data: map[string][]byte{
-			authSecretKey: []byte(token),
-		},
-	}, metav1.CreateOptions{})
-	if err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			// Lost a create race against another replica; adopt its token.
-			return initializeAuthTokenWithGenerator(ctx, clientset, generate)
-		}
-		return "", fmt.Errorf("create auth secret: %w", err)
-	}
-	return token, nil
-}
-
-func newAuthToken() (string, error) {
-	return securetoken.Hex(32)
-}
-
 func (s *server) requireAuthToken(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := strings.TrimSpace(r.Header.Get(authTokenHeader))
-		if s.authToken == "" || token != s.authToken {
+		digest := sha256.Sum256([]byte(token))
+		if len(s.authTokenHash) != sha256.Size || subtle.ConstantTimeCompare(digest[:], s.authTokenHash) != 1 {
 			writeError(w, http.StatusUnauthorized, "invalid or missing auth token")
 			return
 		}
 		next(w, r)
 	}
+}
+
+func constantTimeTokenEqual(actual string, expected string) bool {
+	actualDigest := sha256.Sum256([]byte(strings.TrimSpace(actual)))
+	expectedDigest := sha256.Sum256([]byte(strings.TrimSpace(expected)))
+	return subtle.ConstantTimeCompare(actualDigest[:], expectedDigest[:]) == 1
 }
 
 // cleanupDanglingAgents removes sidecars left behind by a previous manager

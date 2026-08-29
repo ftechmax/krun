@@ -82,11 +82,10 @@ func run() error {
 	defer conns.CloseAll()
 
 	link := streamlink.New(ctx, streamlink.Config{
-		URL:          cfg.StreamURL,
-		Headers:      cfg.streamHeaders(),
-		SessionID:    cfg.SessionID,
-		SessionToken: cfg.SessionToken,
-		LogPrefix:    "manager stream",
+		URL:       cfg.StreamURL,
+		Headers:   cfg.streamHeaders(),
+		SessionID: cfg.SessionID,
+		LogPrefix: "manager stream",
 	})
 	// The manager drops connection routing for this session when the agent
 	// stream detaches (and tells the helper to close its side), so every
@@ -167,7 +166,7 @@ func loadRuntimeConfig() (runtimeConfig, error) {
 	}
 
 	// Keep the session token out of the URL, where access logs commonly record it.
-	streamURL, err := streamlink.URL(managerAddress, streamlink.AgentPath, sessionID, "")
+	streamURL, err := streamlink.URL(managerAddress, streamlink.AgentPath, sessionID)
 	if err != nil {
 		return runtimeConfig{}, err
 	}

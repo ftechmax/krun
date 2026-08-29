@@ -93,7 +93,6 @@ const (
 	StreamTypeCloseWrite = "close-write"
 	StreamTypeClose      = "close"
 	StreamTypeError      = "error"
-	StreamTypePing       = "ping"
 )
 
 const (
@@ -104,7 +103,6 @@ const (
 type StreamEnvelope struct {
 	Type         string            `json:"type"`
 	SessionID    string            `json:"session_id"`
-	SessionToken string            `json:"session_token,omitempty"`
 	ConnectionID string            `json:"connection_id,omitempty"`
 	Data         []byte            `json:"data,omitempty"`
 	Message      string            `json:"message,omitempty"`

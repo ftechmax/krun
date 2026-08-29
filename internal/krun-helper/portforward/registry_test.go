@@ -266,6 +266,35 @@ func TestUpsertReplacingForwardsReleasesOldShared(t *testing.T) {
 	}
 }
 
+func TestUpsertReplacingForwardsKeepsOverlappingHandle(t *testing.T) {
+	r, tracker := newTestRegistry()
+	redis := makeForward("default", "redis", 6379)
+	rabbit := makeForward("default", "rabbitmq", 5672)
+	postgres := makeForward("default", "postgres", 5432)
+
+	if err := r.Upsert("session-a", []contracts.PortForward{redis, rabbit}); err != nil {
+		t.Fatalf("initial upsert: %v", err)
+	}
+	redisKey := portForwardKey(redis)
+	originalRedis := r.sessions["session-a"][redisKey]
+
+	if err := r.Upsert("session-a", []contracts.PortForward{redis, postgres}); err != nil {
+		t.Fatalf("replacement upsert: %v", err)
+	}
+	if tracker.count() != 3 {
+		t.Fatalf("expected only the new postgres forward to start, total starts = %d", tracker.count())
+	}
+	if got := r.sessions["session-a"][redisKey]; got != originalRedis {
+		t.Fatal("replacement restarted the overlapping redis forward")
+	}
+	if _, ok := r.shared[portForwardKey(rabbit)]; ok {
+		t.Fatal("obsolete rabbitmq forward was retained")
+	}
+	if _, ok := r.shared[portForwardKey(postgres)]; !ok {
+		t.Fatal("new postgres forward was not registered")
+	}
+}
+
 func makePod(name string, phase corev1.PodPhase, ready bool) corev1.Pod {
 	conditionStatus := corev1.ConditionFalse
 	if ready {
