@@ -1,7 +1,6 @@
 package deploy
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -14,8 +13,6 @@ import (
 	"github.com/ftechmax/krun/internal/kube"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/remotecommand"
 )
 
 var excludedVars = map[string]bool{
@@ -198,31 +195,9 @@ func findRunningPod(ctx context.Context, client *kube.Client, namespace, service
 }
 
 func execEnv(ctx context.Context, client *kube.Client, namespace, podName, containerName string) (string, error) {
-	req := client.Clientset.CoreV1().RESTClient().Post().
-		Resource("pods").
-		Name(podName).
-		Namespace(namespace).
-		SubResource("exec").
-		VersionedParams(&corev1.PodExecOptions{
-			Container: containerName,
-			Command:   []string{"env"},
-			Stdout:    true,
-			Stderr:    true,
-		}, scheme.ParameterCodec)
-
-	executor, err := remotecommand.NewSPDYExecutor(client.RestConfig, "POST", req.URL())
+	stdout, stderr, err := kube.ExecCapture(ctx, client, namespace, podName, containerName, []string{"env"}, nil)
 	if err != nil {
-		return "", fmt.Errorf("create exec stream: %w", err)
+		return "", fmt.Errorf("exec env: %w (stderr: %s)", err, stderr)
 	}
-
-	var stdout, stderr bytes.Buffer
-	err = executor.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdout: &stdout,
-		Stderr: &stderr,
-	})
-	if err != nil {
-		return "", fmt.Errorf("exec env: %w (stderr: %s)", err, stderr.String())
-	}
-
-	return stdout.String(), nil
+	return stdout, nil
 }
