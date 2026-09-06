@@ -91,7 +91,7 @@ func handle(ctx context.Context, client *kube.Client, config cfg.Config, project
 		}
 
 		if createNamespace {
-			if err := EnsureNamespaces(ctx, client, objs); err != nil {
+			if err := ensureNamespaces(ctx, client, objs); err != nil {
 				return nil, err
 			}
 		}
@@ -226,9 +226,9 @@ func replaceRegistryInValue(value any, from, to string) any {
 	}
 }
 
-// EnsureNamespaces creates missing target namespaces for an explicitly
+// ensureNamespaces creates missing target namespaces for an explicitly
 // requested --create-namespace deployment.
-func EnsureNamespaces(ctx context.Context, client *kube.Client, objs []*unstructured.Unstructured) error {
+func ensureNamespaces(ctx context.Context, client *kube.Client, objs []*unstructured.Unstructured) error {
 	provided := map[string]bool{}
 	for _, obj := range objs {
 		if obj.GetKind() == "Namespace" {

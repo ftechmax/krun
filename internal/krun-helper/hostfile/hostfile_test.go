@@ -18,7 +18,7 @@ func TestUpdateCreatesBlock(t *testing.T) {
 
 	overrideHostsPath(t, hostsPath)
 
-	err := Update([]contracts.HostsEntry{{IP: "127.0.0.1", Hostname: "rabbitmq.local"}})
+	err := update([]contracts.HostsEntry{{IP: "127.0.0.1", Hostname: "rabbitmq.local"}})
 	if err != nil {
 		t.Fatalf("Update failed: %v", err)
 	}
@@ -43,7 +43,7 @@ func TestUpdateReplacesBlockAndPreservesContent(t *testing.T) {
 
 	overrideHostsPath(t, hostsPath)
 
-	err := Update([]contracts.HostsEntry{{IP: "127.0.0.1", Hostname: "new.local"}})
+	err := update([]contracts.HostsEntry{{IP: "127.0.0.1", Hostname: "new.local"}})
 	if err != nil {
 		t.Fatalf("Update failed: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestRemoveDeletesBlock(t *testing.T) {
 
 	overrideHostsPath(t, hostsPath)
 
-	if err := Remove(); err != nil {
+	if err := remove(); err != nil {
 		t.Fatalf("Remove failed: %v", err)
 	}
 
@@ -89,7 +89,7 @@ func TestRemoveNoopWhenBlockAbsent(t *testing.T) {
 
 	overrideHostsPath(t, hostsPath)
 
-	if err := Remove(); err != nil {
+	if err := remove(); err != nil {
 		t.Fatalf("Remove failed: %v", err)
 	}
 
@@ -110,12 +110,12 @@ func TestUpdateIdempotent(t *testing.T) {
 	overrideHostsPath(t, hostsPath)
 	entries := []contracts.HostsEntry{{IP: "127.0.0.1", Hostname: "db.local"}}
 
-	if err := Update(entries); err != nil {
+	if err := update(entries); err != nil {
 		t.Fatalf("first Update failed: %v", err)
 	}
 	first := mustRead(t, hostsPath)
 
-	if err := Update(entries); err != nil {
+	if err := update(entries); err != nil {
 		t.Fatalf("second Update failed: %v", err)
 	}
 	second := mustRead(t, hostsPath)
@@ -135,7 +135,7 @@ func TestUpdateEmptyEntriesRemovesBlock(t *testing.T) {
 
 	overrideHostsPath(t, hostsPath)
 
-	if err := Update(nil); err != nil {
+	if err := update(nil); err != nil {
 		t.Fatalf("Update failed: %v", err)
 	}
 
@@ -156,7 +156,7 @@ func TestUpdatePreservesCRLF(t *testing.T) {
 
 	overrideHostsPath(t, hostsPath)
 
-	if err := Update([]contracts.HostsEntry{{IP: "127.0.0.1", Hostname: "mq.local"}}); err != nil {
+	if err := update([]contracts.HostsEntry{{IP: "127.0.0.1", Hostname: "mq.local"}}); err != nil {
 		t.Fatalf("Update failed: %v", err)
 	}
 
@@ -180,7 +180,7 @@ func TestUpdateMalformedExistingBlock(t *testing.T) {
 
 	overrideHostsPath(t, hostsPath)
 
-	if err := Update([]contracts.HostsEntry{{IP: "127.0.0.1", Hostname: "new.local"}}); err != nil {
+	if err := update([]contracts.HostsEntry{{IP: "127.0.0.1", Hostname: "new.local"}}); err != nil {
 		t.Fatalf("Update failed: %v", err)
 	}
 

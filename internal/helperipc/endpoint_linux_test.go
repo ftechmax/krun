@@ -25,7 +25,7 @@ func TestListenServeAndDial(t *testing.T) {
 	go func() { _ = server.Serve(listener) }()
 	defer server.Close()
 
-	client := NewClientForEndpoint(endpoint, 2*time.Second)
+	client := newClientForEndpoint(endpoint, 2*time.Second)
 	resp, err := client.Get(BaseURL + "/ping")
 	if err != nil {
 		t.Fatalf("request over unix socket: %v", err)

@@ -21,7 +21,7 @@ const (
 	ManagerNamespace   = "krun-system"
 	ManagerServiceName = "krun-traffic-manager"
 	ManagerServicePort = 8080
-	ManagerClientID    = "krun-helper"
+	managerClientID    = "krun-helper"
 
 	requestTimeout = 10 * time.Second
 
@@ -67,12 +67,12 @@ func (c *Client) CreateSession(serviceContext contracts.DebugServiceContext) (co
 	}
 
 	request := contracts.CreateDebugSessionRequest{
-		Namespace:   NormalizeNamespace(serviceContext.Namespace),
+		Namespace:   normalizeNamespace(serviceContext.Namespace),
 		ServiceName: serviceName,
 		Workload:    serviceName,
 		ServicePort: serviceContext.ContainerPort,
 		LocalPort:   serviceContext.InterceptPort,
-		ClientID:    ManagerClientID,
+		ClientID:    managerClientID,
 	}
 
 	session, err := do[contracts.DebugSession](c, http.MethodPost, "/v1/sessions", request)
@@ -199,7 +199,7 @@ func managerErrorMessage(body []byte) string {
 	return strings.TrimSpace(string(body))
 }
 
-func NormalizeNamespace(namespace string) string {
+func normalizeNamespace(namespace string) string {
 	if trimmed := strings.TrimSpace(namespace); trimmed != "" {
 		return trimmed
 	}

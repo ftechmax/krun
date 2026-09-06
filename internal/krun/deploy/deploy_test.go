@@ -340,8 +340,8 @@ func TestEnsureNamespacesCreatesMissingInSortedOrder(t *testing.T) {
 		newConfigMap("zeta", "duplicate", nil),
 	}
 
-	if err := EnsureNamespaces(context.Background(), client, objects); err != nil {
-		t.Fatalf("EnsureNamespaces: %v", err)
+	if err := ensureNamespaces(context.Background(), client, objects); err != nil {
+		t.Fatalf("ensureNamespaces: %v", err)
 	}
 	var created []string
 	for _, action := range clientset.Actions() {
@@ -369,8 +369,8 @@ func TestEnsureNamespacesIgnoresExistingAndManifestNamespaces(t *testing.T) {
 		newConfigMap("supplied", "two", nil),
 	}
 
-	if err := EnsureNamespaces(context.Background(), client, objects); err != nil {
-		t.Fatalf("EnsureNamespaces: %v", err)
+	if err := ensureNamespaces(context.Background(), client, objects); err != nil {
+		t.Fatalf("ensureNamespaces: %v", err)
 	}
 	for _, action := range clientset.Actions() {
 		if action.GetVerb() == "create" {
@@ -389,8 +389,8 @@ func TestEnsureNamespacesIgnoresAlreadyExistsRace(t *testing.T) {
 	})
 	client := &kube.Client{Clientset: clientset}
 
-	if err := EnsureNamespaces(context.Background(), client, []*unstructured.Unstructured{newConfigMap("racing", "cfg", nil)}); err != nil {
-		t.Fatalf("EnsureNamespaces: %v", err)
+	if err := ensureNamespaces(context.Background(), client, []*unstructured.Unstructured{newConfigMap("racing", "cfg", nil)}); err != nil {
+		t.Fatalf("ensureNamespaces: %v", err)
 	}
 }
 
@@ -410,9 +410,9 @@ func TestEnsureNamespacesReturnsActionableForbiddenErrors(t *testing.T) {
 				return true, nil, k8serrors.NewForbidden(schema.GroupResource{Resource: "namespaces"}, "locked", errors.New("denied"))
 			})
 			client := &kube.Client{Clientset: clientset}
-			err := EnsureNamespaces(context.Background(), client, []*unstructured.Unstructured{newConfigMap("locked", "cfg", nil)})
+			err := ensureNamespaces(context.Background(), client, []*unstructured.Unstructured{newConfigMap("locked", "cfg", nil)})
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("EnsureNamespaces error = %v, want text %q", err, tc.want)
+				t.Fatalf("ensureNamespaces error = %v, want text %q", err, tc.want)
 			}
 		})
 	}

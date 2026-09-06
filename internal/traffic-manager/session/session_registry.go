@@ -132,9 +132,3 @@ func (s *DebugSessionRegistry) Delete(sessionID string) bool {
 	delete(s.sessions, key)
 	return true
 }
-
-func (s *DebugSessionRegistry) Clear() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.sessions = map[string]contracts.DebugSession{}
-}

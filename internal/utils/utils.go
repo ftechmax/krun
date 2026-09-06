@@ -1,38 +1,28 @@
 package utils
 
 import (
-	"bytes"
 	"fmt"
-	"log"
-	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 )
 
 var (
-	colorReset   = "\033[0m"
-	colorRed     = "\033[31m"
-	colorGreen   = "\033[32m"
-	colorYellow  = "\033[33m"
-	colorBlue    = "\033[34m"
-	colorMagenta = "\033[35m"
-	colorCyan    = "\033[36m"
-	colorGray    = "\033[37m"
-	colorWhite   = "\033[97m"
+	colorReset  = "\033[0m"
+	colorRed    = "\033[31m"
+	colorGreen  = "\033[32m"
+	colorYellow = "\033[33m"
+	colorCyan   = "\033[36m"
+	colorGray   = "\033[37m"
 )
 
 type Color int
 
 const (
-	ColorNone Color = iota
-	Red
+	Red Color = iota + 1
 	Green
 	Yellow
-	Blue
-	Magenta
 	Cyan
 	Gray
 )
@@ -45,10 +35,6 @@ func Colorize(text string, color Color) string {
 		return colorGreen + text + colorReset
 	case Yellow:
 		return colorYellow + text + colorReset
-	case Blue:
-		return colorBlue + text + colorReset
-	case Magenta:
-		return colorMagenta + text + colorReset
 	case Cyan:
 		return colorCyan + text + colorReset
 	case Gray:
@@ -77,43 +63,4 @@ func GetExecutablePath() (string, error) {
 		exePath = filepath.Join(cwd, binaryName)
 	}
 	return exePath, nil
-}
-
-func RunCmd(name string, args ...string) error {
-	var stderr bytes.Buffer
-	cmd := exec.Command(name, args...)
-	cmd.Stdout = log.Writer()
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		log.Printf("command failed\n%v", Colorize(stderr.String(), Red))
-		return err
-	}
-
-	return nil
-}
-
-func RunCmdStdin(stdin string, name string, args ...string) error {
-	var stderr bytes.Buffer
-	cmd := exec.Command(name, args...)
-	cmd.Stdin = strings.NewReader(stdin)
-	cmd.Stdout = log.Writer()
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		log.Printf("command failed\n%v", Colorize(stderr.String(), Red))
-		return err
-	}
-
-	return nil
-}
-
-func GetFreePort() (port int, err error) {
-	var a *net.TCPAddr
-	if a, err = net.ResolveTCPAddr("tcp", "localhost:0"); err == nil {
-		var l *net.TCPListener
-		if l, err = net.ListenTCP("tcp", a); err == nil {
-			defer l.Close()
-			return l.Addr().(*net.TCPAddr).Port, nil
-		}
-	}
-	return
 }

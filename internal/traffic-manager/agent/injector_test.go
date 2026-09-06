@@ -51,8 +51,8 @@ func TestWorkloadInjectorInjectAndRemove(t *testing.T) {
 				t.Fatalf("expected 2 containers, got %d", len(containers))
 			}
 			sidecar := containers[1]
-			if sidecar.Name != DefaultContainerName {
-				t.Fatalf("expected sidecar name %q, got %q", DefaultContainerName, sidecar.Name)
+			if sidecar.Name != defaultContainerName {
+				t.Fatalf("expected sidecar name %q, got %q", defaultContainerName, sidecar.Name)
 			}
 			if sidecar.Image != "registry.local/krun-traffic-agent:latest" {
 				t.Fatalf("unexpected sidecar image: %q", sidecar.Image)
@@ -64,7 +64,7 @@ func TestWorkloadInjectorInjectAndRemove(t *testing.T) {
 				t.Fatalf("expected session env vars to be set, got %+v", sidecar.Env)
 			}
 			annotations := getWorkloadLabels(t, client, tc.kind, "default", "orders-api")
-			if annotations[InjectedLabelKey] != "true" {
+			if annotations[injectedLabelKey] != "true" {
 				t.Fatalf("expected injected label to be set, got %v", annotations)
 			}
 
@@ -79,7 +79,7 @@ func TestWorkloadInjectorInjectAndRemove(t *testing.T) {
 				t.Fatalf("unexpected remaining container: %q", containers[0].Name)
 			}
 			annotations = getWorkloadLabels(t, client, tc.kind, "default", "orders-api")
-			if _, exists := annotations[InjectedLabelKey]; exists {
+			if _, exists := annotations[injectedLabelKey]; exists {
 				t.Fatalf("expected injected label to be removed, got %v", annotations)
 			}
 		})
@@ -88,25 +88,25 @@ func TestWorkloadInjectorInjectAndRemove(t *testing.T) {
 
 func TestWorkloadInjectorCleanupRemovesAnnotatedAgents(t *testing.T) {
 	deployment := newTestDeployment("default", "orders-api")
-	deployment.Labels[InjectedLabelKey] = "true"
+	deployment.Labels[injectedLabelKey] = "true"
 	deployment.Spec.Template.Spec.Containers = append(deployment.Spec.Template.Spec.Containers, corev1.Container{
-		Name:  DefaultContainerName,
+		Name:  defaultContainerName,
 		Image: "agent:latest",
 	})
 
 	statefulSet := newTestStatefulSet("team-a", "billing-api")
-	statefulSet.Labels[InjectedLabelKey] = "true"
+	statefulSet.Labels[injectedLabelKey] = "true"
 	statefulSet.Spec.Template.Spec.Containers = append(statefulSet.Spec.Template.Spec.Containers, corev1.Container{
-		Name:  DefaultContainerName,
+		Name:  defaultContainerName,
 		Image: "agent:latest",
 	})
 
 	daemonSet := newTestDaemonSet("team-b", "node-proxy")
-	daemonSet.Labels[InjectedLabelKey] = "true"
+	daemonSet.Labels[injectedLabelKey] = "true"
 
 	unannotatedDeployment := newTestDeployment("default", "legacy-api")
 	unannotatedDeployment.Spec.Template.Spec.Containers = append(unannotatedDeployment.Spec.Template.Spec.Containers, corev1.Container{
-		Name:  DefaultContainerName,
+		Name:  defaultContainerName,
 		Image: "agent:latest",
 	})
 
@@ -122,7 +122,7 @@ func TestWorkloadInjectorCleanupRemovesAnnotatedAgents(t *testing.T) {
 		t.Fatalf("expected deployment sidecar to be removed, got %+v", containers)
 	}
 	annotations := getWorkloadLabels(t, client, workloadKindDeployment, "default", "orders-api")
-	if _, exists := annotations[InjectedLabelKey]; exists {
+	if _, exists := annotations[injectedLabelKey]; exists {
 		t.Fatalf("expected deployment annotation to be removed, got %v", annotations)
 	}
 
@@ -131,7 +131,7 @@ func TestWorkloadInjectorCleanupRemovesAnnotatedAgents(t *testing.T) {
 		t.Fatalf("expected statefulset sidecar to be removed, got %+v", containers)
 	}
 	annotations = getWorkloadLabels(t, client, workloadKindStatefulSet, "team-a", "billing-api")
-	if _, exists := annotations[InjectedLabelKey]; exists {
+	if _, exists := annotations[injectedLabelKey]; exists {
 		t.Fatalf("expected statefulset annotation to be removed, got %v", annotations)
 	}
 
@@ -140,7 +140,7 @@ func TestWorkloadInjectorCleanupRemovesAnnotatedAgents(t *testing.T) {
 		t.Fatalf("expected daemonset app container to remain unchanged, got %+v", containers)
 	}
 	annotations = getWorkloadLabels(t, client, workloadKindDaemonSet, "team-b", "node-proxy")
-	if _, exists := annotations[InjectedLabelKey]; exists {
+	if _, exists := annotations[injectedLabelKey]; exists {
 		t.Fatalf("expected daemonset annotation to be removed, got %v", annotations)
 	}
 
@@ -214,8 +214,8 @@ func TestWorkloadInjectorDefaults(t *testing.T) {
 	}
 	containers := getWorkloadContainers(t, client, workloadKindDeployment, "default", "orders-api")
 	sidecar := containers[1]
-	if sidecar.Image != DefaultImage {
-		t.Fatalf("expected default image %q, got %q", DefaultImage, sidecar.Image)
+	if sidecar.Image != defaultImage {
+		t.Fatalf("expected default image %q, got %q", defaultImage, sidecar.Image)
 	}
 	if sidecar.ImagePullPolicy != corev1.PullIfNotPresent {
 		t.Fatalf("expected default pull policy %q, got %q", corev1.PullIfNotPresent, sidecar.ImagePullPolicy)
@@ -415,16 +415,16 @@ func TestWorkloadInjectorRewritesAndRestoresProbes(t *testing.T) {
 		t.Fatalf("get deployment: %v", err)
 	}
 	app := updated.Spec.Template.Spec.Containers[0]
-	if got := app.LivenessProbe.HTTPGet.Port.IntValue(); got != DefaultProbePort {
-		t.Fatalf("liveness probe port = %d, want %d", got, DefaultProbePort)
+	if got := app.LivenessProbe.HTTPGet.Port.IntValue(); got != defaultProbePort {
+		t.Fatalf("liveness probe port = %d, want %d", got, defaultProbePort)
 	}
-	if got := app.ReadinessProbe.TCPSocket.Port.IntValue(); got != DefaultProbePort {
-		t.Fatalf("readiness probe port = %d, want %d (named port must be resolved)", got, DefaultProbePort)
+	if got := app.ReadinessProbe.TCPSocket.Port.IntValue(); got != defaultProbePort {
+		t.Fatalf("readiness probe port = %d, want %d (named port must be resolved)", got, defaultProbePort)
 	}
 	if got := app.StartupProbe.HTTPGet.Port.IntValue(); got != 9999 {
 		t.Fatalf("startup probe port = %d, must stay untouched", got)
 	}
-	if _, ok := updated.Annotations[OriginalProbesAnnotation]; !ok {
+	if _, ok := updated.Annotations[originalProbesAnnotation]; !ok {
 		t.Fatal("expected original-probes annotation after inject")
 	}
 
@@ -443,7 +443,7 @@ func TestWorkloadInjectorRewritesAndRestoresProbes(t *testing.T) {
 	if got := app.ReadinessProbe.TCPSocket.Port.String(); got != "http" {
 		t.Fatalf("readiness probe port = %q, want restored named port", got)
 	}
-	if _, ok := restored.Annotations[OriginalProbesAnnotation]; ok {
+	if _, ok := restored.Annotations[originalProbesAnnotation]; ok {
 		t.Fatal("original-probes annotation must be removed on restore")
 	}
 }

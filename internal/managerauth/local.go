@@ -16,8 +16,8 @@ import (
 )
 
 const (
-	DirName       = ".krun"
-	TokenFileName = "manager-token"
+	dirName       = ".krun"
+	tokenFileName = "manager-token"
 	TokenHashEnv  = "KRUN_MANAGER_AUTH_TOKEN_SHA256"
 )
 
@@ -26,7 +26,7 @@ func DefaultTokenPath() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve user home for manager token: %w", err)
 	}
-	return filepath.Join(home, DirName, TokenFileName), nil
+	return filepath.Join(home, dirName, tokenFileName), nil
 }
 
 // EnsureLocalToken returns the existing token or atomically creates a new one.

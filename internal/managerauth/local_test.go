@@ -9,7 +9,7 @@ import (
 )
 
 func TestEnsureLocalTokenCreatesAndReusesPrivateToken(t *testing.T) {
-	path := filepath.Join(t.TempDir(), DirName, TokenFileName)
+	path := filepath.Join(t.TempDir(), dirName, tokenFileName)
 	first, err := EnsureLocalToken(path)
 	if err != nil {
 		t.Fatalf("create token: %v", err)
@@ -36,7 +36,7 @@ func TestEnsureLocalTokenCreatesAndReusesPrivateToken(t *testing.T) {
 }
 
 func TestEnsureLocalTokenConcurrentInstallersReuseWinner(t *testing.T) {
-	path := filepath.Join(t.TempDir(), DirName, TokenFileName)
+	path := filepath.Join(t.TempDir(), dirName, tokenFileName)
 	const installers = 12
 	tokens := make(chan string, installers)
 	errors := make(chan error, installers)
@@ -71,7 +71,7 @@ func TestEnsureLocalTokenConcurrentInstallersReuseWinner(t *testing.T) {
 }
 
 func TestReadLocalTokenRejectsMalformedToken(t *testing.T) {
-	path := filepath.Join(t.TempDir(), TokenFileName)
+	path := filepath.Join(t.TempDir(), tokenFileName)
 	if err := os.WriteFile(path, []byte("not-a-token"), 0o600); err != nil {
 		t.Fatalf("write malformed token: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestReadLocalTokenRejectsLoosePermissions(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix permission bits are not authoritative on Windows")
 	}
-	path := filepath.Join(t.TempDir(), TokenFileName)
+	path := filepath.Join(t.TempDir(), tokenFileName)
 	if err := os.WriteFile(path, []byte("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"), 0o644); err != nil {
 		t.Fatalf("write token: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestReadLocalTokenRejectsSymlink(t *testing.T) {
 	}
 	directory := t.TempDir()
 	target := filepath.Join(directory, "target")
-	path := filepath.Join(directory, TokenFileName)
+	path := filepath.Join(directory, tokenFileName)
 	if err := os.WriteFile(target, []byte("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"), 0o600); err != nil {
 		t.Fatalf("write token target: %v", err)
 	}

@@ -22,11 +22,11 @@ var hostsFilePathResolver = defaultHostsFilePath
 // behaviour rather than on this package's functions.
 type File struct{}
 
-func (File) Write(entries []contracts.HostsEntry) error { return Update(entries) }
+func (File) Write(entries []contracts.HostsEntry) error { return update(entries) }
 
-func (File) Remove() error { return Remove() }
+func (File) Remove() error { return remove() }
 
-func Update(entries []contracts.HostsEntry) error {
+func update(entries []contracts.HostsEntry) error {
 	path, err := hostsFilePathResolver()
 	if err != nil {
 		return err
@@ -59,7 +59,7 @@ func Update(entries []contracts.HostsEntry) error {
 	return writeHosts(path, result)
 }
 
-func Remove() error {
+func remove() error {
 	path, err := hostsFilePathResolver()
 	if err != nil {
 		return err

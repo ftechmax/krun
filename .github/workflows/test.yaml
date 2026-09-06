@@ -9,7 +9,6 @@ on:
       - 'deploy/**'
       - 'internal/**'
       - 'test/**'
-      - 'krun-config.json'
       - '**/*.mod'
       - '**/*.sum'
   workflow_dispatch:

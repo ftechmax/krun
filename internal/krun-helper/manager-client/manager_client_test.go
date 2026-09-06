@@ -52,8 +52,8 @@ func TestManagerClientCreateSession(t *testing.T) {
 	if createReq.ServicePort != 8080 || createReq.LocalPort != 5000 {
 		t.Fatalf("unexpected ports in create request: %+v", createReq)
 	}
-	if createReq.ClientID != ManagerClientID {
-		t.Fatalf("expected client_id %q, got %q", ManagerClientID, createReq.ClientID)
+	if createReq.ClientID != managerClientID {
+		t.Fatalf("expected client_id %q, got %q", managerClientID, createReq.ClientID)
 	}
 }
 
@@ -160,10 +160,10 @@ func TestManagerClientDeleteSessionIgnoresBlankID(t *testing.T) {
 }
 
 func TestNormalizeNamespace(t *testing.T) {
-	if got := NormalizeNamespace(""); got != "default" {
+	if got := normalizeNamespace(""); got != "default" {
 		t.Fatalf("expected default namespace, got %q", got)
 	}
-	if got := NormalizeNamespace("  dev  "); got != "dev" {
+	if got := normalizeNamespace("  dev  "); got != "dev" {
 		t.Fatalf("expected trimmed namespace, got %q", got)
 	}
 }

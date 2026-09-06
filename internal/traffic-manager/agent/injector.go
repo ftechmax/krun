@@ -20,16 +20,16 @@ import (
 )
 
 const (
-	DefaultContainerName   = "krun-traffic-agent"
-	DefaultImage           = "docker.io/ftechmax/krun-traffic-agent:latest"
-	DefaultImagePullPolicy = "IfNotPresent"
-	DefaultManagerAddress  = "http://krun-traffic-manager.krun-system.svc:8080"
-	DefaultProbePort       = 8082
-	InjectedLabelKey       = "krun.ftechmax.net/traffic-agent-injected"
+	defaultContainerName   = "krun-traffic-agent"
+	defaultImage           = "docker.io/ftechmax/krun-traffic-agent:latest"
+	defaultImagePullPolicy = "IfNotPresent"
+	defaultManagerAddress  = "http://krun-traffic-manager.krun-system.svc:8080"
+	defaultProbePort       = 8082
+	injectedLabelKey       = "krun.ftechmax.net/traffic-agent-injected"
 	injectedLabelValue     = "true"
-	// OriginalProbesAnnotation stores the pre-rewrite probe specs so
+	// originalProbesAnnotation stores the pre-rewrite probe specs so
 	// Remove/Cleanup can restore them when the sidecar is taken out.
-	OriginalProbesAnnotation = "krun.ftechmax.net/original-probes"
+	originalProbesAnnotation = "krun.ftechmax.net/original-probes"
 )
 
 var ErrWorkloadNotFound = errors.New("target workload not found")
@@ -277,7 +277,7 @@ func (i *WorkloadInjector) findWorkloadTargetByKind(ctx context.Context, kind wo
 }
 
 func newWorkloadOperations(client kubernetes.Interface) map[workloadKind]workloadOperation {
-	listOptions := metav1.ListOptions{LabelSelector: InjectedLabelKey + "=" + injectedLabelValue}
+	listOptions := metav1.ListOptions{LabelSelector: injectedLabelKey + "=" + injectedLabelValue}
 	return map[workloadKind]workloadOperation{
 		workloadKindDeployment: {
 			list: func(ctx context.Context) ([]workloadIdentifier, error) {
@@ -374,8 +374,6 @@ func (i *WorkloadInjector) buildContainer(session contracts.DebugSession) corev1
 			{Name: "KRUN_SESSION_ID", Value: session.SessionID},
 			{Name: "KRUN_SESSION_TOKEN", Value: session.SessionToken},
 			{Name: "KRUN_MANAGER_ADDRESS", Value: i.options.ManagerAddress},
-			{Name: "KRUN_TARGET_NAMESPACE", Value: session.Namespace},
-			{Name: "KRUN_TARGET_WORKLOAD", Value: session.Workload},
 			{Name: "KRUN_TARGET_PORT", Value: strconv.Itoa(session.ServicePort)},
 			{Name: "KRUN_AGENT_PROBE_PORT", Value: strconv.Itoa(i.options.ProbePort)},
 		},
@@ -440,13 +438,13 @@ func (i *WorkloadInjector) rewriteProbes(target *workloadTarget, targetPort int)
 		annotations := target.object.GetAnnotations()
 		// Keep an existing annotation: it holds the true originals from the
 		// first injection; a re-inject sees already-rewritten probes.
-		if _, exists := annotations[OriginalProbesAnnotation]; !exists {
+		if _, exists := annotations[originalProbesAnnotation]; !exists {
 			data, err := json.Marshal(saved)
 			if err == nil {
 				if annotations == nil {
 					annotations = map[string]string{}
 				}
-				annotations[OriginalProbesAnnotation] = string(data)
+				annotations[originalProbesAnnotation] = string(data)
 				target.object.SetAnnotations(annotations)
 			}
 		}
@@ -457,7 +455,7 @@ func (i *WorkloadInjector) rewriteProbes(target *workloadTarget, targetPort int)
 // restoreProbes puts the original probe specs back and drops the annotation.
 func restoreProbes(target *workloadTarget) bool {
 	annotations := target.object.GetAnnotations()
-	raw, ok := annotations[OriginalProbesAnnotation]
+	raw, ok := annotations[originalProbesAnnotation]
 	if !ok {
 		return false
 	}
@@ -482,7 +480,7 @@ func restoreProbes(target *workloadTarget) bool {
 		}
 	}
 
-	delete(annotations, OriginalProbesAnnotation)
+	delete(annotations, originalProbesAnnotation)
 	if len(annotations) == 0 {
 		target.object.SetAnnotations(nil)
 	} else {
@@ -554,26 +552,26 @@ func findContainerIndex(containers []corev1.Container, name string) int {
 func normalizeOptions(options Options) Options {
 	options.ContainerName = strings.TrimSpace(options.ContainerName)
 	if options.ContainerName == "" {
-		options.ContainerName = DefaultContainerName
+		options.ContainerName = defaultContainerName
 	}
 
 	options.Image = strings.TrimSpace(options.Image)
 	if options.Image == "" {
-		options.Image = DefaultImage
+		options.Image = defaultImage
 	}
 
 	options.ImagePullPolicy = strings.TrimSpace(options.ImagePullPolicy)
 	if options.ImagePullPolicy == "" {
-		options.ImagePullPolicy = DefaultImagePullPolicy
+		options.ImagePullPolicy = defaultImagePullPolicy
 	}
 
 	options.ManagerAddress = strings.TrimSpace(options.ManagerAddress)
 	if options.ManagerAddress == "" {
-		options.ManagerAddress = DefaultManagerAddress
+		options.ManagerAddress = defaultManagerAddress
 	}
 
 	if options.ProbePort < 1 || options.ProbePort > 65535 {
-		options.ProbePort = DefaultProbePort
+		options.ProbePort = defaultProbePort
 	}
 
 	return options
@@ -582,13 +580,13 @@ func normalizeOptions(options Options) Options {
 func ensureInjectedLabel(obj metav1.Object) bool {
 	labels := obj.GetLabels()
 	if labels == nil {
-		obj.SetLabels(map[string]string{InjectedLabelKey: injectedLabelValue})
+		obj.SetLabels(map[string]string{injectedLabelKey: injectedLabelValue})
 		return true
 	}
-	if labels[InjectedLabelKey] == injectedLabelValue {
+	if labels[injectedLabelKey] == injectedLabelValue {
 		return false
 	}
-	labels[InjectedLabelKey] = injectedLabelValue
+	labels[injectedLabelKey] = injectedLabelValue
 	obj.SetLabels(labels)
 	return true
 }
@@ -598,10 +596,10 @@ func removeInjectedLabel(obj metav1.Object) bool {
 	if len(labels) == 0 {
 		return false
 	}
-	if _, found := labels[InjectedLabelKey]; !found {
+	if _, found := labels[injectedLabelKey]; !found {
 		return false
 	}
-	delete(labels, InjectedLabelKey)
+	delete(labels, injectedLabelKey)
 	if len(labels) == 0 {
 		obj.SetLabels(nil)
 		return true
