@@ -269,11 +269,6 @@ func TestStreamAttachRequiresValidSessionAndToken(t *testing.T) {
 		t.Fatalf("expected status 401, got %d", missingTokenRec.Code)
 	}
 
-	queryToken := newAuthedRequest(http.MethodGet, "/v1/stream/agent?session_id="+created.SessionID+"&session_token="+created.SessionToken, nil)
-	if _, err := s.resolveStreamSession(queryToken); err != nil {
-		t.Fatalf("legacy query-string token was rejected: %v", err)
-	}
-
 	headerToken := newAuthedRequest(http.MethodGet, "/v1/stream/agent?session_id="+created.SessionID, nil)
 	headerToken.Header.Set(streamSessionTokenHeader, created.SessionToken)
 	if _, err := s.resolveStreamSession(headerToken); err != nil {

@@ -13,6 +13,7 @@
 /traffic-agent
 !scripts/*.exe
 !scripts/*.dll
+krun-config.json
 
 # Test binary, built with `go test -c`
 *.test

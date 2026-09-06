@@ -63,7 +63,6 @@ const (
 	envAgentProbePort        = "KRUN_AGENT_PROBE_PORT"
 	envManagerAddress        = "KRUN_MANAGER_ADDRESS"
 	streamSessionIDQuery     = "session_id"
-	streamSessionTokenQuery  = "session_token"
 	streamSessionIDHeader    = "X-Krun-Session-ID"
 	streamSessionTokenHeader = "X-Krun-Session-Token"
 	streamAgentVersionHeader = "X-Krun-Agent-Version"
@@ -304,11 +303,9 @@ func (s *server) resolveStreamSession(r *http.Request) (contracts.DebugSession, 
 		return contracts.DebugSession{}, errStreamSessionNotFound
 	}
 
-	sessionToken := strings.TrimSpace(r.URL.Query().Get(streamSessionTokenQuery))
-	if sessionToken == "" {
-		sessionToken = strings.TrimSpace(r.Header.Get(streamSessionTokenHeader))
-	}
-	if strings.TrimSpace(debugSession.SessionToken) != "" && !constantTimeTokenEqual(sessionToken, debugSession.SessionToken) {
+	presented := strings.TrimSpace(r.Header.Get(streamSessionTokenHeader))
+	expected := strings.TrimSpace(debugSession.SessionToken)
+	if expected == "" || !constantTimeTokenEqual(presented, expected) {
 		return contracts.DebugSession{}, errStreamUnauthorized
 	}
 

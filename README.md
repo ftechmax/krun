@@ -204,7 +204,7 @@ The [krun-config.json](https://github.com/ftechmax/krun/blob/main/krun-config.js
 ```json
 {
   "source": {
-    "path": "c:/git/",
+    "path": "~/git/",
     "search_depth": 1
   },
   "local_registry": "registry:5000",

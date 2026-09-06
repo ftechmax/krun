@@ -1,9 +1,0 @@
-{
-  "source": {
-    "path": "~/git/",
-    "search_depth": 2
-  },
-  "hostname": "kube.local",
-  "local_registry": "registry:5000",
-  "remote_registry": "docker.io/ftechmax"
-}

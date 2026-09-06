@@ -232,7 +232,7 @@ func (m *Manager) List() []contracts.HelperDebugSession {
 		list = append(list, contracts.HelperDebugSession{
 			SessionKey: session.Key,
 			Context:    session.Context,
-			State:      normalizedState(session.State),
+			State:      session.State,
 		})
 	}
 	slices.SortFunc(list, func(a, b contracts.HelperDebugSession) int {
@@ -342,11 +342,4 @@ func (m *Manager) takeSession(key string) (*Session, bool) {
 		delete(m.sessions, key)
 	}
 	return session, ok
-}
-
-func normalizedState(state string) string {
-	if state == contracts.HelperSessionStateCleanupPending {
-		return state
-	}
-	return contracts.HelperSessionStateActive
 }

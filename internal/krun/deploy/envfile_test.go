@@ -9,119 +9,78 @@ import (
 	cfg "github.com/ftechmax/krun/internal/config"
 )
 
-func TestServiceDirBasic(t *testing.T) {
+func TestServiceDir(t *testing.T) {
 	root := t.TempDir()
-	config := cfg.Config{
-		KrunConfig: cfg.KrunConfig{
-			KrunSourceConfig: cfg.KrunSourceConfig{Path: root},
+	cases := []struct {
+		name         string
+		base         string
+		projectPaths map[string]string
+		service      cfg.Service
+		want         string
+		wantErr      bool
+	}{
+		{
+			name:    "base directory when the service has no project or path",
+			base:    root,
+			service: cfg.Service{Name: "api"},
+			want:    root,
+		},
+		{
+			name:         "project resolves through the project map",
+			base:         root,
+			projectPaths: map[string]string{"myproject": "apps/myproject"},
+			service:      cfg.Service{Name: "api", Project: "myproject"},
+			want:         filepath.Join(root, "apps", "myproject"),
+		},
+		{
+			name:    "service path appends to the base",
+			base:    root,
+			service: cfg.Service{Name: "api", Path: "src/api"},
+			want:    filepath.Join(root, "src", "api"),
+		},
+		{
+			name:         "project and service path compose",
+			base:         root,
+			projectPaths: map[string]string{"myproject": "apps/myproject"},
+			service:      cfg.Service{Name: "api", Project: "myproject", Path: "src/api"},
+			want:         filepath.Join(root, "apps", "myproject", "src", "api"),
+		},
+		{
+			name:         "unknown project falls back to the base",
+			base:         root,
+			projectPaths: map[string]string{"other": "apps/other"},
+			service:      cfg.Service{Name: "api", Project: "unknown"},
+			want:         root,
+		},
+		{
+			name:    "empty base directory is an error",
+			base:    "",
+			service: cfg.Service{Name: "api"},
+			wantErr: true,
 		},
 	}
-	service := cfg.Service{Name: "api"}
 
-	dir, err := serviceDir(service, config)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if dir != root {
-		t.Fatalf("got %q, want %q", dir, root)
-	}
-}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			config := cfg.Config{
+				KrunConfig:   cfg.KrunConfig{KrunSourceConfig: cfg.KrunSourceConfig{Path: testCase.base}},
+				ProjectPaths: testCase.projectPaths,
+			}
 
-func TestServiceDirWithProject(t *testing.T) {
-	root := t.TempDir()
-	config := cfg.Config{
-		KrunConfig: cfg.KrunConfig{
-			KrunSourceConfig: cfg.KrunSourceConfig{Path: root},
-		},
-		ProjectPaths: map[string]string{
-			"myproject": "apps/myproject",
-		},
-	}
-	service := cfg.Service{Name: "api", Project: "myproject"}
-
-	dir, err := serviceDir(service, config)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	want := filepath.Join(root, "apps", "myproject")
-	if dir != want {
-		t.Fatalf("got %q, want %q", dir, want)
-	}
-}
-
-func TestServiceDirWithServicePath(t *testing.T) {
-	root := t.TempDir()
-	config := cfg.Config{
-		KrunConfig: cfg.KrunConfig{
-			KrunSourceConfig: cfg.KrunSourceConfig{Path: root},
-		},
-	}
-	service := cfg.Service{Name: "api", Path: "src/api"}
-
-	dir, err := serviceDir(service, config)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	want := filepath.Join(root, "src", "api")
-	if dir != want {
-		t.Fatalf("got %q, want %q", dir, want)
-	}
-}
-
-func TestServiceDirWithProjectAndServicePath(t *testing.T) {
-	root := t.TempDir()
-	config := cfg.Config{
-		KrunConfig: cfg.KrunConfig{
-			KrunSourceConfig: cfg.KrunSourceConfig{Path: root},
-		},
-		ProjectPaths: map[string]string{
-			"myproject": "apps/myproject",
-		},
-	}
-	service := cfg.Service{Name: "api", Project: "myproject", Path: "src/api"}
-
-	dir, err := serviceDir(service, config)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	want := filepath.Join(root, "apps", "myproject", "src", "api")
-	if dir != want {
-		t.Fatalf("got %q, want %q", dir, want)
-	}
-}
-
-func TestServiceDirEmptyBaseDirReturnsError(t *testing.T) {
-	config := cfg.Config{
-		KrunConfig: cfg.KrunConfig{
-			KrunSourceConfig: cfg.KrunSourceConfig{Path: ""},
-		},
-	}
-	service := cfg.Service{Name: "api"}
-
-	_, err := serviceDir(service, config)
-	if err == nil {
-		t.Fatalf("expected error for empty base dir, got nil")
-	}
-}
-
-func TestServiceDirProjectNotInMap(t *testing.T) {
-	root := t.TempDir()
-	config := cfg.Config{
-		KrunConfig: cfg.KrunConfig{
-			KrunSourceConfig: cfg.KrunSourceConfig{Path: root},
-		},
-		ProjectPaths: map[string]string{
-			"other": "apps/other",
-		},
-	}
-	service := cfg.Service{Name: "api", Project: "unknown"}
-
-	dir, err := serviceDir(service, config)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if dir != root {
-		t.Fatalf("got %q, want %q", dir, root)
+			dir, err := serviceDir(testCase.service, config)
+			if testCase.wantErr {
+				if err == nil {
+					t.Fatal("expected an error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if dir != testCase.want {
+				t.Fatalf("got %q, want %q", dir, testCase.want)
+			}
+		})
 	}
 }
 

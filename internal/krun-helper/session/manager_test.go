@@ -586,12 +586,6 @@ func TestResolveKey(t *testing.T) {
 	}
 }
 
-func TestNormalizedStateTreatsMissingStateAsActive(t *testing.T) {
-	if got := normalizedState(""); got != contracts.HelperSessionStateActive {
-		t.Fatalf("missing state = %q, want active", got)
-	}
-}
-
 func workerContext() contracts.DebugServiceContext {
 	return dependencyContext("awesome-app3", "awesome-app3-worker", "rabbitmq.default.svc", 5672, 5001)
 }
