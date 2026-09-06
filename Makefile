@@ -20,12 +20,12 @@ LINUX_HELPER_BIN ?= krun-helper
 
 
 .PHONY: build-all build-windows build-linux clean \
-	build-krun-windows build-krun-linux build-krun-cross \
-	build-helper-windows build-helper-linux build-helper-cross patch-helper-windows-uac
+	build-krun-windows build-krun-linux \
+	build-helper-windows build-helper-linux
 
 build-all: build-windows build-linux
 
-build-windows: build-krun-windows patch-helper-windows-uac
+build-windows: build-krun-windows build-helper-windows
 
 build-linux: build-krun-linux build-helper-linux
 
@@ -35,18 +35,14 @@ build-krun-windows:
 build-krun-linux:
 	$(GOENV_LINUX) $(GO) build -ldflags "$(LDFLAGS)" -buildvcs=$(BUILDVCS) -o $(LINUX_KRUN_BIN) ./cmd/krun
 
-build-krun-cross: build-krun-windows build-krun-linux
-
+# krun-helper.exe carries its requireAdministrator UAC manifest via the
+# committed cmd/krun-helper/resource_windows_amd64.syso, which the Go linker
+# embeds automatically. No post-link mt.exe step, so this cross-compiles.
 build-helper-windows:
 	$(GOENV_WINDOWS) $(GO) build -ldflags "$(LDFLAGS)" -buildvcs=$(BUILDVCS) -o $(WINDOWS_HELPER_BIN) ./cmd/krun-helper
 
 build-helper-linux:
 	$(GOENV_LINUX) $(GO) build -ldflags "$(LDFLAGS)" -buildvcs=$(BUILDVCS) -o $(LINUX_HELPER_BIN) ./cmd/krun-helper
-
-build-helper-cross: build-helper-windows build-helper-linux
-
-patch-helper-windows-uac: build-helper-windows
-	powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/patch-helper-windows.ps1
 
 clean:
 	-rm -f $(WINDOWS_KRUN_BIN) $(LINUX_KRUN_BIN) $(WINDOWS_HELPER_BIN) $(LINUX_HELPER_BIN)

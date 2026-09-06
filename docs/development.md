@@ -12,9 +12,7 @@ Individual targets:
 
 ```sh
 make build-linux            # krun + krun-helper for Linux
-make build-windows          # krun.exe + krun-helper.exe (with the UAC patch)
-make build-krun-cross       # krun for Windows and Linux
-make build-helper-cross     # krun-helper for Windows and Linux
+make build-windows          # krun.exe + krun-helper.exe
 ```
 
 `VERSION` is stamped into `main.version`, which also selects where
@@ -25,15 +23,25 @@ release bundle for that tag. Override the source with `KRUN_MANIFEST_URL`.
 ## Windows helper build
 
 `krun-helper.exe` carries an embedded `requireAdministrator` manifest so it
-elevates however it is launched:
+elevates however it is launched. The manifest lives in
+[cmd/krun-helper/resource_windows_amd64.syso](../cmd/krun-helper/resource_windows_amd64.syso),
+which the Go linker embeds automatically for `GOOS=windows GOARCH=amd64` — so
+`make build-windows` needs no post-link step and cross-compiles from Linux.
 
-```powershell
-make patch-helper-windows-uac
+Regenerate the `.syso` only if `scripts/krun-helper.manifest` changes:
+
+```sh
+go run github.com/akavel/rsrc@latest \
+  -manifest scripts/krun-helper.manifest -arch amd64 \
+  -o cmd/krun-helper/resource_windows_amd64.syso
 ```
 
-That builds `./cmd/krun-helper` and applies `scripts/krun-helper.manifest` with
-`mt.exe` via `scripts/patch-helper-windows.ps1`. The script finds `mt.exe` in
-`scripts/`, on `PATH`, or in the Windows SDK.
+Verify any built binary with `python3 scripts/verify-uac-manifest.py krun-helper.exe`,
+which checks for an `RT_MANIFEST` resource requesting administrator rights. CI
+runs the same check.
+
+Note the `.syso` is `amd64`-specific by filename; a Windows build for another
+architecture would need its own generated alongside it.
 
 Note that krun launches the helper through the ShellExecute `runas` verb
 ([elevate_windows.go](../internal/krun/debug/elevate_windows.go)), which
