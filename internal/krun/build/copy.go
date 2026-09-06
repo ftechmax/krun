@@ -48,7 +48,7 @@ var excludedDirectories = map[string]struct{}{
 	"docs":         {},
 }
 
-func copySource(kubeConfig string, projectName string, projectPath string, skipWeb bool) (bool, error) {
+func copySource(client *kube.Client, projectName string, projectPath string, skipWeb bool) (bool, error) {
 	startTime := time.Now()
 	plusSym := utils.Colorize("+", utils.Green)
 	minusSym := utils.Colorize("-", utils.Red)
@@ -62,11 +62,6 @@ func copySource(kubeConfig string, projectName string, projectPath string, skipW
 	}
 	localRoot := filepath.ToSlash(filepath.Join(config.KrunSourceConfig.Path, filepath.FromSlash(projectRelPath)))
 	remoteRoot := path.Join(workspacePath, projectName)
-
-	client, err := kube.NewClient(kubeConfig)
-	if err != nil {
-		return false, fmt.Errorf("create kube client: %w", err)
-	}
 
 	ctx := context.Background()
 	remoteFiles, err := listRemoteFiles(ctx, client, remoteRoot)

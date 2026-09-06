@@ -22,18 +22,24 @@ func Build(projectName string, servicesToBuild []cfg.Service, skipWeb bool, forc
 
 	fmt.Printf("Building project %s\n", projectName)
 
+	client, err := kube.NewClient(config.KubeConfig)
+	if err != nil {
+		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to create Kubernetes client: %s", err.Error()), utils.Red))
+		return
+	}
+
 	// If flush requested, delete existing build pod to clear caches
 	if flush {
-		exists, err := buildPodExists(config.KubeConfig)
+		exists, err := buildPodExists(client)
 		if err != nil {
 			fmt.Println(utils.Colorize(fmt.Sprintf("Failed to check existing build pod for flush: %s", err.Error()), utils.Red))
 		} else if exists {
 			fmt.Println(utils.Colorize("Deleting existing build pod", utils.Yellow))
-			if err := deleteBuildPod(config.KubeConfig); err != nil {
+			if err := deleteBuildPod(client); err != nil {
 				fmt.Println(utils.Colorize(fmt.Sprintf("Failed to delete existing build pod: %s", err.Error()), utils.Red))
 			} else {
 				fmt.Print(utils.Colorize("Waiting for previous build pod to terminate", utils.Cyan))
-				if err := waitForBuildPodDeletion(config.KubeConfig, 45*time.Second); err != nil {
+				if err := waitForBuildPodDeletion(client, 45*time.Second); err != nil {
 					fmt.Println(utils.Colorize(" (timed out)", utils.Yellow))
 					fmt.Println(utils.Colorize("Previous build pod is still terminating; proceeding to recreate", utils.Yellow))
 				} else {
@@ -44,7 +50,7 @@ func Build(projectName string, servicesToBuild []cfg.Service, skipWeb bool, forc
 		}
 	}
 
-	if err := startBuildContainer(config.KubeConfig); err != nil {
+	if err := startBuildContainer(client); err != nil {
 		panic(fmt.Sprintf("Failed to start build container: %s", err.Error()))
 	}
 
@@ -52,7 +58,7 @@ func Build(projectName string, servicesToBuild []cfg.Service, skipWeb bool, forc
 	if config.ProjectPaths != nil {
 		projectPath = config.ProjectPaths[projectName]
 	}
-	needsBuild, err := copySource(config.KubeConfig, projectName, projectPath, skipWeb)
+	needsBuild, err := copySource(client, projectName, projectPath, skipWeb)
 	if err != nil {
 		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to copy source: %s", err.Error()), utils.Red))
 		return
@@ -63,21 +69,21 @@ func Build(projectName string, servicesToBuild []cfg.Service, skipWeb bool, forc
 			if skipWeb && filepath.Base(s.Path) == "web" {
 				continue
 			}
-			buildAndPushImagesBuildah(s, config.Registry, config.KubeConfig)
+			buildAndPushImagesBuildah(client, s, config.Registry)
 		}
 	} else {
 		fmt.Printf("No changes detected in project %s, skipping build\n", projectName)
 	}
 }
 
-func startBuildContainer(kubeConfig string) error {
-	if err := createBuildPod(kubeConfig); err != nil {
+func startBuildContainer(client *kube.Client) error {
+	if err := createBuildPod(client); err != nil {
 		return err
 	}
 
 	// Wait for build pod to be up
 	for range 60 {
-		exists, err := buildPodExists(kubeConfig)
+		exists, err := buildPodExists(client)
 		if err != nil {
 			return fmt.Errorf("error checking build pod state: %w", err)
 		}
@@ -90,7 +96,7 @@ func startBuildContainer(kubeConfig string) error {
 	return fmt.Errorf("build pod did not become ready in time")
 }
 
-func buildAndPushImagesBuildah(service cfg.Service, registry string, kubeConfig string) {
+func buildAndPushImagesBuildah(client *kube.Client, service cfg.Service, registry string) {
 	contextPath := filepath.ToSlash(filepath.Join(workspacePath, service.Project, service.Context))
 	dockerfilePath := filepath.ToSlash(filepath.Join(workspacePath, service.Project, service.Path, service.Dockerfile, "Dockerfile"))
 
@@ -99,13 +105,7 @@ func buildAndPushImagesBuildah(service cfg.Service, registry string, kubeConfig 
 		registry, service.Name, dockerfilePath, contextPath, registry, service.Name, registry, service.Name,
 	)
 
-	client, err := kube.NewClient(kubeConfig)
-	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to create Kubernetes client: %s", err.Error()), utils.Red))
-		return
-	}
-
-	err = execInBuildPodStream(
+	err := execInBuildPodStream(
 		context.Background(),
 		client,
 		[]string{"/bin/sh", "-c", cmd},
@@ -118,12 +118,12 @@ func buildAndPushImagesBuildah(service cfg.Service, registry string, kubeConfig 
 	}
 }
 
-func waitForBuildPodDeletion(kubeConfig string, timeout time.Duration) error {
+func waitForBuildPodDeletion(client *kube.Client, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	ticker := time.NewTicker(750 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		exists, err := buildPodExists(kubeConfig)
+		exists, err := buildPodExists(client)
 		if err != nil {
 			return err
 		}

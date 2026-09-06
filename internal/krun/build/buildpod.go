@@ -64,12 +64,7 @@ spec:
           path: registries.conf
 `
 
-func buildPodExists(kubeConfig string) (bool, error) {
-	client, err := kube.NewClient(kubeConfig)
-	if err != nil {
-		return false, fmt.Errorf("create kube client: %w", err)
-	}
-
+func buildPodExists(client *kube.Client) (bool, error) {
 	pod, err := client.Clientset.CoreV1().Pods("default").Get(context.Background(), buildPodName, metav1.GetOptions{})
 	if k8serrors.IsNotFound(err) {
 		return false, nil
@@ -81,13 +76,8 @@ func buildPodExists(kubeConfig string) (bool, error) {
 	return pod.Status.Phase == corev1.PodRunning, nil
 }
 
-func createBuildPod(kubeConfig string) error {
-	client, err := kube.NewClient(kubeConfig)
-	if err != nil {
-		return fmt.Errorf("create kube client: %w", err)
-	}
-
-	exists, err := buildPodExists(kubeConfig)
+func createBuildPod(client *kube.Client) error {
+	exists, err := buildPodExists(client)
 	if err != nil {
 		return fmt.Errorf("failed to check if build pod exists: %w", err)
 	}
@@ -111,11 +101,7 @@ func createBuildPod(kubeConfig string) error {
 	return nil
 }
 
-func deleteBuildPod(kubeConfig string) error {
-	client, err := kube.NewClient(kubeConfig)
-	if err != nil {
-		return fmt.Errorf("create kube client: %w", err)
-	}
+func deleteBuildPod(client *kube.Client) error {
 	objs, err := deploy.DecodeManifestObjects([]byte(manifest))
 	if err != nil {
 		return fmt.Errorf("failed to decode build pod manifest: %w", err)
