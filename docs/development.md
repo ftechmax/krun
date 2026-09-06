@@ -43,9 +43,10 @@ runs the same check.
 Note the `.syso` is `amd64`-specific by filename; a Windows build for another
 architecture would need its own generated alongside it.
 
-Note that krun launches the helper through the ShellExecute `runas` verb
-([elevate_windows.go](../internal/krun/debug/elevate_windows.go)), which
-requests elevation on its own; the manifest covers the other launch paths.
+The daemon itself is launched without elevation. The manifest matters for
+`krun-helper apply-hosts`, the short-lived privileged process that writes the
+hosts file, which krun starts through the ShellExecute `runas` verb
+([elevate_windows.go](../internal/krun/debug/elevate_windows.go)).
 
 ## Inspecting a running helper
 
@@ -54,7 +55,7 @@ status` is the supported read-only view — it never starts the helper. To poke
 at the API directly on Linux:
 
 ```sh
-curl --unix-socket /run/krun/krun-helper.sock http://localhost/v1/debug/sessions
+curl --unix-socket "$XDG_RUNTIME_DIR/krun/krun-helper.sock" http://localhost/v1/debug/sessions
 ```
 
 Show helper and port-forward processes:
@@ -87,7 +88,7 @@ real cluster to verify — see the debug flow in [debug.md](debug.md).
 | Path | What it is |
 | --- | --- |
 | `cmd/krun` | the CLI |
-| `cmd/krun-helper` | elevated dev-machine daemon |
+| `cmd/krun-helper` | unprivileged dev-machine daemon (plus the elevated `apply-hosts` one-shot) |
 | `cmd/traffic-manager` | in-cluster control plane and stream relay |
 | `cmd/traffic-agent` | injected sidecar that intercepts traffic |
 | `internal/streamlink` | the session stream protocol, shared by agent and helper |

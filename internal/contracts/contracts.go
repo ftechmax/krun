@@ -78,6 +78,10 @@ type HelperDebugSessionsResponse struct {
 type HelperResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
+	// HostsEntries is the hosts block the machine should now have, covering
+	// every active session. The helper computes it but cannot apply it: it
+	// runs unprivileged, so the CLI writes it through an elevated one-shot.
+	HostsEntries []HostsEntry `json:"hosts_entries,omitempty"`
 	// Version is the helper's build version, reported on /healthz so the CLI
 	// can detect a helper started by a different krun build.
 	Version string `json:"version,omitempty"`

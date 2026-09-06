@@ -195,7 +195,9 @@ jobs:
 
       - name: Start krun-helper daemon
         run: |
-          sudo -n "$GITHUB_WORKSPACE/bin/krun-helper" --kubeconfig "$HOME/.kube/config" &
+          # Deliberately unprivileged: the daemon must need no elevation.
+          # Running it under sudo here would hide a regression.
+          "$GITHUB_WORKSPACE/bin/krun-helper" --kubeconfig "$HOME/.kube/config" &
           for i in $(seq 1 20); do
             output=$(krun debug helper status 2>/dev/null || true)
             if echo "$output" | grep -q "helper is running"; then
@@ -208,9 +210,18 @@ jobs:
           echo "$output"
           echo "$output" | grep -q "helper is running" || { echo "krun-helper daemon failed to start"; exit 1; }
 
+          helper_user=$(ps -o user= -p "$(pgrep -f 'bin/krun-helper' | head -1)" | tr -d ' ')
+          echo "krun-helper is running as: $helper_user"
+          if [ "$helper_user" = "root" ]; then
+            echo "krun-helper must not run as root"
+            exit 1
+          fi
+
       - name: Test krun debug enable
         run: |
           output=$(krun debug enable smoke-app)
+          echo "$output"
+          grep -q 'KRUN' /etc/hosts && echo "hosts block written by the elevated one-shot"
           echo "$output"
           echo "$output" | grep -q "Session created"
 

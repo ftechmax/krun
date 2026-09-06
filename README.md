@@ -140,7 +140,7 @@ krun [global options] <command> [command options] <service>
   krun debug enable awesome-app-api
   ```
 
-  > NOTE: Debug mode launches the `krun-helper` daemon which requires **elevated privileges** (Windows UAC / Linux sudo) to modify your hosts file and set up port-forwards.
+  > NOTE: The `krun-helper` daemon itself runs unprivileged. Enabling or disabling debug mode updates your hosts file, which prompts once for elevation (Windows UAC / Linux sudo).
 
   Debug mode needs a local port configured for your developer machine. Set `intercept_port` in `krun.json` to the port your app listens on locally. Normally you want this to match the `launchSettings.json` `applicationUrl` (for example, `http://localhost:5000`). Ensure the value is unique per service so multiple debug sessions do not conflict.
 
@@ -158,7 +158,7 @@ krun [global options] <command> [command options] <service>
   ```
 
 - `debug helper status`
-  Check whether the local elevated `krun-helper` daemon is currently running.
+  Check whether the local `krun-helper` daemon is currently running.
 
   ```sh
   krun debug helper status
@@ -315,7 +315,7 @@ To debug a service using the krun runtime, first install the runtime components 
 
 Ensure your project launches as a console application (which is the default profile).
 
-Debug mode requires **elevated privileges** because the `krun-helper` daemon modifies your hosts file and sets up port-forwards. On Windows you will see a UAC prompt, on Linux/macOS the helper is started with `sudo`.
+The `krun-helper` daemon runs as your own user and needs no privileges. Writing the hosts-file block that points dependency hostnames at localhost does need them, so `krun debug enable` and `disable` each run one short-lived elevated step: a UAC prompt on Windows, a `sudo` prompt on Linux.
 
 Install the runtime components once per cluster:
 

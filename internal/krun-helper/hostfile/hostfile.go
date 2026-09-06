@@ -190,3 +190,18 @@ func detectNewline(content string) string {
 	}
 	return "\n"
 }
+
+// HasBlock reports whether the machine's hosts file still carries krun's
+// block. Reading needs no privilege, so the CLI can use it to spot a block
+// left behind by a helper that died before its session was disabled.
+func HasBlock() (bool, error) {
+	path, err := hostsFilePathResolver()
+	if err != nil {
+		return false, err
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Errorf("failed to read hosts file: %w", err)
+	}
+	return strings.Contains(string(content), krunHostsBlockStart), nil
+}

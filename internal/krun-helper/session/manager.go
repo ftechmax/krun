@@ -23,13 +23,6 @@ type Stream interface {
 // StreamAttacher opens the traffic stream for a session.
 type StreamAttacher func(sessionID string, sessionToken string, interceptPort int) (Stream, error)
 
-// HostsFile is the machine's hosts file. Write replaces krun's block wholesale
-// with the union across all sessions; Remove strips the block entirely.
-type HostsFile interface {
-	Write(entries []contracts.HostsEntry) error
-	Remove() error
-}
-
 // PortForwarder owns the dependency port-forwards, keyed by session.
 type PortForwarder interface {
 	Upsert(sessionKey string, forwards []contracts.PortForward) error
@@ -61,7 +54,6 @@ func (s *Session) closeStream() {
 }
 
 type Options struct {
-	Hosts    HostsFile
 	Forwards PortForwarder
 	API      ManagerAPI
 	Attach   StreamAttacher
@@ -75,7 +67,6 @@ type Manager struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
 
-	hosts    HostsFile
 	forwards PortForwarder
 	api      ManagerAPI
 	attach   StreamAttacher
@@ -84,7 +75,6 @@ type Manager struct {
 func NewManager(options Options) *Manager {
 	return &Manager{
 		sessions: map[string]*Session{},
-		hosts:    options.Hosts,
 		forwards: options.Forwards,
 		api:      options.API,
 		attach:   options.Attach,
@@ -126,16 +116,7 @@ func (m *Manager) Enable(sessionKey string, serviceContext contracts.DebugServic
 		// their cleanup before the first fallible replacement write.
 		undo = append(undo, rollback{
 			step: "remove preserved replacement local state",
-			run: func() error {
-				var failures []error
-				if err := m.forwards.Remove(key); err != nil {
-					failures = append(failures, fmt.Errorf("remove port-forwards: %w", err))
-				}
-				if err := m.hosts.Write(m.mergedHosts(nil)); err != nil {
-					failures = append(failures, fmt.Errorf("restore hosts file: %w", err))
-				}
-				return errors.Join(failures...)
-			},
+			run:  func() error { return m.forwards.Remove(key) },
 		})
 	}
 	fail := func(step string, err error) error {
@@ -151,16 +132,6 @@ func (m *Manager) Enable(sessionKey string, serviceContext contracts.DebugServic
 			return fmt.Errorf("%s: %w (rollback failed: %s)", step, err, strings.Join(rollbackFailures, "; "))
 		}
 		return fmt.Errorf("%s: %w", step, err)
-	}
-
-	if err := m.hosts.Write(m.mergedHosts(session)); err != nil {
-		return fail("hostfile update failed", err)
-	}
-	if !replacing {
-		undo = append(undo, rollback{
-			step: "restore hosts file",
-			run:  func() error { return m.hosts.Write(m.mergedHosts(nil)) },
-		})
 	}
 
 	if err := m.forwards.Upsert(key, portForwardsFor(serviceContext)); err != nil {
@@ -255,14 +226,10 @@ func (m *Manager) Close() error {
 	for _, session := range sessions {
 		session.closeStream()
 	}
-	var failures []error
 	if err := m.forwards.Clear(); err != nil {
-		failures = append(failures, fmt.Errorf("clear port-forwards: %w", err))
+		return fmt.Errorf("clear port-forwards: %w", err)
 	}
-	if err := m.hosts.Remove(); err != nil {
-		failures = append(failures, fmt.Errorf("remove hosts entries: %w", err))
-	}
-	return errors.Join(failures...)
+	return nil
 }
 
 func (m *Manager) removeForReplacement(previous *Session) error {
@@ -298,15 +265,21 @@ func (m *Manager) teardown(session *Session) []string {
 	if err := m.forwards.Remove(session.Key); err != nil {
 		failures = append(failures, fmt.Sprintf("port-forward remove failed: %v", err))
 	}
-	if err := m.hosts.Write(m.mergedHosts(nil)); err != nil {
-		failures = append(failures, fmt.Sprintf("hostfile remove failed: %v", err))
-	}
 	return failures
 }
 
-// mergedHosts snapshots the union of hosts entries across every stored
-// session plus pending, if given. krun keeps one block in the hosts file for
-// all sessions, so every change rewrites the whole union.
+// DesiredHosts snapshots the union of hosts entries across every stored
+// session. krun keeps one block in the hosts file covering all sessions, so
+// callers rewrite the whole union rather than patching it.
+//
+// The helper computes this but never applies it: writing /etc/hosts needs
+// root, and the helper deliberately runs unprivileged. The krun CLI applies
+// the returned block through a short-lived elevated process, because only the
+// CLI has the terminal an elevation prompt needs.
+func (m *Manager) DesiredHosts() []contracts.HostsEntry {
+	return m.mergedHosts(nil)
+}
+
 func (m *Manager) mergedHosts(pending *Session) []contracts.HostsEntry {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

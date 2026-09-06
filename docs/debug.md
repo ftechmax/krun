@@ -37,16 +37,19 @@ krun (CLI)                                 krun-system namespace
 
 The CLI talks HTTP+JSON to the helper over a local IPC endpoint, not TCP:
 
-1. Linux: unix domain socket `/run/krun/krun-helper.sock`, chowned to the
-   invoking user (`SUDO_UID`/`PKEXEC_UID`) with mode `0600`. Only that user
-   (and root) can talk to the elevated helper.
-2. Windows: named pipe `\\.\pipe\krun-helper` with a security descriptor
-   admitting the interactive user alongside SYSTEM/Administrators.
+1. Linux: unix domain socket `$XDG_RUNTIME_DIR/krun/krun-helper.sock`, mode
+   `0600`. The helper runs as the invoking user, so the socket needs no
+   chown and the endpoint is per-user rather than one-per-machine. Where
+   `XDG_RUNTIME_DIR` is unset, a uid-scoped directory under the temp dir is
+   used instead and is checked to be a real `0700` directory owned by the
+   current user.
+2. Windows: named pipe `\\.\pipe\krun-helper` with the default security
+   descriptor — helper and CLI run as the same user.
 3. Override with `krun-helper --socket <endpoint>`.
 
 Poking around: `krun debug helper status` (read-only, never auto-starts the
 helper) or, on Linux,
-`curl --unix-socket /run/krun/krun-helper.sock http://localhost/v1/debug/sessions`.
+`curl --unix-socket "$XDG_RUNTIME_DIR/krun/krun-helper.sock" http://localhost/v1/debug/sessions`.
 
 ## Traffic Flow (Breakpoint Path)
 
@@ -168,9 +171,28 @@ Security/runtime requirements remain:
 2. root user in agent container
 3. `iptables` available in image
 
+## Privilege model
+
+The helper daemon runs **unprivileged**. The only operation that needs root is
+writing the machine's hosts file, and that is a separate short-lived process:
+`krun-helper apply-hosts`, which reads the desired entries as JSON on stdin
+(or `--input <file>` on Windows) and replaces krun's block.
+
+The elevation is driven by the `krun` CLI, not by the daemon. A detached
+daemon has no controlling terminal, so it cannot answer a `sudo` password
+prompt; the CLI has the user's terminal and is the only place an interactive
+elevation can succeed. So `enable`/`disable` return the desired hosts block in
+their response and the CLI applies it.
+
+A consequence: if the helper dies without a `disable`, its hosts block stays
+behind. The entries point at `127.0.0.1` where nothing is listening, so the
+failure is a refused connection rather than silent misrouting, and
+`krun debug helper status` reports the stale block. It is not repaired
+automatically, because clearing it needs the same elevation that wrote it.
+
 ## krun-helper Responsibilities
 
-1. Own hosts-file lifecycle for dependencies.
+1. Report the hosts entries dependencies need; the CLI applies them elevated.
 2. Own dependency port-forward lifecycle.
 3. Maintain the manager port-forward that carries both REST and streams.
 4. Maintain session stream attachment(s).

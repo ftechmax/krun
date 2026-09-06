@@ -18,6 +18,7 @@ import (
 	cfg "github.com/ftechmax/krun/internal/config"
 	"github.com/ftechmax/krun/internal/contracts"
 	"github.com/ftechmax/krun/internal/helperipc"
+	"github.com/ftechmax/krun/internal/krun-helper/hostfile"
 	deploy "github.com/ftechmax/krun/internal/krun/deploy"
 	"github.com/ftechmax/krun/internal/kube"
 	"github.com/ftechmax/krun/internal/managerauth"
@@ -117,6 +118,8 @@ func Enable(service cfg.Service, config cfg.Config, containerName string) {
 
 	utils.Okf("Session created")
 
+	reportHostsUpdate(response.HostsEntries)
+
 	if err := deploy.CreateEnvFile(service, config, containerName); err != nil {
 		utils.Warnf("warning: could not create env file: %v", err)
 	}
@@ -144,6 +147,7 @@ func Disable(service cfg.Service, config cfg.Config) {
 		utils.Warnf("No active debug session found")
 	} else {
 		utils.Okf("Session removed")
+		reportHostsUpdate(response.HostsEntries)
 		if err := deploy.RemoveEnvFile(service, config); err != nil {
 			utils.Warnf("warning: could not remove env file: %v", err)
 		}
@@ -157,6 +161,7 @@ func HelperStatus(config cfg.Config) {
 	if err != nil {
 		utils.Warnf("helper is not running")
 		fmt.Printf("endpoint: %s\n", helperipc.DefaultEndpoint())
+		warnOnStaleHostsBlock()
 		return
 	}
 
@@ -185,6 +190,20 @@ func HelperStatus(config cfg.Config) {
 		}
 		fmt.Printf("  - %s (intercept port %d)%s\n", session.Context.ServiceName, session.Context.InterceptPort, suffix)
 	}
+}
+
+// warnOnStaleHostsBlock reports a hosts block with no helper behind it. The
+// helper runs unprivileged and cannot strip the block itself if it dies, so
+// this is surfaced rather than silently repaired — clearing it needs the same
+// elevation that wrote it.
+func warnOnStaleHostsBlock() {
+	present, err := hostfile.HasBlock()
+	if err != nil || !present {
+		return
+	}
+	utils.Warnf("a krun block is still present in the hosts file with no helper running")
+	utils.Warnf("dependency hostnames will resolve to 127.0.0.1 where nothing is listening")
+	fmt.Println("clear it with: krun debug disable <service>, or re-enable the session")
 }
 
 func HelperStop() {
@@ -469,7 +488,7 @@ func startHelperProcess(config cfg.Config) error {
 		args = append(args, "--kubeconfig", trimmedKubeConfig)
 	}
 
-	if err := startElevatedProcess(helperBinaryPath, args); err != nil {
+	if err := startBackgroundProcess(helperBinaryPath, args); err != nil {
 		return fmt.Errorf("failed to start helper: %w", err)
 	}
 	return nil
