@@ -173,26 +173,44 @@ Security/runtime requirements remain:
 
 ## Privilege model
 
-The helper daemon runs **unprivileged**. The only operation that needs root is
-writing the machine's hosts file, and that is a separate short-lived process:
-`krun-helper apply-hosts`, which reads the desired entries as JSON on stdin
-(or `--input <file>` on Windows) and replaces krun's block.
+krun runs two local processes, split so that almost nothing runs as root:
 
-The elevation is driven by the `krun` CLI, not by the daemon. A detached
-daemon has no controlling terminal, so it cannot answer a `sudo` password
-prompt; the CLI has the user's terminal and is the only place an interactive
-elevation can succeed. So `enable`/`disable` return the desired hosts block in
-their response and the CLI applies it.
+1. `krun-helper` (unprivileged) — the kubeconfig, the manager bearer token,
+   the dependency port-forwards, the manager port-forward and the traffic
+   stream. All of it as the invoking user.
+2. `krun-helper hosts-daemon` (privileged) — the only root process. It accepts
+   a list of hosts entries on a restricted local socket and rewrites krun's
+   block in the machine's hosts file. It holds no credentials, opens no
+   outbound connections, and knows nothing about debug sessions.
 
-A consequence: if the helper dies without a `disable`, its hosts block stays
-behind. The entries point at `127.0.0.1` where nothing is listening, so the
-failure is a refused connection rather than silent misrouting, and
-`krun debug helper status` reports the stale block. It is not repaired
-automatically, because clearing it needs the same elevation that wrote it.
+The hosts writer is long-lived on purpose. It starts on the first
+`krun debug enable` that needs it, so the developer answers **one** elevation
+prompt and then enables and disables sessions for the rest of the day without
+being asked again. Elevation is requested by the `krun` CLI, never by the
+helper daemon: a detached daemon has no controlling terminal, so `sudo` would
+refuse to prompt it.
+
+Because the writer takes requests off a socket while running as root, it
+treats them as untrusted:
+
+1. The socket is mode `0600`, chowned to the user who authorised the
+   elevation (`SUDO_UID`/`PKEXEC_UID`); on Windows the pipe DACL admits the
+   interactive user alongside SYSTEM/Administrators.
+2. Addresses must be loopback. krun only ever points dependency names at
+   `127.0.0.1`, so refusing anything else means a request can at worst
+   redirect a name to the local machine, never to a host an attacker
+   controls.
+3. Hostnames are restricted to letters, digits, `-`, `.` and `_`, which keeps
+   a crafted entry from injecting extra lines into the hosts file.
+4. Unknown JSON fields and oversized bodies are rejected.
+
+`krun debug helper stop` stops the writer, which strips krun's block as it
+exits. That is also how a developer reclaims their hosts file.
 
 ## krun-helper Responsibilities
 
-1. Report the hosts entries dependencies need; the CLI applies them elevated.
+1. Report the hosts entries dependencies need; the CLI sends them to the
+   privileged hosts writer.
 2. Own dependency port-forward lifecycle.
 3. Maintain the manager port-forward that carries both REST and streams.
 4. Maintain session stream attachment(s).

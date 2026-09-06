@@ -3,58 +3,69 @@
 package debug
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
 	"syscall"
 )
 
-// runElevatedWithInput runs a command as root in the foreground, feeding it
-// stdin, and waits for it to finish.
+const pkexecDetachScript = `trap "" HUP; "$@" </dev/null >/dev/null 2>&1 &`
+
+type linuxLaunchSpec struct {
+	path     string
+	args     []string
+	detached bool
+}
+
+// startElevatedProcess launches a long-lived privileged process. krun uses it
+// once, for the hosts writer: the developer answers one prompt and the writer
+// then stays up for the rest of the session.
 //
-// It is deliberately foreground: sudo reads its password from the terminal, so
-// this only works from the CLI, which has one. stdin carries the payload
-// rather than the password, so passing it here does not interfere with the
-// prompt.
-func runElevatedWithInput(binaryPath string, args []string, input []byte) error {
-	name, argv, err := elevationCommand(binaryPath, args, os.Geteuid())
+// It must run from the CLI. sudo reads its password from the terminal, and the
+// unprivileged helper daemon is detached without one.
+func startElevatedProcess(binaryPath string, args []string) error {
+	sudoPath, _ := exec.LookPath("sudo")
+	pkexecPath, _ := exec.LookPath("pkexec")
+
+	spec, err := buildLinuxLaunchSpec(binaryPath, args, os.Geteuid(), sudoPath, pkexecPath)
 	if err != nil {
 		return err
 	}
 
-	var stderr bytes.Buffer
-	cmd := exec.Command(name, argv...)
-	cmd.Stdin = bytes.NewReader(input)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if message := bytes.TrimSpace(stderr.Bytes()); len(message) > 0 {
-			return fmt.Errorf("%w: %s", err, message)
-		}
-		return err
+	if spec.detached {
+		return startBackgroundProcess(spec.path, spec.args)
 	}
-	return nil
+	return runForegroundCommand(spec.path, spec.args)
 }
 
-// elevationCommand picks how to become root. pkexec is not used: it prompts
-// through a polkit agent that is absent on headless machines, and unlike sudo
-// it does not forward stdin to the target program.
-func elevationCommand(binaryPath string, args []string, euid int) (string, []string, error) {
+func buildLinuxLaunchSpec(binaryPath string, args []string, euid int, sudoPath string, pkexecPath string) (linuxLaunchSpec, error) {
 	if euid == 0 {
-		return binaryPath, append([]string(nil), args...), nil
+		return linuxLaunchSpec{
+			path:     binaryPath,
+			args:     append([]string(nil), args...),
+			detached: true,
+		}, nil
 	}
 
-	sudoPath, err := exec.LookPath("sudo")
-	if err != nil {
-		return "", nil, fmt.Errorf("sudo not found; run krun as root or install sudo")
+	if sudoPath != "" {
+		return linuxLaunchSpec{
+			path: sudoPath,
+			args: append([]string{"-b", "--", binaryPath}, args...),
+		}, nil
 	}
-	return sudoPath, append([]string{"--", binaryPath}, args...), nil
+
+	if pkexecPath != "" {
+		pkexecArgs := []string{"/bin/sh", "-c", pkexecDetachScript, "sh", binaryPath}
+		pkexecArgs = append(pkexecArgs, args...)
+		return linuxLaunchSpec{path: pkexecPath, args: pkexecArgs}, nil
+	}
+
+	return linuxLaunchSpec{}, fmt.Errorf("no supported Linux elevation command found; install sudo or pkexec, or run krun as root")
 }
 
-// startBackgroundProcess launches the helper daemon as the current user. The
-// daemon needs no privilege of its own; the one privileged step, writing the
-// hosts file, is a separate elevated one-shot driven by the CLI.
+// startBackgroundProcess launches a process as the current user, detached so
+// it outlives the CLI. Used for the unprivileged helper daemon, which needs no
+// elevation at all.
 func startBackgroundProcess(binaryPath string, args []string) error {
 	cmd := exec.Command(binaryPath, args...)
 
@@ -73,4 +84,12 @@ func startBackgroundProcess(binaryPath string, args []string) error {
 		return err
 	}
 	return cmd.Process.Release()
+}
+
+func runForegroundCommand(binaryPath string, args []string) error {
+	cmd := exec.Command(binaryPath, args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }

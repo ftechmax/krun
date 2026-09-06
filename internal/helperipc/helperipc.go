@@ -33,3 +33,8 @@ func newClientForEndpoint(endpoint string, timeout time.Duration) *http.Client {
 		},
 	}
 }
+
+// NewClientForHosts connects to the privileged hosts writer.
+func NewClientForHosts(timeout time.Duration) *http.Client {
+	return newClientForEndpoint(HostsEndpoint, timeout)
+}

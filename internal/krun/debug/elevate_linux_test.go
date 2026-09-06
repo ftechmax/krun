@@ -2,38 +2,58 @@
 
 package debug
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
-func TestElevationCommandAsRootRunsDirectly(t *testing.T) {
-	name, args, err := elevationCommand("/usr/local/bin/krun-helper", []string{"apply-hosts"}, 0)
+func TestBuildLinuxLaunchSpecAsRootSkipsElevation(t *testing.T) {
+	spec, err := buildLinuxLaunchSpec("/usr/local/bin/krun-helper", []string{"hosts-daemon"}, 0, "/usr/bin/sudo", "/usr/bin/pkexec")
 	if err != nil {
 		t.Fatalf("root case: %v", err)
 	}
-	if name != "/usr/local/bin/krun-helper" {
-		t.Fatalf("root must exec the binary directly, got %q", name)
+	if spec.path != "/usr/local/bin/krun-helper" || !spec.detached {
+		t.Fatalf("root must run the binary directly and detach, got %+v", spec)
 	}
-	if len(args) != 1 || args[0] != "apply-hosts" {
-		t.Fatalf("unexpected args %+v", args)
+	if !slices.Equal(spec.args, []string{"hosts-daemon"}) {
+		t.Fatalf("unexpected args %+v", spec.args)
 	}
 }
 
-func TestElevationCommandUsesSudoWithArgumentTerminator(t *testing.T) {
-	name, args, err := elevationCommand("/usr/local/bin/krun-helper", []string{"apply-hosts"}, 1000)
+func TestBuildLinuxLaunchSpecPrefersSudo(t *testing.T) {
+	spec, err := buildLinuxLaunchSpec("/usr/local/bin/krun-helper", []string{"hosts-daemon"}, 1000, "/usr/bin/sudo", "/usr/bin/pkexec")
 	if err != nil {
-		t.Skip("sudo is not installed in this environment")
+		t.Fatalf("sudo case: %v", err)
 	}
-	if name == "/usr/local/bin/krun-helper" {
-		t.Fatal("a non-root euid must elevate rather than exec directly")
+	if spec.path != "/usr/bin/sudo" {
+		t.Fatalf("expected sudo, got %q", spec.path)
 	}
-	// "--" keeps a binary path that starts with a dash from being read as a
-	// sudo option.
-	want := []string{"--", "/usr/local/bin/krun-helper", "apply-hosts"}
-	if len(args) != len(want) {
-		t.Fatalf("args = %+v, want %+v", args, want)
+	// -b backgrounds the privileged process so it outlives the CLI; "--" stops
+	// a binary path beginning with a dash being read as a sudo option.
+	want := []string{"-b", "--", "/usr/local/bin/krun-helper", "hosts-daemon"}
+	if !slices.Equal(spec.args, want) {
+		t.Fatalf("args = %+v, want %+v", spec.args, want)
 	}
-	for i := range want {
-		if args[i] != want[i] {
-			t.Fatalf("args = %+v, want %+v", args, want)
-		}
+	if spec.detached {
+		t.Fatal("sudo -b backgrounds on its own; krun must not also detach it")
+	}
+}
+
+func TestBuildLinuxLaunchSpecFallsBackToPkexec(t *testing.T) {
+	spec, err := buildLinuxLaunchSpec("/usr/local/bin/krun-helper", []string{"hosts-daemon"}, 1000, "", "/usr/bin/pkexec")
+	if err != nil {
+		t.Fatalf("pkexec case: %v", err)
+	}
+	if spec.path != "/usr/bin/pkexec" {
+		t.Fatalf("expected pkexec, got %q", spec.path)
+	}
+	if !slices.Contains(spec.args, "/usr/local/bin/krun-helper") {
+		t.Fatalf("pkexec args must carry the binary, got %+v", spec.args)
+	}
+}
+
+func TestBuildLinuxLaunchSpecWithoutElevationFails(t *testing.T) {
+	if _, err := buildLinuxLaunchSpec("/usr/local/bin/krun-helper", nil, 1000, "", ""); err == nil {
+		t.Fatal("expected an error when neither sudo nor pkexec is available")
 	}
 }

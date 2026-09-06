@@ -245,3 +245,33 @@ func TestHasBlock(t *testing.T) {
 		t.Fatalf("HasBlock after remove = (%v, %v), want (false, nil)", present, err)
 	}
 }
+
+func TestValidateRejectsUnsafeEntries(t *testing.T) {
+	if err := Validate([]contracts.HostsEntry{{IP: "127.0.0.1", Hostname: "redis.default.svc"}}); err != nil {
+		t.Fatalf("a loopback entry must be accepted: %v", err)
+	}
+	if err := Validate([]contracts.HostsEntry{{IP: "::1", Hostname: "redis"}}); err != nil {
+		t.Fatalf("IPv6 loopback must be accepted: %v", err)
+	}
+
+	for name, entry := range map[string]contracts.HostsEntry{
+		"public address":  {IP: "93.184.216.34", Hostname: "example.com"},
+		"private address": {IP: "10.0.0.5", Hostname: "internal"},
+		"bad address":     {IP: "nonsense", Hostname: "redis"},
+		"empty hostname":  {IP: "127.0.0.1", Hostname: "   "},
+		"newline":         {IP: "127.0.0.1", Hostname: "a\n127.0.0.1 evil"},
+		"space":           {IP: "127.0.0.1", Hostname: "a b"},
+	} {
+		if err := Validate([]contracts.HostsEntry{entry}); err == nil {
+			t.Fatalf("%s must be refused", name)
+		}
+	}
+
+	tooMany := make([]contracts.HostsEntry, maxEntries+1)
+	for i := range tooMany {
+		tooMany[i] = contracts.HostsEntry{IP: "127.0.0.1", Hostname: "svc"}
+	}
+	if err := Validate(tooMany); err == nil {
+		t.Fatal("an oversized entry list must be refused")
+	}
+}

@@ -1,43 +1,102 @@
 package debug
 
 import (
-	"encoding/json"
 	"fmt"
+	"net/http"
+	"time"
 
 	"github.com/ftechmax/krun/internal/contracts"
+	"github.com/ftechmax/krun/internal/helperipc"
+	"github.com/ftechmax/krun/internal/krun-helper/hostfile"
 	"github.com/ftechmax/krun/internal/utils"
 )
 
-// applyHostsEntries writes the helper's desired hosts block through a
-// short-lived elevated krun-helper process.
+// applyHostsEntries writes the helper's desired hosts block through the
+// privileged hosts writer, starting it if it is not already running.
 //
-// This runs from the CLI rather than the helper daemon on purpose: the daemon
-// is detached and has no controlling terminal, so it cannot answer a sudo
-// password prompt. The CLI has the user's terminal, so it is the only place an
-// interactive elevation can succeed.
+// Starting it is the only time krun asks for elevation. The writer then stays
+// up, so a developer enables and disables debug sessions all day without
+// being prompted again. The unprivileged helper daemon cannot do this itself:
+// it is detached and has no controlling terminal, so sudo would refuse to
+// prompt it.
 func applyHostsEntries(entries []contracts.HostsEntry) error {
+	if err := ensureHostsDaemon(); err != nil {
+		return err
+	}
+
+	response, err := hostsCall[contracts.HelperResponse](
+		http.MethodPost, "/v1/hosts", contracts.ApplyHostsRequest{Entries: entries}, listTimeout)
+	if err != nil {
+		return err
+	}
+	if !response.Success {
+		return fmt.Errorf("hosts writer refused the update: %s", response.Message)
+	}
+	return nil
+}
+
+// ensureHostsDaemon starts the privileged writer if it is not already up. The
+// elevation prompt happens here and only here.
+func ensureHostsDaemon() error {
+	if hostsDaemonRunning() {
+		return nil
+	}
+
 	helperBinaryPath, err := resolveHelperBinaryPath()
 	if err != nil {
 		return err
 	}
 
-	payload, err := json.Marshal(entries)
-	if err != nil {
-		return fmt.Errorf("encode hosts entries: %w", err)
+	fmt.Println("Starting the krun hosts writer; this needs elevation once.")
+	if err := startElevatedProcess(helperBinaryPath, []string{"hosts-daemon"}); err != nil {
+		return fmt.Errorf("start hosts writer: %w", err)
 	}
 
-	if err := runElevatedWithInput(helperBinaryPath, []string{"apply-hosts"}, payload); err != nil {
-		return fmt.Errorf("update hosts file: %w", err)
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if hostsDaemonRunning() {
+			return nil
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
-	return nil
+	return fmt.Errorf("hosts writer failed to become healthy on %s", helperipc.HostsEndpoint)
+}
+
+func hostsDaemonRunning() bool {
+	response, err := hostsCall[contracts.HelperResponse](http.MethodGet, "/healthz", nil, healthTimeout)
+	return err == nil && response.Success
+}
+
+// stopHostsDaemon asks the writer to exit. It strips krun's hosts block on the
+// way out, so this is also how the block is cleaned up.
+func stopHostsDaemon() error {
+	if !hostsDaemonRunning() {
+		return nil
+	}
+	_, err := hostsCall[contracts.HelperResponse](http.MethodPost, "/v1/shutdown", nil, listTimeout)
+	return err
 }
 
 // reportHostsUpdate applies the block and explains the consequence if it
-// fails, rather than failing the whole command: the session itself is already
-// up, only dependency name resolution is missing.
+// fails, rather than failing the whole command: the session is already up,
+// only dependency name resolution is missing.
 func reportHostsUpdate(entries []contracts.HostsEntry) {
 	if err := applyHostsEntries(entries); err != nil {
 		utils.Errf("could not update the hosts file: %v", err)
 		utils.Warnf("the debug session is active, but dependency hostnames will not resolve locally")
 	}
+}
+
+func hostsStatusLine() string {
+	if hostsDaemonRunning() {
+		return utils.Colorize("hosts writer is running", utils.Green)
+	}
+	if present, err := hostfile.HasBlock(); err == nil && present {
+		return utils.Colorize("hosts writer is not running, but a krun block remains in the hosts file", utils.Yellow)
+	}
+	return "hosts writer is not running"
+}
+
+func hostsCall[T any](method string, path string, payload any, timeout time.Duration) (T, error) {
+	return ipcCall[T](helperipc.NewClientForHosts(timeout), method, path, payload)
 }

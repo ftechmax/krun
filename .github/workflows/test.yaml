@@ -221,7 +221,9 @@ jobs:
         run: |
           output=$(krun debug enable smoke-app)
           echo "$output"
-          grep -q 'KRUN' /etc/hosts && echo "hosts block written by the elevated one-shot"
+          grep -q 'KRUN' /etc/hosts && echo "hosts block written by the privileged hosts writer"
+          # The writer is the only process that should be root.
+          ps -o user=,args= -C krun-helper || true
           echo "$output"
           echo "$output" | grep -q "Session created"
 

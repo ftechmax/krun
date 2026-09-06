@@ -5,12 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/ftechmax/krun/internal/krun-helper/hostfile"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -302,89 +299,4 @@ func (f *fakeServerControl) Shutdown(context.Context) error {
 func (f *fakeServerControl) Close() error {
 	f.closeCalls++
 	return f.closeErr
-}
-
-func TestApplyHostsReadsStdin(t *testing.T) {
-	hostsPath := filepath.Join(t.TempDir(), "hosts")
-	if err := os.WriteFile(hostsPath, []byte("127.0.0.1 localhost\n"), 0o644); err != nil {
-		t.Fatalf("seed hosts: %v", err)
-	}
-	hostfile.SetPathForTest(t, hostsPath)
-
-	command := applyHostsCommand()
-	command.SetIn(strings.NewReader(`[{"ip":"127.0.0.1","hostname":"redis.default.svc"}]`))
-	command.SetOut(io.Discard)
-	if err := command.Execute(); err != nil {
-		t.Fatalf("apply-hosts: %v", err)
-	}
-
-	content, err := os.ReadFile(hostsPath)
-	if err != nil {
-		t.Fatalf("read hosts: %v", err)
-	}
-	if !strings.Contains(string(content), "redis.default.svc") {
-		t.Fatalf("entry was not written:\n%s", content)
-	}
-	if !strings.Contains(string(content), "127.0.0.1 localhost") {
-		t.Fatalf("pre-existing content was lost:\n%s", content)
-	}
-}
-
-func TestApplyHostsWithEmptyListStripsBlock(t *testing.T) {
-	hostsPath := filepath.Join(t.TempDir(), "hosts")
-	if err := os.WriteFile(hostsPath, []byte("127.0.0.1 localhost\n"), 0o644); err != nil {
-		t.Fatalf("seed hosts: %v", err)
-	}
-	hostfile.SetPathForTest(t, hostsPath)
-
-	write := applyHostsCommand()
-	write.SetIn(strings.NewReader(`[{"ip":"127.0.0.1","hostname":"redis.default.svc"}]`))
-	write.SetOut(io.Discard)
-	if err := write.Execute(); err != nil {
-		t.Fatalf("apply-hosts write: %v", err)
-	}
-
-	strip := applyHostsCommand()
-	strip.SetIn(strings.NewReader(`[]`))
-	strip.SetOut(io.Discard)
-	if err := strip.Execute(); err != nil {
-		t.Fatalf("apply-hosts strip: %v", err)
-	}
-
-	content, err := os.ReadFile(hostsPath)
-	if err != nil {
-		t.Fatalf("read hosts: %v", err)
-	}
-	if strings.Contains(string(content), "redis.default.svc") {
-		t.Fatalf("block was not stripped:\n%s", content)
-	}
-}
-
-func TestApplyHostsReadsInputFile(t *testing.T) {
-	dir := t.TempDir()
-	hostsPath := filepath.Join(dir, "hosts")
-	if err := os.WriteFile(hostsPath, []byte("127.0.0.1 localhost\n"), 0o644); err != nil {
-		t.Fatalf("seed hosts: %v", err)
-	}
-	hostfile.SetPathForTest(t, hostsPath)
-
-	payloadPath := filepath.Join(dir, "entries.json")
-	if err := os.WriteFile(payloadPath, []byte(`[{"ip":"127.0.0.1","hostname":"mongo.default.svc"}]`), 0o600); err != nil {
-		t.Fatalf("write payload: %v", err)
-	}
-
-	command := applyHostsCommand()
-	command.SetOut(io.Discard)
-	command.SetArgs([]string{"--input", payloadPath})
-	if err := command.Execute(); err != nil {
-		t.Fatalf("apply-hosts --input: %v", err)
-	}
-
-	content, err := os.ReadFile(hostsPath)
-	if err != nil {
-		t.Fatalf("read hosts: %v", err)
-	}
-	if !strings.Contains(string(content), "mongo.default.svc") {
-		t.Fatalf("entry from --input was not written:\n%s", content)
-	}
 }

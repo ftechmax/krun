@@ -26,6 +26,11 @@ type ListDebugSessionsResponse struct {
 	Sessions []DebugSession `json:"sessions"`
 }
 
+// ApplyHostsRequest is what the CLI sends the privileged hosts writer.
+type ApplyHostsRequest struct {
+	Entries []HostsEntry `json:"entries"`
+}
+
 type HostsEntry struct {
 	IP       string `json:"ip"`
 	Hostname string `json:"hostname"`

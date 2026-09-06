@@ -140,7 +140,7 @@ krun [global options] <command> [command options] <service>
   krun debug enable awesome-app-api
   ```
 
-  > NOTE: The `krun-helper` daemon itself runs unprivileged. Enabling or disabling debug mode updates your hosts file, which prompts once for elevation (Windows UAC / Linux sudo).
+  > NOTE: The `krun-helper` daemon runs unprivileged. A small separate hosts writer does need elevation, so the first `krun debug enable` prompts once (Windows UAC / Linux sudo); it then stays running, and later enable/disable commands do not prompt again.
 
   Debug mode needs a local port configured for your developer machine. Set `intercept_port` in `krun.json` to the port your app listens on locally. Normally you want this to match the `launchSettings.json` `applicationUrl` (for example, `http://localhost:5000`). Ensure the value is unique per service so multiple debug sessions do not conflict.
 
@@ -165,7 +165,8 @@ krun [global options] <command> [command options] <service>
   ```
 
 - `debug helper stop`
-  Stop the local `krun-helper` daemon.
+  Stop the local `krun-helper` daemon and the privileged hosts writer,
+  removing krun's block from your hosts file.
 
   ```sh
   krun debug helper stop
@@ -315,7 +316,9 @@ To debug a service using the krun runtime, first install the runtime components 
 
 Ensure your project launches as a console application (which is the default profile).
 
-The `krun-helper` daemon runs as your own user and needs no privileges. Writing the hosts-file block that points dependency hostnames at localhost does need them, so `krun debug enable` and `disable` each run one short-lived elevated step: a UAC prompt on Windows, a `sudo` prompt on Linux.
+The `krun-helper` daemon runs as your own user and needs no privileges: it holds the kubeconfig, the port-forwards and the traffic stream.
+
+Only one small process needs elevation — the hosts writer, which points dependency hostnames at localhost by editing your hosts file. It starts on your first `krun debug enable` (a UAC prompt on Windows, a `sudo` prompt on Linux) and then stays running, so the rest of your debugging session never prompts again. `krun debug helper stop` shuts it down and removes krun's block from your hosts file.
 
 Install the runtime components once per cluster:
 

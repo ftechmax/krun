@@ -44,8 +44,8 @@ Note the `.syso` is `amd64`-specific by filename; a Windows build for another
 architecture would need its own generated alongside it.
 
 The daemon itself is launched without elevation. The manifest matters for
-`krun-helper apply-hosts`, the short-lived privileged process that writes the
-hosts file, which krun starts through the ShellExecute `runas` verb
+`krun-helper hosts-daemon`, the privileged process that writes the hosts file,
+which krun starts through the ShellExecute `runas` verb
 ([elevate_windows.go](../internal/krun/debug/elevate_windows.go)).
 
 ## Inspecting a running helper
@@ -88,7 +88,7 @@ real cluster to verify — see the debug flow in [debug.md](debug.md).
 | Path | What it is |
 | --- | --- |
 | `cmd/krun` | the CLI |
-| `cmd/krun-helper` | unprivileged dev-machine daemon (plus the elevated `apply-hosts` one-shot) |
+| `cmd/krun-helper` | unprivileged dev-machine daemon, plus the small privileged `hosts-daemon` |
 | `cmd/traffic-manager` | in-cluster control plane and stream relay |
 | `cmd/traffic-agent` | injected sidecar that intercepts traffic |
 | `internal/streamlink` | the session stream protocol, shared by agent and helper |

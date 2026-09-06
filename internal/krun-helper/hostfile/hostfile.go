@@ -27,6 +27,10 @@ func (File) Write(entries []contracts.HostsEntry) error { return update(entries)
 func (File) Remove() error { return remove() }
 
 func update(entries []contracts.HostsEntry) error {
+	if err := Validate(entries); err != nil {
+		return err
+	}
+
 	path, err := hostsFilePathResolver()
 	if err != nil {
 		return err

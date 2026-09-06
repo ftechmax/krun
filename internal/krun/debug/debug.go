@@ -18,7 +18,6 @@ import (
 	cfg "github.com/ftechmax/krun/internal/config"
 	"github.com/ftechmax/krun/internal/contracts"
 	"github.com/ftechmax/krun/internal/helperipc"
-	"github.com/ftechmax/krun/internal/krun-helper/hostfile"
 	deploy "github.com/ftechmax/krun/internal/krun/deploy"
 	"github.com/ftechmax/krun/internal/kube"
 	"github.com/ftechmax/krun/internal/managerauth"
@@ -161,13 +160,14 @@ func HelperStatus(config cfg.Config) {
 	if err != nil {
 		utils.Warnf("helper is not running")
 		fmt.Printf("endpoint: %s\n", helperipc.DefaultEndpoint())
-		warnOnStaleHostsBlock()
+		fmt.Println(hostsStatusLine())
 		return
 	}
 
 	utils.Okf("helper is running")
 	fmt.Printf("endpoint: %s\n", helperipc.DefaultEndpoint())
 	fmt.Printf("kubeconfig: %s\n", config.KubeConfig)
+	fmt.Println(hostsStatusLine())
 	if strings.TrimSpace(helperVersion) != "" {
 		fmt.Printf("helper version: %s\n", helperVersion)
 	}
@@ -192,21 +192,15 @@ func HelperStatus(config cfg.Config) {
 	}
 }
 
-// warnOnStaleHostsBlock reports a hosts block with no helper behind it. The
-// helper runs unprivileged and cannot strip the block itself if it dies, so
-// this is surfaced rather than silently repaired — clearing it needs the same
-// elevation that wrote it.
-func warnOnStaleHostsBlock() {
-	present, err := hostfile.HasBlock()
-	if err != nil || !present {
-		return
-	}
-	utils.Warnf("a krun block is still present in the hosts file with no helper running")
-	utils.Warnf("dependency hostnames will resolve to 127.0.0.1 where nothing is listening")
-	fmt.Println("clear it with: krun debug disable <service>, or re-enable the session")
-}
-
 func HelperStop() {
+	// Stop the privileged writer first: it strips krun's hosts block as it
+	// exits, so this is also how a developer reclaims their hosts file.
+	if err := stopHostsDaemon(); err != nil {
+		utils.Errf("failed to stop the hosts writer: %v", err)
+	} else {
+		utils.Okf("hosts writer stopped")
+	}
+
 	if _, err := helperCheckHealth(); err != nil {
 		utils.Warnf("helper is not running")
 		return
@@ -552,6 +546,13 @@ func warnOnHelperSkew(cliVersion string, helperVersion string) {
 // decodes its JSON reply. A 4xx/5xx is returned as an error carrying the
 // helper's own message, which is what the CLI shows the user.
 func helperCall[T any](method string, path string, payload any, timeout time.Duration) (T, error) {
+	return ipcCall[T](helperipc.NewClient(timeout), method, path, payload)
+}
+
+// ipcCall sends one request over a local IPC endpoint and decodes its JSON
+// reply. A 4xx/5xx is returned as an error carrying the daemon's own message,
+// which is what the CLI shows the user.
+func ipcCall[T any](client *http.Client, method string, path string, payload any) (T, error) {
 	var result T
 
 	var body io.Reader
@@ -571,7 +572,7 @@ func helperCall[T any](method string, path string, payload any, timeout time.Dur
 		request.Header.Set("Content-Type", "application/json")
 	}
 
-	response, err := helperipc.NewClient(timeout).Do(request)
+	response, err := client.Do(request)
 	if err != nil {
 		return result, err
 	}

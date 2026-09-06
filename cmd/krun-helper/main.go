@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -15,7 +14,6 @@ import (
 
 	"github.com/ftechmax/krun/internal/contracts"
 	"github.com/ftechmax/krun/internal/helperipc"
-	"github.com/ftechmax/krun/internal/krun-helper/hostfile"
 	managerclient "github.com/ftechmax/krun/internal/krun-helper/manager-client"
 	helperportforward "github.com/ftechmax/krun/internal/krun-helper/portforward"
 	"github.com/ftechmax/krun/internal/krun-helper/session"
@@ -71,7 +69,7 @@ func main() {
 		},
 	}
 
-	rootCmd.AddCommand(applyHostsCommand())
+	rootCmd.AddCommand(hostsDaemonCommand())
 
 	rootCmd.Flags().StringVar(&kubeConfigPath, "kubeconfig", "", "Path to kubeconfig file")
 	rootCmd.Flags().StringVar(&socketEndpoint, "socket", "", "IPC endpoint override (unix socket path / named pipe name)")
@@ -81,61 +79,6 @@ func main() {
 		fmt.Println(err)
 		os.Exit(1)
 	}
-}
-
-// applyHostsCommand is the one privileged operation krun still needs. It is a
-// short-lived process, run elevated by the krun CLI, that replaces krun's
-// block in the machine's hosts file with the entries given on stdin (an empty
-// list strips the block). Keeping it in this binary rather than a separate one
-// avoids shipping another executable, and on Windows it inherits the
-// requireAdministrator manifest krun-helper.exe already carries.
-func applyHostsCommand() *cobra.Command {
-	var inputPath string
-
-	command := &cobra.Command{
-		Use:   "apply-hosts",
-		Short: "Write krun's hosts-file block (requires elevation; reads entries as JSON on stdin)",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			payload, err := readHostsPayload(cmd, inputPath)
-			if err != nil {
-				return err
-			}
-
-			var entries []contracts.HostsEntry
-			if len(strings.TrimSpace(string(payload))) > 0 {
-				if err := json.Unmarshal(payload, &entries); err != nil {
-					return fmt.Errorf("parse hosts entries: %w", err)
-				}
-			}
-
-			if len(entries) == 0 {
-				return hostfile.File{}.Remove()
-			}
-			return hostfile.File{}.Write(entries)
-		},
-	}
-
-	// Windows cannot pipe stdin to a process launched with ShellExecute
-	// "runas", so the CLI hands the payload over as a file there.
-	command.Flags().StringVar(&inputPath, "input", "", "Read entries from this file instead of stdin")
-	return command
-}
-
-func readHostsPayload(cmd *cobra.Command, inputPath string) ([]byte, error) {
-	if strings.TrimSpace(inputPath) != "" {
-		payload, err := os.ReadFile(inputPath)
-		if err != nil {
-			return nil, fmt.Errorf("read hosts entries from %s: %w", inputPath, err)
-		}
-		return payload, nil
-	}
-
-	payload, err := io.ReadAll(cmd.InOrStdin())
-	if err != nil {
-		return nil, fmt.Errorf("read hosts entries: %w", err)
-	}
-	return payload, nil
 }
 
 func startHelperDaemon(socketEndpoint string, kubeConfigPath string, managerTokenFile string) (returnErr error) {
