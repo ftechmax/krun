@@ -1,9 +1,10 @@
-name: Smoke Tests
+name: Tests
 
 on:
   push:
     branches:
       - develop
+      - main
     paths:
       - 'cmd/**'
       - 'deploy/**'
@@ -14,6 +15,23 @@ on:
   workflow_dispatch:
 
 jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./... -race
+
   smoke-tests:
     runs-on: ubuntu-latest
     steps:
