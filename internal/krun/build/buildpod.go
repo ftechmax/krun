@@ -2,23 +2,16 @@ package build
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"strings"
 	"time"
 
+	deploy "github.com/ftechmax/krun/internal/krun/deploy"
 	"github.com/ftechmax/krun/internal/kube"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
-	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/types"
-	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/apimachinery/pkg/watch"
-	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/tools/cache"
 	watchtools "k8s.io/client-go/tools/watch"
 )
@@ -103,7 +96,11 @@ func createBuildPod(kubeConfig string) error {
 	}
 
 	fmt.Println("\033[32mCreating build container\033[0m")
-	if err := applyManifest(context.Background(), client, manifest); err != nil {
+	objs, err := deploy.DecodeManifestObjects([]byte(manifest))
+	if err != nil {
+		return fmt.Errorf("failed to decode build pod manifest: %w", err)
+	}
+	if err := deploy.ApplyObjects(context.Background(), client, objs); err != nil {
 		return fmt.Errorf("failed to create build pod: %w", err)
 	}
 
@@ -119,7 +116,11 @@ func deleteBuildPod(kubeConfig string) error {
 	if err != nil {
 		return fmt.Errorf("create kube client: %w", err)
 	}
-	if err := deleteManifest(context.Background(), client, manifest); err != nil {
+	objs, err := deploy.DecodeManifestObjects([]byte(manifest))
+	if err != nil {
+		return fmt.Errorf("failed to decode build pod manifest: %w", err)
+	}
+	if err := deploy.DeleteObjects(context.Background(), client, objs); err != nil {
 		return fmt.Errorf("failed to initiate build pod deletion: %w", err)
 	}
 	return nil
@@ -152,97 +153,4 @@ func waitForBuildPodReady(client *kube.Client, timeout time.Duration) error {
 		return fmt.Errorf("wait for pod ready: %w", err)
 	}
 	return nil
-}
-
-func applyManifest(ctx context.Context, client *kube.Client, manifestYAML string) error {
-	objs, err := decodeManifestObjects(manifestYAML)
-	if err != nil {
-		return err
-	}
-
-	for _, obj := range objs {
-		gvk := obj.GroupVersionKind()
-		mapping, err := client.Mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
-		if err != nil {
-			return fmt.Errorf("resolve resource mapping for %s: %w", gvk.String(), err)
-		}
-
-		ri := resourceInterface(client.DynamicClient, mapping, obj.GetNamespace())
-		data, err := json.Marshal(obj)
-		if err != nil {
-			return fmt.Errorf("marshal %s %s: %w", obj.GetKind(), obj.GetName(), err)
-		}
-
-		force := true
-		if _, err := ri.Patch(ctx, obj.GetName(), types.ApplyPatchType, data, metav1.PatchOptions{
-			FieldManager: "krun",
-			Force:        &force,
-		}); err != nil {
-			return fmt.Errorf("apply %s %s: %w", obj.GetKind(), obj.GetName(), err)
-		}
-	}
-
-	return nil
-}
-
-func deleteManifest(ctx context.Context, client *kube.Client, manifestYAML string) error {
-	objs, err := decodeManifestObjects(manifestYAML)
-	if err != nil {
-		return err
-	}
-
-	background := metav1.DeletePropagationBackground
-	for _, obj := range objs {
-		gvk := obj.GroupVersionKind()
-		mapping, err := client.Mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
-		if err != nil {
-			return fmt.Errorf("resolve resource mapping for %s: %w", gvk.String(), err)
-		}
-
-		ri := resourceInterface(client.DynamicClient, mapping, obj.GetNamespace())
-		err = ri.Delete(ctx, obj.GetName(), metav1.DeleteOptions{
-			PropagationPolicy: &background,
-		})
-		if err != nil && !k8serrors.IsNotFound(err) {
-			return fmt.Errorf("delete %s %s: %w", obj.GetKind(), obj.GetName(), err)
-		}
-	}
-	return nil
-}
-
-func decodeManifestObjects(manifestYAML string) ([]*unstructured.Unstructured, error) {
-	decoder := utilyaml.NewYAMLOrJSONDecoder(strings.NewReader(manifestYAML), 4096)
-	var objs []*unstructured.Unstructured
-
-	for {
-		obj := &unstructured.Unstructured{}
-		err := decoder.Decode(obj)
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("decode manifest: %w", err)
-		}
-		if len(obj.Object) == 0 || obj.GetKind() == "" {
-			continue
-		}
-		objs = append(objs, obj)
-	}
-
-	return objs, nil
-}
-
-func resourceInterface(
-	dynamicClient dynamic.Interface,
-	mapping *apimeta.RESTMapping,
-	namespace string,
-) dynamic.ResourceInterface {
-	if mapping.Scope.Name() == apimeta.RESTScopeNameNamespace {
-		ns := namespace
-		if ns == "" {
-			ns = "default"
-		}
-		return dynamicClient.Resource(mapping.Resource).Namespace(ns)
-	}
-	return dynamicClient.Resource(mapping.Resource)
 }
