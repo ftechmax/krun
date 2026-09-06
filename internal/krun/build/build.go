@@ -10,6 +10,7 @@ import (
 	cfg "github.com/ftechmax/krun/internal/config"
 	"github.com/ftechmax/krun/internal/kube"
 	"github.com/ftechmax/krun/internal/utils"
+	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 var config cfg.Config
@@ -82,18 +83,21 @@ func startBuildContainer(client *kube.Client) error {
 	}
 
 	// Wait for build pod to be up
-	for range 60 {
-		exists, err := buildPodExists(client)
-		if err != nil {
-			return fmt.Errorf("error checking build pod state: %w", err)
-		}
-		if exists {
-			return nil
-		}
-		fmt.Println("Waiting for build pod to become ready...")
-		time.Sleep(500 * time.Millisecond)
+	err := wait.PollUntilContextTimeout(context.Background(), 500*time.Millisecond, 30*time.Second, true,
+		func(ctx context.Context) (bool, error) {
+			exists, err := buildPodExists(client)
+			if err != nil {
+				return false, fmt.Errorf("error checking build pod state: %w", err)
+			}
+			if !exists {
+				fmt.Println("Waiting for build pod to become ready...")
+			}
+			return exists, nil
+		})
+	if wait.Interrupted(err) {
+		return fmt.Errorf("build pod did not become ready in time")
 	}
-	return fmt.Errorf("build pod did not become ready in time")
+	return err
 }
 
 func buildAndPushImagesBuildah(client *kube.Client, service cfg.Service, registry string) {
@@ -119,21 +123,19 @@ func buildAndPushImagesBuildah(client *kube.Client, service cfg.Service, registr
 }
 
 func waitForBuildPodDeletion(client *kube.Client, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	ticker := time.NewTicker(750 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		exists, err := buildPodExists(client)
-		if err != nil {
-			return err
-		}
-		if !exists {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("timeout waiting for build pod deletion")
-		}
-		fmt.Print(".")
-		<-ticker.C
+	err := wait.PollUntilContextTimeout(context.Background(), 750*time.Millisecond, timeout, true,
+		func(ctx context.Context) (bool, error) {
+			exists, err := buildPodExists(client)
+			if err != nil {
+				return false, err
+			}
+			if exists {
+				fmt.Print(".")
+			}
+			return !exists, nil
+		})
+	if wait.Interrupted(err) {
+		return fmt.Errorf("timeout waiting for build pod deletion")
 	}
+	return err
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/ftechmax/krun/internal/kube"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 var excludedVars = map[string]bool{
@@ -172,26 +173,30 @@ func serviceDir(service cfg.Service, config cfg.Config) (string, error) {
 }
 
 func findRunningPod(ctx context.Context, client *kube.Client, namespace, serviceName string) (string, error) {
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		pods, err := client.Clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
-			LabelSelector: fmt.Sprintf("app=%s", serviceName),
-		})
-		if err != nil {
-			return "", fmt.Errorf("list pods for %s/%s: %w", namespace, serviceName, err)
-		}
-
-		for _, pod := range pods.Items {
-			if pod.Status.Phase == corev1.PodRunning && pod.DeletionTimestamp == nil {
-				return pod.Name, nil
+	var found string
+	err := wait.PollUntilContextTimeout(ctx, 2*time.Second, 30*time.Second, true,
+		func(ctx context.Context) (bool, error) {
+			pods, err := client.Clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+				LabelSelector: fmt.Sprintf("app=%s", serviceName),
+			})
+			if err != nil {
+				return false, fmt.Errorf("list pods for %s/%s: %w", namespace, serviceName, err)
 			}
-		}
-
-		if time.Now().After(deadline) {
-			return "", fmt.Errorf("no running pod found for %s/%s", namespace, serviceName)
-		}
-		time.Sleep(2 * time.Second)
+			for _, pod := range pods.Items {
+				if pod.Status.Phase == corev1.PodRunning && pod.DeletionTimestamp == nil {
+					found = pod.Name
+					return true, nil
+				}
+			}
+			return false, nil
+		})
+	if wait.Interrupted(err) {
+		return "", fmt.Errorf("no running pod found for %s/%s", namespace, serviceName)
 	}
+	if err != nil {
+		return "", err
+	}
+	return found, nil
 }
 
 func execEnv(ctx context.Context, client *kube.Client, namespace, podName, containerName string) (string, error) {

@@ -25,6 +25,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 const (
@@ -240,30 +241,28 @@ func RuntimeInstall(config cfg.Config, version string) {
 
 	fmt.Println("Waiting for traffic manager to become ready...")
 
-	timeout := 2 * time.Minute
-	interval := 2 * time.Second
-	deadline := time.Now().Add(timeout)
-
-	for time.Now().Before(deadline) {
-		dep, err := client.Clientset.AppsV1().Deployments("krun-system").Get(context.Background(), "krun-traffic-manager", metav1.GetOptions{})
-		if err == nil {
+	err = wait.PollUntilContextTimeout(context.Background(), 2*time.Second, 2*time.Minute, false,
+		func(ctx context.Context) (bool, error) {
+			dep, err := client.Clientset.AppsV1().Deployments("krun-system").Get(ctx, "krun-traffic-manager", metav1.GetOptions{})
+			if err != nil {
+				return false, nil
+			}
 			desired := int32(1)
 			if dep.Spec.Replicas != nil {
 				desired = *dep.Spec.Replicas
 			}
-			if dep.Status.ObservedGeneration >= dep.Generation &&
+			return dep.Status.ObservedGeneration >= dep.Generation &&
 				dep.Status.UpdatedReplicas >= desired &&
 				dep.Status.ReadyReplicas >= desired &&
-				dep.Status.AvailableReplicas >= desired {
-				fmt.Println(utils.Colorize("Traffic manager installed successfully", utils.Green))
-				fmt.Printf("Manager token: %s\n", managerTokenPath)
-				return
-			}
-		}
-		time.Sleep(interval)
+				dep.Status.AvailableReplicas >= desired, nil
+		})
+	if err != nil {
+		fmt.Println(utils.Colorize("Traffic manager was applied but did not become ready", utils.Yellow))
+		return
 	}
 
-	fmt.Println(utils.Colorize("Traffic manager was applied but did not become ready", utils.Yellow))
+	fmt.Println(utils.Colorize("Traffic manager installed successfully", utils.Green))
+	fmt.Printf("Manager token: %s\n", managerTokenPath)
 }
 
 func RuntimeStatus(config cfg.Config) {
@@ -435,16 +434,19 @@ func ensureHelperStarted(config cfg.Config) error {
 		return err
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if helperVersion, err := helperCheckHealth(); err == nil {
+	pollErr := wait.PollUntilContextTimeout(context.Background(), 200*time.Millisecond, 5*time.Second, false,
+		func(context.Context) (bool, error) {
+			helperVersion, err := helperCheckHealth()
+			if err != nil {
+				return false, nil
+			}
 			warnOnHelperSkew(config.Version, helperVersion)
-			return nil
-		}
-		time.Sleep(200 * time.Millisecond)
+			return true, nil
+		})
+	if pollErr != nil {
+		return fmt.Errorf("helper failed to become healthy on %s", helperipc.DefaultEndpoint)
 	}
-
-	return fmt.Errorf("helper failed to become healthy on %s", helperipc.DefaultEndpoint)
+	return nil
 }
 
 func startHelperProcess(config cfg.Config) error {
