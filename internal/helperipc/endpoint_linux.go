@@ -8,14 +8,28 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"time"
 )
 
-const DefaultEndpoint = "/run/krun/krun-helper.sock"
-
 const staleProbeTimeout = 2 * time.Second
+
+// DefaultEndpoint is the unix socket the helper listens on. The helper runs as
+// the invoking user, so the socket lives in that user's runtime directory
+// rather than a root-owned path under /run: no elevation is needed to create
+// it, and it is naturally per-user instead of one-per-machine.
+func DefaultEndpoint() string {
+	return filepath.Join(runtimeDir(), "krun-helper.sock")
+}
+
+// runtimeDir prefers XDG_RUNTIME_DIR, which systemd creates user-owned at 0700
+// and removes at logout. Where it is unset (bare containers, cron, ssh without
+// pam_systemd) fall back to a uid-scoped directory under the temp dir.
+func runtimeDir() string {
+	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
+		return filepath.Join(dir, "krun")
+	}
+	return filepath.Join(os.TempDir(), fmt.Sprintf("krun-%d", os.Getuid()))
+}
 
 func dial(ctx context.Context, endpoint string) (net.Conn, error) {
 	dialer := net.Dialer{}
@@ -23,11 +37,20 @@ func dial(ctx context.Context, endpoint string) (net.Conn, error) {
 }
 
 // Listen binds the helper's unix socket. An existing socket file is probed
-// first: a live helper is an error, a stale leftover (e.g. after a crash)
-// is removed. The socket is then restricted to the invoking user.
+// first: a live helper is an error, a stale leftover (e.g. after a crash) is
+// removed.
 func Listen(endpoint string) (net.Listener, error) {
-	if err := os.MkdirAll(filepath.Dir(endpoint), 0o755); err != nil {
+	dir := filepath.Dir(endpoint)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create socket directory: %w", err)
+	}
+	// Only the default path is hardened: it is predictable and its temp-dir
+	// fallback sits under a world-writable parent, so another user could race
+	// us to create it. An explicit --socket is the caller's business.
+	if endpoint == DefaultEndpoint() {
+		if err := checkPrivateDir(dir); err != nil {
+			return nil, err
+		}
 	}
 
 	if _, err := os.Stat(endpoint); err == nil {
@@ -48,58 +71,34 @@ func Listen(endpoint string) (net.Listener, error) {
 		return nil, err
 	}
 
-	if err := secureSocket(endpoint); err != nil {
+	if err := os.Chmod(endpoint, 0o600); err != nil {
 		_ = listener.Close()
 		_ = os.Remove(endpoint)
-		return nil, err
+		return nil, fmt.Errorf("chmod socket: %w", err)
 	}
 	return listener, nil
+}
+
+// checkPrivateDir refuses a socket directory that someone else could have
+// created or could write through.
+func checkPrivateDir(dir string) error {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("inspect socket directory %s: %w", dir, err)
+	}
+	if !info.Mode().IsDir() {
+		return fmt.Errorf("socket directory %s is not a directory", dir)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("socket directory %s permissions are %04o; want 0700", dir, info.Mode().Perm())
+	}
+	if owner, ok := dirOwnerUID(info); ok && owner != os.Getuid() {
+		return fmt.Errorf("socket directory %s is owned by uid %d, not %d", dir, owner, os.Getuid())
+	}
+	return nil
 }
 
 // Cleanup removes the socket file after the server has shut down.
 func Cleanup(endpoint string) {
 	_ = os.Remove(endpoint)
-}
-
-// secureSocket hands the socket to the pre-elevation user with mode 0600,
-// so the non-root CLI can connect while other users cannot. Without the
-// chown, a root-owned 0600 socket would lock the invoking user out.
-func secureSocket(endpoint string) error {
-	uid, gid, ok := invokingUser(os.Getenv)
-	if ok {
-		if err := os.Chown(endpoint, uid, gid); err != nil {
-			return fmt.Errorf("chown socket to invoking user: %w", err)
-		}
-	}
-	if err := os.Chmod(endpoint, 0o600); err != nil {
-		return fmt.Errorf("chmod socket: %w", err)
-	}
-	return nil
-}
-
-// invokingUser resolves the pre-elevation user from the env vars sudo and
-// pkexec set. A gid of -1 leaves the group unchanged (pkexec exports no
-// group variable).
-func invokingUser(getenv func(string) string) (int, int, bool) {
-	for _, uidVar := range []string{"SUDO_UID", "PKEXEC_UID"} {
-		uidValue := strings.TrimSpace(getenv(uidVar))
-		if uidValue == "" {
-			continue
-		}
-		uid, err := strconv.Atoi(uidValue)
-		if err != nil || uid < 0 {
-			continue
-		}
-
-		gid := -1
-		if uidVar == "SUDO_UID" {
-			if gidValue := strings.TrimSpace(getenv("SUDO_GID")); gidValue != "" {
-				if parsed, err := strconv.Atoi(gidValue); err == nil && parsed >= 0 {
-					gid = parsed
-				}
-			}
-		}
-		return uid, gid, true
-	}
-	return 0, 0, false
 }

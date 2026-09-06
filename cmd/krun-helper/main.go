@@ -83,7 +83,7 @@ func main() {
 func startHelperDaemon(socketEndpoint string, kubeConfigPath string, managerTokenFile string) (returnErr error) {
 	endpoint := strings.TrimSpace(socketEndpoint)
 	if endpoint == "" {
-		endpoint = helperipc.DefaultEndpoint
+		endpoint = helperipc.DefaultEndpoint()
 	}
 	authToken, err := managerauth.ReadLocalToken(managerTokenFile)
 	if err != nil {

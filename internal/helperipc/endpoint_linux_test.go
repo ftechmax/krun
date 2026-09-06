@@ -3,10 +3,12 @@
 package helperipc
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -92,26 +94,41 @@ func TestListenRefusesLiveSocket(t *testing.T) {
 	}
 }
 
-func TestInvokingUser(t *testing.T) {
-	env := func(vars map[string]string) func(string) string {
-		return func(key string) string { return vars[key] }
+func TestCheckPrivateDir(t *testing.T) {
+	dir := t.TempDir()
+	private := filepath.Join(dir, "private")
+	if err := os.Mkdir(private, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := checkPrivateDir(private); err != nil {
+		t.Fatalf("0700 dir owned by us must pass: %v", err)
 	}
 
-	uid, gid, ok := invokingUser(env(map[string]string{"SUDO_UID": "1000", "SUDO_GID": "1001"}))
-	if !ok || uid != 1000 || gid != 1001 {
-		t.Fatalf("sudo case = (%d, %d, %v), want (1000, 1001, true)", uid, gid, ok)
+	loose := filepath.Join(dir, "loose")
+	if err := os.Mkdir(loose, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := checkPrivateDir(loose); err == nil {
+		t.Fatal("a group/other-accessible socket directory must be refused")
 	}
 
-	uid, gid, ok = invokingUser(env(map[string]string{"PKEXEC_UID": "1000"}))
-	if !ok || uid != 1000 || gid != -1 {
-		t.Fatalf("pkexec case = (%d, %d, %v), want (1000, -1, true)", uid, gid, ok)
+	file := filepath.Join(dir, "notadir")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := checkPrivateDir(file); err == nil {
+		t.Fatal("a non-directory must be refused")
+	}
+}
+
+func TestDefaultEndpointUsesRuntimeDir(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/4242")
+	if got, want := DefaultEndpoint(), "/run/user/4242/krun/krun-helper.sock"; got != want {
+		t.Fatalf("DefaultEndpoint() = %q, want %q", got, want)
 	}
 
-	if _, _, ok := invokingUser(env(map[string]string{})); ok {
-		t.Fatal("no elevation env must report not-found")
-	}
-
-	if _, _, ok := invokingUser(env(map[string]string{"SUDO_UID": "not-a-number"})); ok {
-		t.Fatal("garbage uid must report not-found")
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	if got := DefaultEndpoint(); !strings.HasPrefix(got, os.TempDir()) || !strings.Contains(got, fmt.Sprintf("krun-%d", os.Getuid())) {
+		t.Fatalf("fallback endpoint = %q, want a uid-scoped path under %s", got, os.TempDir())
 	}
 }

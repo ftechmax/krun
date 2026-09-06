@@ -20,7 +20,7 @@ const BaseURL = "http://krun-helper"
 // endpoint. The timeout bounds the whole request, so callers pick it per
 // operation (short for health probes, generous for enable/disable).
 func NewClient(timeout time.Duration) *http.Client {
-	return newClientForEndpoint(DefaultEndpoint, timeout)
+	return newClientForEndpoint(DefaultEndpoint(), timeout)
 }
 
 func newClientForEndpoint(endpoint string, timeout time.Duration) *http.Client {

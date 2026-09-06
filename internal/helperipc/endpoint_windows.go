@@ -9,22 +9,17 @@ import (
 	"github.com/Microsoft/go-winio"
 )
 
-const DefaultEndpoint = `\\.\pipe\krun-helper`
-
-// The helper runs UAC-elevated, and an elevated process's default pipe DACL
-// does not admit the non-elevated interactive user running the krun CLI.
-// Grant SYSTEM and Administrators full access, interactive users
-// read/write.
-const pipeSecurityDescriptor = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)"
+// DefaultEndpoint is the named pipe the helper listens on. The helper runs as
+// the invoking user, so the pipe's default security descriptor already admits
+// the krun CLI; no custom DACL is needed.
+func DefaultEndpoint() string { return `\\.\pipe\krun-helper` }
 
 func dial(ctx context.Context, endpoint string) (net.Conn, error) {
 	return winio.DialPipeContext(ctx, endpoint)
 }
 
 func Listen(endpoint string) (net.Listener, error) {
-	return winio.ListenPipe(endpoint, &winio.PipeConfig{
-		SecurityDescriptor: pipeSecurityDescriptor,
-	})
+	return winio.ListenPipe(endpoint, &winio.PipeConfig{})
 }
 
 // Cleanup is a no-op: named pipes disappear with their last handle.

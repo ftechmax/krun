@@ -156,12 +156,12 @@ func HelperStatus(config cfg.Config) {
 	helperVersion, err := helperCheckHealth()
 	if err != nil {
 		utils.Warnf("helper is not running")
-		fmt.Printf("endpoint: %s\n", helperipc.DefaultEndpoint)
+		fmt.Printf("endpoint: %s\n", helperipc.DefaultEndpoint())
 		return
 	}
 
 	utils.Okf("helper is running")
-	fmt.Printf("endpoint: %s\n", helperipc.DefaultEndpoint)
+	fmt.Printf("endpoint: %s\n", helperipc.DefaultEndpoint())
 	fmt.Printf("kubeconfig: %s\n", config.KubeConfig)
 	if strings.TrimSpace(helperVersion) != "" {
 		fmt.Printf("helper version: %s\n", helperVersion)
@@ -444,7 +444,7 @@ func ensureHelperStarted(config cfg.Config) error {
 			return true, nil
 		})
 	if pollErr != nil {
-		return fmt.Errorf("helper failed to become healthy on %s", helperipc.DefaultEndpoint)
+		return fmt.Errorf("helper failed to become healthy on %s", helperipc.DefaultEndpoint())
 	}
 	return nil
 }
