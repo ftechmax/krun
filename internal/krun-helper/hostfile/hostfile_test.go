@@ -213,3 +213,35 @@ func mustRead(t *testing.T, path string) string {
 	}
 	return string(data)
 }
+
+func TestHasBlock(t *testing.T) {
+	dir := t.TempDir()
+
+	clean := filepath.Join(dir, "clean")
+	if err := os.WriteFile(clean, []byte("127.0.0.1 localhost\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	SetPathForTest(t, clean)
+	if present, err := HasBlock(); err != nil || present {
+		t.Fatalf("HasBlock on a clean file = (%v, %v), want (false, nil)", present, err)
+	}
+
+	withBlock := filepath.Join(dir, "withblock")
+	if err := os.WriteFile(withBlock, []byte("127.0.0.1 localhost\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	SetPathForTest(t, withBlock)
+	if err := update([]contracts.HostsEntry{{IP: "127.0.0.1", Hostname: "redis.default.svc"}}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if present, err := HasBlock(); err != nil || !present {
+		t.Fatalf("HasBlock after a write = (%v, %v), want (true, nil)", present, err)
+	}
+
+	if err := remove(); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if present, err := HasBlock(); err != nil || present {
+		t.Fatalf("HasBlock after remove = (%v, %v), want (false, nil)", present, err)
+	}
+}
