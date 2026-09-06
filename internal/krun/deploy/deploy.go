@@ -39,19 +39,19 @@ func Deploy(projectName string, config cfg.Config, restart bool, createNamespace
 
 	client, err := kube.NewClient(config.KubeConfig)
 	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to create Kubernetes client: %s", err.Error()), utils.Red))
+		utils.Errf("Failed to create Kubernetes client: %s", err.Error())
 		return
 	}
 
 	targets, err := handle(context.Background(), client, config, projectName, false, createNamespace)
 	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Deploy failed: %s", err.Error()), utils.Red))
+		utils.Errf("Deploy failed: %s", err.Error())
 		return
 	}
 
 	if restart && len(targets) > 0 {
 		if err := restartWorkloads(context.Background(), client, targets); err != nil {
-			fmt.Println(utils.Colorize(fmt.Sprintf("Restart failed: %s", err.Error()), utils.Red))
+			utils.Errf("Restart failed: %s", err.Error())
 		}
 	}
 }
@@ -60,12 +60,12 @@ func Delete(projectName string, config cfg.Config) {
 	fmt.Printf("Deleting %s\n", projectName)
 	client, err := kube.NewClient(config.KubeConfig)
 	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to create Kubernetes client: %s", err.Error()), utils.Red))
+		utils.Errf("Failed to create Kubernetes client: %s", err.Error())
 		return
 	}
 
 	if _, err := handle(context.Background(), client, config, projectName, true, false); err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Delete failed: %s", err.Error()), utils.Red))
+		utils.Errf("Delete failed: %s", err.Error())
 	}
 }
 

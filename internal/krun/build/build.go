@@ -25,7 +25,7 @@ func Build(projectName string, servicesToBuild []cfg.Service, skipWeb bool, forc
 
 	client, err := kube.NewClient(config.KubeConfig)
 	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to create Kubernetes client: %s", err.Error()), utils.Red))
+		utils.Errf("Failed to create Kubernetes client: %s", err.Error())
 		return
 	}
 
@@ -33,19 +33,19 @@ func Build(projectName string, servicesToBuild []cfg.Service, skipWeb bool, forc
 	if flush {
 		exists, err := buildPodExists(client)
 		if err != nil {
-			fmt.Println(utils.Colorize(fmt.Sprintf("Failed to check existing build pod for flush: %s", err.Error()), utils.Red))
+			utils.Errf("Failed to check existing build pod for flush: %s", err.Error())
 		} else if exists {
-			fmt.Println(utils.Colorize("Deleting existing build pod", utils.Yellow))
+			utils.Warnf("Deleting existing build pod")
 			if err := deleteBuildPod(client); err != nil {
-				fmt.Println(utils.Colorize(fmt.Sprintf("Failed to delete existing build pod: %s", err.Error()), utils.Red))
+				utils.Errf("Failed to delete existing build pod: %s", err.Error())
 			} else {
 				fmt.Print(utils.Colorize("Waiting for previous build pod to terminate", utils.Cyan))
 				if err := waitForBuildPodDeletion(client, 45*time.Second); err != nil {
-					fmt.Println(utils.Colorize(" (timed out)", utils.Yellow))
-					fmt.Println(utils.Colorize("Previous build pod is still terminating; proceeding to recreate", utils.Yellow))
+					utils.Warnf(" (timed out)")
+					utils.Warnf("Previous build pod is still terminating; proceeding to recreate")
 				} else {
-					fmt.Println(utils.Colorize(" (done)", utils.Green))
-					fmt.Println(utils.Colorize("Previous build pod fully removed.", utils.Green))
+					utils.Okf(" (done)")
+					utils.Okf("Previous build pod fully removed.")
 				}
 			}
 		}
@@ -61,7 +61,7 @@ func Build(projectName string, servicesToBuild []cfg.Service, skipWeb bool, forc
 	}
 	needsBuild, err := copySource(client, projectName, projectPath, skipWeb)
 	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to copy source: %s", err.Error()), utils.Red))
+		utils.Errf("Failed to copy source: %s", err.Error())
 		return
 	}
 	if needsBuild || force {
@@ -118,7 +118,7 @@ func buildAndPushImagesBuildah(client *kube.Client, service cfg.Service, registr
 		os.Stderr,
 	)
 	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Buildah command failed for %s: %s", service.Name, err.Error()), utils.Red))
+		utils.Errf("Buildah command failed for %s: %s", service.Name, err.Error())
 	}
 }
 

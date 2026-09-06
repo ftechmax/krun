@@ -64,3 +64,18 @@ func GetExecutablePath() (string, error) {
 	}
 	return exePath, nil
 }
+
+// Errf, Warnf and Okf print one colorized line. They exist because the
+// fmt.Println(Colorize(fmt.Sprintf(...), Red)) triple-nesting appeared at
+// forty call sites.
+func Errf(format string, args ...any) {
+	fmt.Println(Colorize(fmt.Sprintf(format, args...), Red))
+}
+
+func Warnf(format string, args ...any) {
+	fmt.Println(Colorize(fmt.Sprintf(format, args...), Yellow))
+}
+
+func Okf(format string, args ...any) {
+	fmt.Println(Colorize(fmt.Sprintf(format, args...), Green))
+}

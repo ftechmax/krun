@@ -149,7 +149,7 @@ func main() {
 	rootCmd.AddCommand(debugCmd)
 
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Println(utils.Colorize(err.Error(), utils.Red))
+		utils.Errf("%s", err)
 		os.Exit(1)
 	}
 }
@@ -161,7 +161,7 @@ func preRunInit(cmd *cobra.Command, args []string) {
 func initialize(_ *cobra.Command, optKubeConfig string) {
 	krunConfig, err := cfg.ParseKrunConfig()
 	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Error parsing krun-config.json: %s", err), utils.Red))
+		utils.Errf("Error parsing krun-config.json: %s", err)
 		os.Exit(1)
 	}
 
@@ -175,7 +175,7 @@ func initialize(_ *cobra.Command, optKubeConfig string) {
 	} else {
 		dirname, err := os.UserHomeDir()
 		if err != nil {
-			fmt.Println(utils.Colorize(fmt.Sprintf("Error getting user home directory: %s", err), utils.Red))
+			utils.Errf("Error getting user home directory: %s", err)
 			os.Exit(0)
 		}
 		// set default kubeconfig path
@@ -187,7 +187,7 @@ func initialize(_ *cobra.Command, optKubeConfig string) {
 	var projectPaths map[string]string
 	services, projectPaths, err = cfg.DiscoverServices(krunConfig.KrunSourceConfig.Path, krunConfig.KrunSourceConfig.SearchDepth)
 	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Error discovering services: %s", err), utils.Red))
+		utils.Errf("Error discovering services: %s", err)
 		os.Exit(0)
 	}
 	config.ProjectPaths = projectPaths
@@ -195,7 +195,7 @@ func initialize(_ *cobra.Command, optKubeConfig string) {
 
 func handleList(cmd *cobra.Command, args []string) {
 	if len(services) == 0 {
-		fmt.Println(utils.Colorize("No services found", utils.Yellow))
+		utils.Warnf("No services found")
 		return
 	}
 
@@ -234,7 +234,7 @@ func handleBuild(cmd *cobra.Command, args []string) {
 	argServiceName := args[0]
 	serviceName, projectName, err := getServiceNameAndProject(argServiceName)
 	if err != nil {
-		fmt.Println(utils.Colorize(err.Error(), utils.Red))
+		utils.Errf("%s", err)
 		return
 	}
 	servicesToBuild := []cfg.Service{}
@@ -263,7 +263,7 @@ func handleDeploy(cmd *cobra.Command, args []string) {
 	}
 	_, projectName, err := getServiceNameAndProject(argServiceName)
 	if err != nil {
-		fmt.Println(utils.Colorize(err.Error(), utils.Red))
+		utils.Errf("%s", err)
 		return
 	}
 	deploy.Deploy(projectName, config, !noRestart, createNamespace)
@@ -273,7 +273,7 @@ func handleDelete(cmd *cobra.Command, args []string) {
 	argServiceName := args[0]
 	_, projectName, err := getServiceNameAndProject(argServiceName)
 	if err != nil {
-		fmt.Println(utils.Colorize(err.Error(), utils.Red))
+		utils.Errf("%s", err)
 		return
 	}
 	deploy.Delete(projectName, config)
@@ -309,7 +309,7 @@ func findService(name string) (cfg.Service, bool) {
 			return service, true
 		}
 	}
-	fmt.Println(utils.Colorize(fmt.Sprintf("Service not found: %s", name), utils.Red))
+	utils.Errf("Service not found: %s", name)
 	return cfg.Service{}, false
 }
 

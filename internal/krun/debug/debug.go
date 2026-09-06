@@ -41,18 +41,18 @@ const (
 
 func List(config cfg.Config) {
 	if err := ensureHelperStarted(config); err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("helper unreachable: %v", err), utils.Red))
+		utils.Errf("helper unreachable: %v", err)
 		return
 	}
 
 	sessions, err := helperListSessions()
 	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("cannot list debug sessions via helper: %v", err), utils.Red))
+		utils.Errf("cannot list debug sessions via helper: %v", err)
 		return
 	}
 
 	if len(sessions) == 0 {
-		fmt.Println(utils.Colorize("No active debug sessions", utils.Yellow))
+		utils.Warnf("No active debug sessions")
 		return
 	}
 
@@ -67,7 +67,7 @@ func List(config cfg.Config) {
 
 		fmt.Printf("Service: %s (namespace: %s)\n", serviceName, namespace)
 		if session.State == contracts.HelperSessionStateCleanupPending {
-			fmt.Println(utils.Colorize("State: cleanup pending", utils.Yellow))
+			utils.Warnf("State: cleanup pending")
 		}
 		fmt.Printf("Intercept port: %d\n", session.Context.InterceptPort)
 		fmt.Println("Service dependencies:")
@@ -98,7 +98,7 @@ func List(config cfg.Config) {
 
 func Enable(service cfg.Service, config cfg.Config, containerName string) {
 	if err := ensureHelperStarted(config); err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("cannot start helper: %v", err), utils.Red))
+		utils.Errf("cannot start helper: %v", err)
 		return
 	}
 
@@ -107,24 +107,24 @@ func Enable(service cfg.Service, config cfg.Config, containerName string) {
 	}
 	response, err := helperCall[contracts.HelperResponse](http.MethodPost, "/v1/debug/enable", request, commandTimeout)
 	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("cannot apply debug enable via helper: %v", err), utils.Red))
+		utils.Errf("cannot apply debug enable via helper: %v", err)
 		return
 	}
 	if !response.Success {
-		fmt.Println(utils.Colorize(fmt.Sprintf("helper refused debug enable: %s", response.Message), utils.Red))
+		utils.Errf("helper refused debug enable: %s", response.Message)
 		return
 	}
 
-	fmt.Println(utils.Colorize("Session created", utils.Green))
+	utils.Okf("Session created")
 
 	if err := deploy.CreateEnvFile(service, config, containerName); err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("warning: could not create env file: %v", err), utils.Yellow))
+		utils.Warnf("warning: could not create env file: %v", err)
 	}
 }
 
 func Disable(service cfg.Service, config cfg.Config) {
 	if err := ensureHelperStarted(config); err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("cannot start helper: %v", err), utils.Red))
+		utils.Errf("cannot start helper: %v", err)
 		return
 	}
 
@@ -132,20 +132,20 @@ func Disable(service cfg.Service, config cfg.Config) {
 		Context: buildDebugServiceContext(service),
 	}, commandTimeout)
 	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("cannot apply debug disable via helper: %v", err), utils.Red))
+		utils.Errf("cannot apply debug disable via helper: %v", err)
 		return
 	}
 	if !response.Success {
-		fmt.Println(utils.Colorize(fmt.Sprintf("helper refused debug disable: %s", response.Message), utils.Red))
+		utils.Errf("helper refused debug disable: %s", response.Message)
 		return
 	}
 
 	if response.Message == "no active session" {
-		fmt.Println(utils.Colorize("No active debug session found", utils.Yellow))
+		utils.Warnf("No active debug session found")
 	} else {
-		fmt.Println(utils.Colorize("Session removed", utils.Green))
+		utils.Okf("Session removed")
 		if err := deploy.RemoveEnvFile(service, config); err != nil {
-			fmt.Println(utils.Colorize(fmt.Sprintf("warning: could not remove env file: %v", err), utils.Yellow))
+			utils.Warnf("warning: could not remove env file: %v", err)
 		}
 	}
 }
@@ -155,12 +155,12 @@ func Disable(service cfg.Service, config cfg.Config) {
 func HelperStatus(config cfg.Config) {
 	helperVersion, err := helperCheckHealth()
 	if err != nil {
-		fmt.Println(utils.Colorize("helper is not running", utils.Yellow))
+		utils.Warnf("helper is not running")
 		fmt.Printf("endpoint: %s\n", helperipc.DefaultEndpoint)
 		return
 	}
 
-	fmt.Println(utils.Colorize("helper is running", utils.Green))
+	utils.Okf("helper is running")
 	fmt.Printf("endpoint: %s\n", helperipc.DefaultEndpoint)
 	fmt.Printf("kubeconfig: %s\n", config.KubeConfig)
 	if strings.TrimSpace(helperVersion) != "" {
@@ -170,7 +170,7 @@ func HelperStatus(config cfg.Config) {
 
 	sessions, err := helperListSessions()
 	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("cannot list debug sessions: %v", err), utils.Yellow))
+		utils.Warnf("cannot list debug sessions: %v", err)
 		return
 	}
 	if len(sessions) == 0 {
@@ -189,53 +189,53 @@ func HelperStatus(config cfg.Config) {
 
 func HelperStop() {
 	if _, err := helperCheckHealth(); err != nil {
-		fmt.Println(utils.Colorize("helper is not running", utils.Yellow))
+		utils.Warnf("helper is not running")
 		return
 	}
 
 	response, err := helperCall[contracts.HelperResponse](http.MethodPost, "/v1/shutdown", nil, listTimeout)
 	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("failed to stop helper: %v", err), utils.Red))
+		utils.Errf("failed to stop helper: %v", err)
 		return
 	}
 	if !response.Success {
-		fmt.Println(utils.Colorize(fmt.Sprintf("helper refused shutdown: %s", response.Message), utils.Red))
+		utils.Errf("helper refused shutdown: %s", response.Message)
 		return
 	}
 
-	fmt.Println(utils.Colorize("helper is shutting down", utils.Green))
+	utils.Okf("helper is shutting down")
 }
 
 func RuntimeInstall(config cfg.Config, version string) {
 	client, err := kube.NewClient(config.KubeConfig)
 	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to create Kubernetes client: %s", err), utils.Red))
+		utils.Errf("Failed to create Kubernetes client: %s", err)
 		return
 	}
 
 	objs, err := loadManifestObjects(version)
 	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to load manifests: %s", err), utils.Red))
+		utils.Errf("Failed to load manifests: %s", err)
 		return
 	}
 
 	managerTokenPath, err := resolveManagerTokenPath()
 	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to resolve manager token path: %s", err), utils.Red))
+		utils.Errf("Failed to resolve manager token path: %s", err)
 		return
 	}
 	managerToken, err := managerauth.EnsureLocalToken(managerTokenPath)
 	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to initialize manager token: %s", err), utils.Red))
+		utils.Errf("Failed to initialize manager token: %s", err)
 		return
 	}
 	if err := configureManagerAuth(objs, managerauth.Digest(managerToken)); err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to configure manager authentication: %s", err), utils.Red))
+		utils.Errf("Failed to configure manager authentication: %s", err)
 		return
 	}
 
 	if err := deploy.ApplyObjects(context.Background(), client, objs); err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to apply manifests: %s", err), utils.Red))
+		utils.Errf("Failed to apply manifests: %s", err)
 		return
 	}
 
@@ -257,28 +257,28 @@ func RuntimeInstall(config cfg.Config, version string) {
 				dep.Status.AvailableReplicas >= desired, nil
 		})
 	if err != nil {
-		fmt.Println(utils.Colorize("Traffic manager was applied but did not become ready", utils.Yellow))
+		utils.Warnf("Traffic manager was applied but did not become ready")
 		return
 	}
 
-	fmt.Println(utils.Colorize("Traffic manager installed successfully", utils.Green))
+	utils.Okf("Traffic manager installed successfully")
 	fmt.Printf("Manager token: %s\n", managerTokenPath)
 }
 
 func RuntimeStatus(config cfg.Config) {
 	client, err := kube.NewClient(config.KubeConfig)
 	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to create Kubernetes client: %s", err), utils.Red))
+		utils.Errf("Failed to create Kubernetes client: %s", err)
 		return
 	}
 
 	dep, err := client.Clientset.AppsV1().Deployments("krun-system").Get(context.Background(), "krun-traffic-manager", metav1.GetOptions{})
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
-			fmt.Println(utils.Colorize("Traffic manager is not installed", utils.Yellow))
+			utils.Warnf("Traffic manager is not installed")
 			return
 		}
-		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to get deployment: %s", err), utils.Red))
+		utils.Errf("Failed to get deployment: %s", err)
 		return
 	}
 
@@ -297,9 +297,9 @@ func RuntimeStatus(config cfg.Config) {
 	}
 
 	if ready == desired {
-		fmt.Println(utils.Colorize("Traffic manager: healthy", utils.Green))
+		utils.Okf("Traffic manager: healthy")
 	} else {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Traffic manager: not ready (%d/%d pods ready)", ready, desired), utils.Yellow))
+		utils.Warnf("Traffic manager: not ready (%d/%d pods ready)", ready, desired)
 	}
 
 	fmt.Printf("Version: %s\n", version)
@@ -308,22 +308,22 @@ func RuntimeStatus(config cfg.Config) {
 func RuntimeUninstall(config cfg.Config, version string) {
 	client, err := kube.NewClient(config.KubeConfig)
 	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to create Kubernetes client: %s", err), utils.Red))
+		utils.Errf("Failed to create Kubernetes client: %s", err)
 		return
 	}
 
 	objs, err := loadManifestObjects(version)
 	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to load manifests: %s", err), utils.Red))
+		utils.Errf("Failed to load manifests: %s", err)
 		return
 	}
 
 	if err := deploy.DeleteObjects(context.Background(), client, objs); err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to delete manifests: %s", err), utils.Red))
+		utils.Errf("Failed to delete manifests: %s", err)
 		return
 	}
 
-	fmt.Println(utils.Colorize("Traffic manager uninstalled successfully", utils.Green))
+	utils.Okf("Traffic manager uninstalled successfully")
 	if managerTokenPath, pathErr := resolveManagerTokenPath(); pathErr == nil {
 		if _, statErr := os.Stat(managerTokenPath); statErr == nil {
 			fmt.Printf("Local manager token retained at %s\n", managerTokenPath)
@@ -525,8 +525,8 @@ func warnOnHelperSkew(cliVersion string, helperVersion string) {
 	if strings.TrimSpace(reported) == "" {
 		reported = "unknown (predates version reporting)"
 	}
-	fmt.Println(utils.Colorize(fmt.Sprintf("WARNING: version skew - krun is %q but the running helper is %s", cliVersion, reported), utils.Yellow))
-	fmt.Println(utils.Colorize("         a different krun build started the helper; restart it with: krun debug helper stop", utils.Yellow))
+	utils.Warnf("WARNING: version skew - krun is %q but the running helper is %s", cliVersion, reported)
+	utils.Warnf("         a different krun build started the helper; restart it with: krun debug helper stop")
 }
 
 // helperCall sends one request to the helper over the local IPC endpoint and
