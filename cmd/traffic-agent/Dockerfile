@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM golang:1.26.4 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.1 AS builder
 WORKDIR /src
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
@@ -9,7 +9,10 @@ RUN go mod download
 
 COPY cmd ./cmd
 COPY internal ./internal
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags "-s -w -X main.version=${GIT_VERSION}" -o /out/traffic-agent ./cmd/traffic-agent
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath \
+    -ldflags "-s -w -X main.version=${GIT_VERSION}" \
+    -o /out/traffic-agent ./cmd/traffic-agent
 
 FROM alpine:3.24
 RUN apk add --no-cache iptables
