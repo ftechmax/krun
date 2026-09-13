@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-var (
+const (
 	colorReset  = "\033[0m"
 	colorRed    = "\033[31m"
 	colorGreen  = "\033[32m"
@@ -65,9 +65,7 @@ func GetExecutablePath() (string, error) {
 	return exePath, nil
 }
 
-// Errf, Warnf and Okf print one colorized line. They exist because the
-// fmt.Println(Colorize(fmt.Sprintf(...), Red)) triple-nesting appeared at
-// forty call sites.
+// Errf, Warnf and Okf print one colorized line.
 func Errf(format string, args ...any) {
 	fmt.Println(Colorize(fmt.Sprintf(format, args...), Red))
 }

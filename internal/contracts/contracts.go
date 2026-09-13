@@ -1,6 +1,5 @@
 package contracts
 
-// krun-helper contracts
 type DebugSession struct {
 	SessionID    string `json:"session_id"`
 	SessionToken string `json:"session_token,omitempty"`
@@ -86,8 +85,8 @@ type HelperResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
 	// HostsEntries is the hosts block the machine should now have, covering
-	// every active session. The helper computes it but cannot apply it: it
-	// runs unprivileged, so the CLI writes it through an elevated one-shot.
+	// every stored session. The helper computes it; the CLI applies it
+	// through the privileged hosts daemon.
 	HostsEntries []HostsEntry `json:"hosts_entries,omitempty"`
 	// Version is the helper's build version, reported on /healthz so the CLI
 	// can detect a helper started by a different krun build.

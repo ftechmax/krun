@@ -1,24 +1,14 @@
 # krun
 
-A command-line tool for building, deploying, and debugging microservices in Kubernetes environments.
+Build, deploy, and debug Kubernetes services from one CLI.
 
-## Why krun?
+- **Build** images inside the cluster without a local Docker installation.
+- **Deploy** projects from their Kustomize manifests.
+- **Debug** services by routing cluster traffic to a local app. Set breakpoints
+  in your IDE while the app accesses cluster dependencies through local forwards.
 
-Working with microservices on Kubernetes usually means somehow handling Docker builds, kubectl commands, and other local setups just to test a change. krun wraps all of that into a single CLI:
-
-- **Build** Docker images inside your cluster so no local Docker install is required.
-- **Deploy** projects with one command.
-- **Debug** a live service by intercepting its cluster traffic and routing it to your local machine, so you can set breakpoints against real requests without mocking anything.
-
-The debug workflow is where krun will really make a difference: enable debug mode, launch your app locally, and traffic that would normally hit the pod flows to your local app instead. Your app can call other cluster services as normal, and you can set breakpoints and inspect variables in your local IDE while handling real requests from the cluster.
-
-This tool pairs perfectly with services made with my [msa-templates](https://github.com/ftechmax/msa-templates) project, but it can be used with any Kubernetes-deployed app.
-
-## Features
-
-- Build Docker images for services
-- Deploy services to Kubernetes
-- Enable/disable debug mode for services using the in-cluster krun runtime
+krun works with [msa-templates](https://github.com/ftechmax/msa-templates)
+services and other Kubernetes apps.
 
 ## Installation
 

@@ -79,9 +79,10 @@ go test ./...
 go test ./... -race     # the stream bridge is concurrent; run this before releasing
 ```
 
-Unit tests cover everything except the live intercept path. Changes to the
-port-forward registry, `internal/streamlink`, or the manager transport need a
-real cluster to verify — see the debug flow in [debug.md](debug.md).
+The tests exercise local behavior with fakes, sockets, and temporary files.
+Changes to the port-forward registry, `internal/streamlink`, or the manager
+transport also need verification against a real cluster; see the traffic flow
+in [debug.md](debug.md).
 
 ## Layout
 

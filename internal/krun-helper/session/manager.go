@@ -1,8 +1,4 @@
-// Package session owns the krun-helper's view of active debug sessions. One
-// Session holds every piece of state krun set up for one service — hosts
-// entries, dependency port-forwards, the manager-side session, and the traffic
-// stream — so enable and disable move a single object instead of keeping four
-// registries in step.
+// Package session owns debug sessions and their local streams and dependency forwards.
 package session
 
 import (
@@ -111,9 +107,8 @@ func (m *Manager) Enable(sessionKey string, serviceContext contracts.DebugServic
 	}
 	var undo []rollback
 	if replacing {
-		// The previous manager session and stream are gone, but its hosts and
-		// forwards deliberately remain so Upsert can reuse live handles. Own
-		// their cleanup before the first fallible replacement write.
+		// Keep dependency forwards available for Upsert to reuse, but register
+		// cleanup first in case replacement fails.
 		undo = append(undo, rollback{
 			step: "remove preserved replacement local state",
 			run:  func() error { return m.forwards.Remove(key) },
@@ -268,28 +263,16 @@ func (m *Manager) teardown(session *Session) []string {
 	return failures
 }
 
-// DesiredHosts snapshots the union of hosts entries across every stored
-// session. krun keeps one block in the hosts file covering all sessions, so
-// callers rewrite the whole union rather than patching it.
-//
-// The helper computes this but never applies it: writing /etc/hosts needs
-// root, and the helper deliberately runs unprivileged. The krun CLI applies
-// the returned block through a short-lived elevated process, because only the
-// CLI has the terminal an elevation prompt needs.
+// DesiredHosts returns the full hosts block for all stored sessions.
+// The CLI applies it through the privileged hosts daemon; the helper cannot
+// prompt for elevation because it has no controlling terminal.
 func (m *Manager) DesiredHosts() []contracts.HostsEntry {
-	return m.mergedHosts(nil)
-}
-
-func (m *Manager) mergedHosts(pending *Session) []contracts.HostsEntry {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	contexts := make([]contracts.DebugServiceContext, 0, len(m.sessions)+1)
+	contexts := make([]contracts.DebugServiceContext, 0, len(m.sessions))
 	for _, session := range m.sessions {
 		contexts = append(contexts, session.Context)
-	}
-	if pending != nil {
-		contexts = append(contexts, pending.Context)
 	}
 	return mergeHostEntries(contexts)
 }
@@ -311,8 +294,6 @@ func (m *Manager) takeSession(key string) (*Session, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	session, ok := m.sessions[key]
-	if ok {
-		delete(m.sessions, key)
-	}
+	delete(m.sessions, key)
 	return session, ok
 }

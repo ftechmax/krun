@@ -338,7 +338,7 @@ type restartTarget struct {
 
 func collectRestartTargets(objs []*unstructured.Unstructured) []restartTarget {
 	targets := make([]restartTarget, 0)
-	seen := map[string]struct{}{}
+	seen := map[restartTarget]struct{}{}
 
 	for _, obj := range objs {
 		switch obj.GetKind() {
@@ -355,11 +355,10 @@ func collectRestartTargets(objs []*unstructured.Unstructured) []restartTarget {
 			name:      obj.GetName(),
 			namespace: obj.GetNamespace(),
 		}
-		key := fmt.Sprintf("%s|%s|%s|%s|%s", target.gvk.Group, target.gvk.Version, target.gvk.Kind, target.namespace, target.name)
-		if _, ok := seen[key]; ok {
+		if _, ok := seen[target]; ok {
 			continue
 		}
-		seen[key] = struct{}{}
+		seen[target] = struct{}{}
 		targets = append(targets, target)
 	}
 

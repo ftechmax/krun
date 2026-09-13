@@ -3,7 +3,6 @@ package config
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,13 +12,13 @@ import (
 
 type Service struct {
 	Name                string              `json:"name"`
-	Project             string              `json:"project"`   // This will be set based on the directory structure
+	Project             string              `json:"project"`   // Derived from the project directory.
 	Namespace           string              `json:"namespace"` // Kubernetes namespace (default: "default")
 	Path                string              `json:"path"`
 	Dockerfile          string              `json:"dockerfile"`
 	Context             string              `json:"context"`
-	ContainerPort       int                 `json:"container_port"` // Default is "8080"
-	InterceptPort       int                 `json:"intercept_port"` // Default is "5000"
+	ContainerPort       int                 `json:"container_port"` // Defaults to 8080.
+	InterceptPort       int                 `json:"intercept_port"` // Defaults to 5000.
 	ServiceDependencies []ServiceDependency `json:"service_dependencies"`
 }
 
@@ -59,19 +58,13 @@ func ParseKrunConfig() (KrunConfig, error) {
 	}
 
 	configPath := filepath.Join(filepath.Dir(exePath), "krun-config.json")
-	file, err := os.Open(configPath)
+	contents, err := os.ReadFile(configPath)
 	if err != nil {
-		return KrunConfig{}, fmt.Errorf("failed to open file: %w", err)
-	}
-	defer file.Close()
-
-	bytes, err := io.ReadAll(file)
-	if err != nil {
-		return KrunConfig{}, fmt.Errorf("failed to read file: %w", err)
+		return KrunConfig{}, fmt.Errorf("read config %s: %w", configPath, err)
 	}
 
 	var config KrunConfig
-	if err := json.Unmarshal(bytes, &config); err != nil {
+	if err := json.Unmarshal(contents, &config); err != nil {
 		return KrunConfig{}, fmt.Errorf("failed to unmarshal JSON: %w", err)
 	}
 
@@ -110,23 +103,19 @@ func expandHomePath(path string) string {
 func DiscoverServices(sourceDir string, searchDepth int) ([]Service, map[string]string, error) {
 	var services []Service
 	projectPaths := map[string]string{}
-	maxDepth := searchDepth + 1 // Add 1 to include the root directory itself
+	maxDepth := searchDepth + 1 // Include the krun.json filename in the depth.
 
-	// Walk the directory to discover services
 	err := filepath.WalkDir(sourceDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
-		// Calculate depth
 		rel, err := filepath.Rel(sourceDir, path)
 		if err != nil {
 			return err
 		}
 		depth := 0
 		if rel != "." {
-			depth = len(filepath.SplitList(rel))
-			// On Windows, SplitList splits on ';', so use filepath.Separator instead
 			depth = len(strings.Split(rel, string(os.PathSeparator)))
 		}
 
@@ -137,49 +126,41 @@ func DiscoverServices(sourceDir string, searchDepth int) ([]Service, map[string]
 			return nil
 		}
 
-		if d.Name() == "krun.json" && depth <= maxDepth {
-			file, err := os.Open(path)
-			if err != nil {
-				return err
-			}
-			defer file.Close()
-
-			bytes, err := io.ReadAll(file)
-			if err != nil {
-				return err
-			}
-
-			var svc []Service
-			if err := json.Unmarshal(bytes, &svc); err != nil {
-				fmt.Printf("Warning: skipping invalid krun.json at %s: %v\n", path, err)
-				return nil
-			}
-
-			projectDir := filepath.Dir(path)
-			project := filepath.Base(projectDir)
-			projectRelPath, err := filepath.Rel(sourceDir, projectDir)
-			if err != nil {
-				return err
-			}
-			projectRelPath = filepath.ToSlash(projectRelPath)
-			for i := range svc {
-				// Set the project field based on the directory structure
-				svc[i].Project = project
-				projectPaths[project] = projectRelPath
-
-				// Set the container port to a default value if not specified
-				if svc[i].ContainerPort == 0 {
-					svc[i].ContainerPort = 8080 // Default port if not specified
-				}
-
-				// Set the intercept port to a default value if not specified
-				if svc[i].InterceptPort == 0 {
-					svc[i].InterceptPort = 5000 // Default intercept port if not specified
-				}
-			}
-
-			services = append(services, svc...)
+		if d.Name() != "krun.json" || depth > maxDepth {
+			return nil
 		}
+
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+
+		var projectServices []Service
+		if err := json.Unmarshal(contents, &projectServices); err != nil {
+			fmt.Printf("Warning: skipping invalid krun.json at %s: %v\n", path, err)
+			return nil
+		}
+
+		projectDir := filepath.Dir(path)
+		project := filepath.Base(projectDir)
+		projectRelPath, err := filepath.Rel(sourceDir, projectDir)
+		if err != nil {
+			return err
+		}
+		if len(projectServices) > 0 {
+			projectPaths[project] = filepath.ToSlash(projectRelPath)
+		}
+		for i := range projectServices {
+			service := &projectServices[i]
+			service.Project = project
+			if service.ContainerPort == 0 {
+				service.ContainerPort = 8080
+			}
+			if service.InterceptPort == 0 {
+				service.InterceptPort = 5000
+			}
+		}
+		services = append(services, projectServices...)
 		return nil
 	})
 

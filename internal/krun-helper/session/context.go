@@ -1,7 +1,6 @@
 package session
 
 import (
-	"fmt"
 	"net"
 	"slices"
 	"strings"
@@ -71,7 +70,7 @@ func mergeHostEntries(contexts []contracts.DebugServiceContext) []contracts.Host
 // remote ports match so connection strings work unchanged.
 func portForwardsFor(serviceContext contracts.DebugServiceContext) []contracts.PortForward {
 	forwards := make([]contracts.PortForward, 0, len(serviceContext.ServiceDependencies))
-	seen := map[string]bool{}
+	seen := map[contracts.PortForward]bool{}
 
 	for _, dependency := range serviceContext.ServiceDependencies {
 		serviceName, namespace := dependencyServiceTarget(dependency)
@@ -85,11 +84,10 @@ func portForwardsFor(serviceContext contracts.DebugServiceContext) []contracts.P
 			LocalPort:  dependency.Port,
 			RemotePort: dependency.Port,
 		}
-		key := fmt.Sprintf("%s|%s|%d|%d", forward.Namespace, forward.Service, forward.LocalPort, forward.RemotePort)
-		if seen[key] {
+		if seen[forward] {
 			continue
 		}
-		seen[key] = true
+		seen[forward] = true
 		forwards = append(forwards, forward)
 	}
 

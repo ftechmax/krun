@@ -13,14 +13,10 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 )
 
-var config cfg.Config
-
 const workspacePath = "/var/workspace"
 const buildPodName = "docker-build"
 
-func Build(projectName string, servicesToBuild []cfg.Service, skipWeb bool, force bool, flush bool, cfg cfg.Config) {
-	config = cfg
-
+func Build(projectName string, servicesToBuild []cfg.Service, skipWeb bool, force bool, flush bool, config cfg.Config) {
 	fmt.Printf("Building project %s\n", projectName)
 
 	client, err := kube.NewClient(config.KubeConfig)
@@ -29,7 +25,6 @@ func Build(projectName string, servicesToBuild []cfg.Service, skipWeb bool, forc
 		return
 	}
 
-	// If flush requested, delete existing build pod to clear caches
 	if flush {
 		exists, err := buildPodExists(client)
 		if err != nil {
@@ -55,11 +50,12 @@ func Build(projectName string, servicesToBuild []cfg.Service, skipWeb bool, forc
 		panic(fmt.Sprintf("Failed to start build container: %s", err.Error()))
 	}
 
-	projectPath := ""
-	if config.ProjectPaths != nil {
-		projectPath = config.ProjectPaths[projectName]
+	projectPath := config.ProjectPaths[projectName]
+	if projectPath == "" {
+		projectPath = projectName
 	}
-	needsBuild, err := copySource(client, projectName, projectPath, skipWeb)
+	localRoot := filepath.Join(config.KrunSourceConfig.Path, filepath.FromSlash(projectPath))
+	needsBuild, err := copySource(client, projectName, localRoot, skipWeb)
 	if err != nil {
 		utils.Errf("Failed to copy source: %s", err.Error())
 		return
@@ -82,7 +78,6 @@ func startBuildContainer(client *kube.Client) error {
 		return err
 	}
 
-	// Wait for build pod to be up
 	err := wait.PollUntilContextTimeout(context.Background(), 500*time.Millisecond, 30*time.Second, true,
 		func(ctx context.Context) (bool, error) {
 			exists, err := buildPodExists(client)

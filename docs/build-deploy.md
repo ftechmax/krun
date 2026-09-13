@@ -1,202 +1,82 @@
-# Build and Deploy (Current Implementation)
+# Build and deploy
 
-This document describes the current `krun build` and `krun deploy` behavior in this repo.
+Build and deploy use the shared `internal/kube` client. Kustomize rendering runs
+in-process, and Kubernetes operations use typed and dynamic clients without
+shelling out to `kubectl`.
 
-## Current State
+## Build pod
 
-- Build pod lifecycle is migrated to `client-go` (`internal/kube` shared client).
-- Source sync is migrated from SFTP/port-forwarding to pod exec + tar streaming.
-- Build command execution is migrated to pod exec via `client-go` `remotecommand`.
-- Deploy should use the same `client-go` + dynamic client approach (no `kubectl` dependency).
+`krun build` reuses `default/docker-build` to cache image layers and workspace
+files. The embedded manifest in `internal/krun/build/buildpod.go` defines a
+privileged Buildah container and its registry ConfigMap. The workspace uses
+`emptyDir`, so deleting the pod clears it.
 
-The remaining deploy work is to make this flow fully client-based end-to-end.
+The build path applies the manifest when the pod is not Running and watches for
+`PodReady=True`. `--flush` deletes the build resources before recreating them.
 
----
+## Source sync
 
-## Shared Kubernetes Client
+Source files are synced to `/var/workspace/<project>` through pod exec.
 
-`internal/kube/client.go` exposes:
+1. List remote files with `find`, collecting relative paths, modification times,
+   and sizes. A missing project directory is treated as empty.
+2. Walk the local project and apply the exclusions below.
+3. Upload files that are missing remotely, have a different size, or have a newer
+   local modification time (compared at whole-second precision).
+4. Stream changed files as tar+gzip to `tar xzf - -C /var/workspace`.
+5. Delete remote files absent from the local set. Deletion paths must remain
+   under the remote project root and are passed as NUL-delimited arguments.
 
-- `RestConfig`
-- `Clientset`
-- `DynamicClient`
-- `Mapper` (deferred, memory-cached REST mapper)
+Equal-size files with equal or older local timestamps are skipped; sync does
+not compare file contents. Output uses `+` for additions, `~` for updates, and
+`-` for deletions. With no changes, image building is skipped unless `--force`
+is set.
 
-This client is used by the refactored build pod lifecycle and source sync exec operations.
+### Exclusions
 
----
+The built-in excluded directories are `.github`, `.vs`, `.git`, `.angular`,
+`bin`, `obj`, `node_modules`, `k8s`, and `docs`. `--skip-web` also excludes `web`
+and skips services whose path ends in `web`.
 
-## Build Flow
+A project-root `.dockerignore` adds exclusions:
 
-## 1. Build Pod Existence Check
+- Patterns are relative to the project root: `*.log` matches top-level logs;
+  `**/*.log` matches at any depth.
+- `*` and `?` do not cross `/`; `**` spans any number of path segments.
+- A directory match excludes its descendants.
+- Lines starting with `#` are comments. A leading `!` re-includes a path;
+  the last matching pattern wins.
 
-`buildPodExists` uses typed client `Get` for `default/docker-build`.
+Character classes and backslash escapes are unsupported. Negations cannot
+override built-in exclusions. Previously synced files that become ignored are
+deleted on the next sync.
 
-- `NotFound` -> pod does not exist.
-- Exists and `Status.Phase == Running` -> ready for use.
+## Image build and push
 
-## 2. Build Pod Apply
+Buildah runs inside the build pod with output streamed to the terminal. Each
+selected service is built from its configured Dockerfile and context, then
+pushed to the configured registry with the `latest` tag.
 
-`createBuildPod` decodes the embedded multi-doc YAML manifest and applies each object with:
+## Deploy and delete
 
-- dynamic client
-- REST mapper resolution by GVK
-- Server-Side Apply (`ApplyPatchType`, field manager `krun`, force=true)
+The project path comes from service discovery. Overlay selection checks:
 
-Current manifest includes:
+1. `k8s/cloud`: if present, both `k8s/cloud/overlays/local` and
+   `k8s/edge/overlays/local` must exist.
+2. `k8s/overlays/local`.
+3. A Kustomization in `k8s` itself.
 
-- `ConfigMap` (`docker-build-registries`)
-- `Pod` (`docker-build`) with:
-  - `docker-build` container (buildah only)
+For each overlay, krun renders manifests, replaces local-registry references
+with the selected registry, and applies or deletes the objects through the
+dynamic client and REST mapper. Apply uses server-side apply with field manager
+`krun` and forced field ownership; deletion uses background propagation and
+ignores resources that are already absent.
 
-## 3. Wait for Pod Ready
+`--create-namespace` checks and creates missing target namespaces in sorted
+order, excluding namespaces supplied by the manifests. Without the flag, krun
+does not make these extra Namespace API calls.
 
-`waitForBuildPodReady` uses `watchtools.UntilWithSync` and waits for `PodReady=True` on `docker-build`.
-
-## 4. Build Pod Delete
-
-`deleteBuildPod` decodes the same manifest and deletes each object with dynamic client:
-
-- propagation policy: `Background`
-- `NotFound` ignored
-
-## 5. Wait for Deletion
-
-`waitForBuildPodDeletion` (in `build.go`) polls `buildPodExists` until timeout.
-
-## 6. Source Sync (Stat-Based Remote-First)
-
-`copySource` now uses exec on the build pod, not SFTP.
-
-### 6.1 Remote listing
-
-Exec command:
-
-```sh
-find /var/workspace/<project> -type f -printf '%P\t%T@\t%s\n'
-```
-
-Parsed into:
-
-- relative path
-- mtime (ns)
-- size (bytes)
-
-If the project directory does not exist remotely, sync treats remote as empty (first run / after flush).
-
-### 6.2 Local listing
-
-Walk local project root and collect file metadata.
-
-Excluded directories:
-
-- `.github`
-- `.vs`
-- `.git`
-- `.angular`
-- `bin`
-- `obj`
-- `node_modules`
-- `k8s`
-- `docs`
-
-`web` is excluded when `--skip-web` is used.
-
-#### `.dockerignore`
-
-A project-root `.dockerignore` adds to the exclusions above. Supported patterns:
-
-- patterns are relative to the project root, so `*.log` only matches top-level logs and
-  `**/*.log` matches at any depth
-- `*` and `?` do not cross `/`; `**` spans any number of path segments
-- a match on a parent directory excludes everything below it
-- lines starting with `#` are comments; a leading `!` re-includes a path excluded by an earlier
-  pattern (last matching pattern wins)
-
-Character classes and backslash escapes are not supported. Negations cannot override
-the built-in directory exclusions.
-
-Ignored files are not uploaded. Previously synced files that become ignored are removed
-from the build pod on the next sync.
-
-### 6.3 Delta rule (matches old SFTP semantics)
-
-A file is uploaded when:
-
-- it does not exist remotely, or
-- size differs, or
-- local mtime (seconds precision) is newer than remote mtime
-
-If local is equal/older and size matches, upload is skipped.
-
-### 6.4 Upload
-
-Changed files are tar+gzip streamed over exec:
-
-- writer: local goroutine (`archive/tar` + `compress/gzip`)
-- extractor in pod: `tar xzf - -C /var/workspace`
-- tar paths are rooted under `<project>/...`
-
-### 6.5 Delete
-
-Remote files not present locally are deleted via exec:
-
-- command: `xargs -0 -r rm -rf --`
-- paths are sanitized and must remain under `/var/workspace/<project>/`
-
-### 6.6 Sync output semantics
-
-- `+` added (remote missing)
-- `~` updated (remote existed and upload triggered)
-- `-` deleted (stale remote file removed)
-
-No deltas -> `No changes - project up to date`.
-
-## 7. Build and Push
-
-`buildAndPushImagesBuildah` runs buildah inside the build pod using `remotecommand`
-with stdout/stderr streamed to the local terminal:
-
-- `/bin/sh -c "buildah bud ... && buildah push ..."`
-
----
-
-## Deploy Flow (Current)
-
-Deploy should follow the same Go Kubernetes client approach used by build:
-
-- render: kustomize libraries in-process (no `kubectl kustomize` shell-out)
-- registry replacement: mutate rendered objects in memory before apply
-- apply/delete: decode manifests and use dynamic client + REST mapper for server-side apply and delete
-- restart: only for Deployment/StatefulSet targets that already exist in the cluster (patch pod template annotation)
-
-Result: deploy no longer depends on the `kubectl` binary and uses the shared `internal/kube` client stack end-to-end.
-
----
-
-## Validation Performed
-
-The new sync behavior was validated using:
-
-```sh
-go run ./cmd/krun build awesome-app3-api --force --skip-web
-```
-
-Observed results:
-
-- Add file (`src/api/AwesomeApp3.Api/Controllers/TestController.cs`) -> `Added: 1 Updated: 0 Deleted: 0`
-- Modify file (`src/api/AwesomeApp3.Api/Controllers/ExampleController.cs`) -> `Added: 0 Updated: 1 Deleted: 0`
-- Delete file (`src/api/AwesomeApp3.Api/Controllers/TestController.cs`) -> `Added: 0 Updated: 0 Deleted: 1`
-- No changes -> `No changes - project up to date`
-
----
-
-## Dependencies
-
-Build refactor relies on:
-
-- `k8s.io/client-go`
-- `k8s.io/apimachinery`
-- `k8s.io/api`
-
-Notably, SFTP/SSH are no longer used by source sync runtime logic.
+After apply, Deployment and StatefulSet targets receive a rollout-restart
+annotation unless `--no-restart` is set. Targets absent at restart time are
+skipped. `--use-remote-registry` selects the remote registry from
+`krun-config.json`.

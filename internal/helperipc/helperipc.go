@@ -1,8 +1,6 @@
-// Package helperipc provides the local IPC transport between the krun CLI
-// and the elevated krun-helper daemon: HTTP served over a unix domain
-// socket on Linux and a named pipe on Windows. OS-level permissions on the
-// endpoint (socket file mode / pipe DACL) replace the open localhost TCP
-// port the helper used to listen on.
+// Package helperipc provides HTTP over local sockets or named pipes for the
+// unprivileged helper and privileged hosts writer. Endpoint permissions
+// restrict access to the local processes.
 package helperipc
 
 import (

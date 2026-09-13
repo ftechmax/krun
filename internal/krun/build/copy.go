@@ -48,7 +48,7 @@ var excludedDirectories = map[string]struct{}{
 	"docs":         {},
 }
 
-func copySource(client *kube.Client, projectName string, projectPath string, skipWeb bool) (bool, error) {
+func copySource(client *kube.Client, projectName string, localRoot string, skipWeb bool) (bool, error) {
 	startTime := time.Now()
 	plusSym := utils.Colorize("+", utils.Green)
 	minusSym := utils.Colorize("-", utils.Red)
@@ -56,11 +56,6 @@ func copySource(client *kube.Client, projectName string, projectPath string, ski
 
 	fmt.Printf("Copying project %s to remote server\n", projectName)
 
-	projectRelPath := projectName
-	if projectPath != "" {
-		projectRelPath = projectPath
-	}
-	localRoot := filepath.ToSlash(filepath.Join(config.KrunSourceConfig.Path, filepath.FromSlash(projectRelPath)))
 	remoteRoot := path.Join(workspacePath, projectName)
 
 	ctx := context.Background()
@@ -203,7 +198,6 @@ func buildSyncPlan(localFiles map[string]localFile, remoteFiles map[string]remot
 		toUpload: []localFile{},
 		toDelete: []string{},
 	}
-	seenRemote := make(map[string]struct{}, len(localFiles))
 
 	localKeys := make([]string, 0, len(localFiles))
 	for rel := range localFiles {
@@ -217,11 +211,10 @@ func buildSyncPlan(localFiles map[string]localFile, remoteFiles map[string]remot
 		if !ok || shouldUpload(lf, remote) {
 			plan.toUpload = append(plan.toUpload, lf)
 		}
-		seenRemote[rel] = struct{}{}
 	}
 
 	for rel := range remoteFiles {
-		if _, seen := seenRemote[rel]; !seen {
+		if _, exists := localFiles[rel]; !exists {
 			plan.toDelete = append(plan.toDelete, rel)
 		}
 	}
@@ -234,7 +227,7 @@ func shouldUpload(local localFile, remote remoteEntry) bool {
 	if local.size != remote.size {
 		return true
 	}
-	// Match prior SFTP behavior: if local file is not newer than remote, skip upload.
+	// Compare whole seconds; subsecond differences do not trigger an upload.
 	return local.mtimeNs/1_000_000_000 > remote.mtimeNs/1_000_000_000
 }
 
