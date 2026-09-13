@@ -10,6 +10,7 @@ import (
 	"time"
 
 	cfg "github.com/ftechmax/krun/internal/config"
+	"github.com/ftechmax/krun/internal/contracts"
 	"github.com/ftechmax/krun/internal/kube"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -53,19 +54,19 @@ func CreateEnvFile(service cfg.Service, config cfg.Config, containerName string)
 		return fmt.Errorf("create kube client: %w", err)
 	}
 
-	container := strings.TrimSpace(containerName)
-	if container == "" {
-		container = service.Name
-	}
-
-	podName, err := findRunningPod(context.Background(), client, namespace, service.Name)
+	pod, err := findRunningPod(context.Background(), client, namespace, service.Name)
 	if err != nil {
 		return err
 	}
 
-	envOutput, err := execEnv(context.Background(), client, namespace, podName, container)
+	container, err := selectContainer(pod, service, containerName)
 	if err != nil {
-		return fmt.Errorf("read environment from pod %s: %w", podName, err)
+		return err
+	}
+
+	envOutput, err := execEnv(context.Background(), client, namespace, pod.Name, container)
+	if err != nil {
+		return fmt.Errorf("read environment from pod %s: %w", pod.Name, err)
 	}
 
 	vars := filterEnvVars(parseEnvVars(envOutput))
@@ -172,8 +173,8 @@ func serviceDir(service cfg.Service, config cfg.Config) (string, error) {
 	return baseDir, nil
 }
 
-func findRunningPod(ctx context.Context, client *kube.Client, namespace, serviceName string) (string, error) {
-	var found string
+func findRunningPod(ctx context.Context, client *kube.Client, namespace, serviceName string) (*corev1.Pod, error) {
+	var found *corev1.Pod
 	err := wait.PollUntilContextTimeout(ctx, 2*time.Second, 30*time.Second, true,
 		func(ctx context.Context) (bool, error) {
 			pods, err := client.Clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
@@ -182,21 +183,64 @@ func findRunningPod(ctx context.Context, client *kube.Client, namespace, service
 			if err != nil {
 				return false, fmt.Errorf("list pods for %s/%s: %w", namespace, serviceName, err)
 			}
-			for _, pod := range pods.Items {
+			for idx := range pods.Items {
+				pod := &pods.Items[idx]
 				if pod.Status.Phase == corev1.PodRunning && pod.DeletionTimestamp == nil {
-					found = pod.Name
+					found = pod
 					return true, nil
 				}
 			}
 			return false, nil
 		})
 	if wait.Interrupted(err) {
-		return "", fmt.Errorf("no running pod found for %s/%s", namespace, serviceName)
+		return nil, fmt.Errorf("no running pod found for %s/%s", namespace, serviceName)
 	}
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	return found, nil
+}
+
+// Prefer an explicit override, then the service name, then its port.
+// The injected agent is excluded from automatic selection.
+func selectContainer(pod *corev1.Pod, service cfg.Service, override string) (string, error) {
+	if name := strings.TrimSpace(override); name != "" {
+		return name, nil
+	}
+
+	var names []string
+	var portMatch string
+	for _, container := range pod.Spec.Containers {
+		if container.Name == contracts.AgentContainerName {
+			continue
+		}
+		if container.Name == service.Name {
+			return container.Name, nil
+		}
+		names = append(names, container.Name)
+		if portMatch == "" && exposesPort(container, service.ContainerPort) {
+			portMatch = container.Name
+		}
+	}
+	if portMatch != "" {
+		return portMatch, nil
+	}
+	if len(names) == 1 {
+		return names[0], nil
+	}
+	return "", fmt.Errorf("cannot pick a container in pod %s (candidates: %s); pass --container", pod.Name, strings.Join(names, ", "))
+}
+
+func exposesPort(container corev1.Container, port int) bool {
+	if port <= 0 {
+		return false
+	}
+	for _, p := range container.Ports {
+		if int(p.ContainerPort) == port {
+			return true
+		}
+	}
+	return false
 }
 
 func execEnv(ctx context.Context, client *kube.Client, namespace, podName, containerName string) (string, error) {

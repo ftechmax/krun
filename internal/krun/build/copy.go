@@ -142,11 +142,26 @@ func listRemoteFiles(ctx context.Context, client *kube.Client, remoteRoot string
 func collectLocalFiles(localRoot string, skipWeb bool) (map[string]localFile, error) {
 	localFiles := map[string]localFile{}
 
-	err := filepath.WalkDir(localRoot, func(p string, d os.DirEntry, walkErr error) error {
+	ignore, err := loadDockerignore(localRoot)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", dockerignoreFileName, err)
+	}
+
+	err = filepath.WalkDir(localRoot, func(p string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
+
+		relPath, err := filepath.Rel(localRoot, p)
+		if err != nil {
+			return err
+		}
+		relPath = filepath.ToSlash(relPath)
+
 		if d.IsDir() {
+			if relPath == "." {
+				return nil
+			}
 			name := d.Name()
 			if _, excluded := excludedDirectories[name]; excluded {
 				return filepath.SkipDir
@@ -154,6 +169,13 @@ func collectLocalFiles(localRoot string, skipWeb bool) (map[string]localFile, er
 			if skipWeb && name == "web" {
 				return filepath.SkipDir
 			}
+			if ignore.canSkipDir(relPath) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		if ignore.matches(relPath) {
 			return nil
 		}
 
@@ -161,11 +183,6 @@ func collectLocalFiles(localRoot string, skipWeb bool) (map[string]localFile, er
 		if err != nil {
 			return err
 		}
-		relPath, err := filepath.Rel(localRoot, p)
-		if err != nil {
-			return err
-		}
-		relPath = filepath.ToSlash(relPath)
 		localFiles[relPath] = localFile{
 			relPath:   relPath,
 			localPath: p,

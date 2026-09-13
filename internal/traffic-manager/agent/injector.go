@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	defaultContainerName   = "krun-traffic-agent"
+	defaultContainerName   = contracts.AgentContainerName
 	defaultImage           = "docker.io/ftechmax/krun-traffic-agent:latest"
 	defaultImagePullPolicy = "IfNotPresent"
 	defaultManagerAddress  = "http://krun-traffic-manager.krun-system.svc:8080"
@@ -377,8 +377,11 @@ func (i *WorkloadInjector) buildContainer(session contracts.DebugSession) corev1
 			{Name: "KRUN_TARGET_PORT", Value: strconv.Itoa(session.ServicePort)},
 			{Name: "KRUN_AGENT_PROBE_PORT", Value: strconv.Itoa(i.options.ProbePort)},
 		},
+		// iptables needs root. RunAsNonRoot is set explicitly so a pod-level
+		// runAsNonRoot: true doesn't make kubelet reject the container.
 		SecurityContext: &corev1.SecurityContext{
-			RunAsUser: new(int64(0)),
+			RunAsUser:    new(int64(0)),
+			RunAsNonRoot: new(false),
 			Capabilities: &corev1.Capabilities{
 				Add: []corev1.Capability{"NET_ADMIN"},
 			},

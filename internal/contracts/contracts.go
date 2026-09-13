@@ -71,6 +71,8 @@ type HelperDebugSession struct {
 	State      string              `json:"state,omitempty"`
 }
 
+const AgentContainerName = "krun-traffic-agent"
+
 const (
 	HelperSessionStateActive         = "active"
 	HelperSessionStateCleanupPending = "cleanup-pending"

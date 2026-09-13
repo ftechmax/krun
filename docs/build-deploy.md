@@ -102,6 +102,23 @@ Excluded directories:
 
 `web` is excluded when `--skip-web` is used.
 
+#### `.dockerignore`
+
+A project-root `.dockerignore` adds to the exclusions above. Supported patterns:
+
+- patterns are relative to the project root, so `*.log` only matches top-level logs and
+  `**/*.log` matches at any depth
+- `*` and `?` do not cross `/`; `**` spans any number of path segments
+- a match on a parent directory excludes everything below it
+- lines starting with `#` are comments; a leading `!` re-includes a path excluded by an earlier
+  pattern (last matching pattern wins)
+
+Character classes and backslash escapes are not supported. Negations cannot override
+the built-in directory exclusions.
+
+Ignored files are not uploaded. Previously synced files that become ignored are removed
+from the build pod on the next sync.
+
 ### 6.3 Delta rule (matches old SFTP semantics)
 
 A file is uploaded when:

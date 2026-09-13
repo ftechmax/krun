@@ -7,6 +7,9 @@ import (
 	"testing"
 
 	cfg "github.com/ftechmax/krun/internal/config"
+	"github.com/ftechmax/krun/internal/contracts"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestServiceDir(t *testing.T) {
@@ -115,6 +118,80 @@ func TestRemoveEnvFileNotExisting(t *testing.T) {
 
 	if err := RemoveEnvFile(service, config); err != nil {
 		t.Fatalf("RemoveEnvFile returned error for non-existing file: %v", err)
+	}
+}
+
+func TestSelectContainer(t *testing.T) {
+	container := func(name string, ports ...int32) corev1.Container {
+		c := corev1.Container{Name: name}
+		for _, port := range ports {
+			c.Ports = append(c.Ports, corev1.ContainerPort{ContainerPort: port})
+		}
+		return c
+	}
+	agent := container(contracts.AgentContainerName)
+
+	cases := []struct {
+		name       string
+		containers []corev1.Container
+		service    cfg.Service
+		override   string
+		want       string
+		wantErr    bool
+	}{
+		{
+			name:       "explicit container wins",
+			containers: []corev1.Container{container("api", 8080), agent},
+			service:    cfg.Service{Name: "uma-api", ContainerPort: 8080},
+			override:   "other",
+			want:       "other",
+		},
+		{
+			name:       "container named after the service",
+			containers: []corev1.Container{container("sidecar", 8080), container("uma-api"), agent},
+			service:    cfg.Service{Name: "uma-api", ContainerPort: 8080},
+			want:       "uma-api",
+		},
+		{
+			name:       "container exposing the service port",
+			containers: []corev1.Container{container("metrics", 9090), container("api", 8080), agent},
+			service:    cfg.Service{Name: "uma-api", ContainerPort: 8080},
+			want:       "api",
+		},
+		{
+			name:       "only container besides the agent",
+			containers: []corev1.Container{container("api"), agent},
+			service:    cfg.Service{Name: "uma-api"},
+			want:       "api",
+		},
+		{
+			name:       "ambiguous containers are an error",
+			containers: []corev1.Container{container("a"), container("b"), agent},
+			service:    cfg.Service{Name: "uma-api"},
+			wantErr:    true,
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "uma-api-abc"},
+				Spec:       corev1.PodSpec{Containers: testCase.containers},
+			}
+			got, err := selectContainer(pod, testCase.service, testCase.override)
+			if testCase.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error, got %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != testCase.want {
+				t.Fatalf("got %q, want %q", got, testCase.want)
+			}
+		})
 	}
 }
 

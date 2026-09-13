@@ -63,6 +63,10 @@ func TestWorkloadInjectorInjectAndRemove(t *testing.T) {
 			if len(sidecar.Env) == 0 || sidecar.Env[0].Name != "KRUN_SESSION_ID" || sidecar.Env[0].Value != "session-1" {
 				t.Fatalf("expected session env vars to be set, got %+v", sidecar.Env)
 			}
+			sc := sidecar.SecurityContext
+			if sc == nil || sc.RunAsUser == nil || *sc.RunAsUser != 0 || sc.RunAsNonRoot == nil || *sc.RunAsNonRoot {
+				t.Fatalf("expected sidecar to run as root with runAsNonRoot=false, got %+v", sc)
+			}
 			annotations := getWorkloadLabels(t, client, tc.kind, "default", "orders-api")
 			if annotations[injectedLabelKey] != "true" {
 				t.Fatalf("expected injected label to be set, got %v", annotations)
