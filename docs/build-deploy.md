@@ -45,9 +45,16 @@ This client is used by the refactored build pod lifecycle and source sync exec o
 
 Current manifest includes:
 
-- `ConfigMap` (`docker-build-registries`)
+- `ConfigMap` (`docker-build-buildkitd`) with `buildkitd.toml` (marks `registry:5000` as plain HTTP)
 - `Pod` (`docker-build`) with:
-  - `docker-build` container (buildah only)
+  - `docker-build` container running rootless BuildKit (`moby/buildkit:<version>-rootless`, uid 1000, not privileged)
+  - `/var/workspace` emptyDir for synced sources and an emptyDir for the BuildKit cache
+
+`createBuildPod` checks the existing pod first:
+
+- terminating -> wait until it is gone, then recreate
+- running a different image (for example the old privileged buildah pod) -> delete it and the legacy `docker-build-registries` ConfigMap, wait until gone, then recreate
+- running the current image -> reuse
 
 ## 3. Wait for Pod Ready
 
@@ -62,7 +69,7 @@ Current manifest includes:
 
 ## 5. Wait for Deletion
 
-`waitForBuildPodDeletion` (in `build.go`) polls `buildPodExists` until timeout.
+`waitForBuildPodGone` polls `Get` until the pod is `NotFound`. A terminating pod still reports phase `Running`, so phase alone is not enough.
 
 ## 6. Source Sync (Stat-Based Remote-First)
 
@@ -73,13 +80,13 @@ Current manifest includes:
 Exec command:
 
 ```sh
-find /var/workspace/<project> -type f -printf '%P\t%T@\t%s\n'
+find /var/workspace/<project> -type f -exec stat -c '%Y %s %n' {} +
 ```
 
 Parsed into:
 
-- relative path
-- mtime (ns)
+- relative path (absolute path with the project root stripped)
+- mtime (seconds)
 - size (bytes)
 
 If the project directory does not exist remotely, sync treats remote as empty (first run / after flush).
@@ -137,10 +144,16 @@ No deltas -> `No changes - project up to date`.
 
 ## 7. Build and Push
 
-`buildAndPushImagesBuildah` runs buildah inside the build pod using `remotecommand`
-with stdout/stderr streamed to the local terminal:
+`buildAndPushImage` runs `buildctl` inside the build pod using `remotecommand`
+with stdout/stderr streamed to the local terminal. It builds and pushes in one step:
 
-- `/bin/sh -c "buildah bud ... && buildah push ..."`
+```sh
+buildctl build --progress=plain --frontend=dockerfile.v0 \
+  --local context=<context dir> --local dockerfile=<dockerfile dir> \
+  --output type=image,name=<registry>/<service>:latest,push=true
+```
+
+If any service fails to build, `krun build` exits with status 1.
 
 ---
 

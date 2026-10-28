@@ -4,8 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
-	"time"
+	"strings"
 
 	cfg "github.com/ftechmax/krun/internal/config"
 	"github.com/ftechmax/krun/internal/kube"
@@ -17,35 +18,17 @@ var config cfg.Config
 const workspacePath = "/var/workspace"
 const buildPodName = "docker-build"
 
-func Build(projectName string, servicesToBuild []cfg.Service, skipWeb bool, force bool, flush bool, cfg cfg.Config) {
+func Build(projectName string, servicesToBuild []cfg.Service, skipWeb bool, force bool, flush bool, cfg cfg.Config) error {
 	config = cfg
 
 	fmt.Printf("Building project %s\n", projectName)
 
-	// If flush requested, delete existing build pod to clear caches
 	if flush {
-		exists, err := buildPodExists(config.KubeConfig)
-		if err != nil {
-			fmt.Println(utils.Colorize(fmt.Sprintf("Failed to check existing build pod for flush: %s", err.Error()), utils.Red))
-		} else if exists {
-			fmt.Println(utils.Colorize("Deleting existing build pod", utils.Yellow))
-			if err := deleteBuildPod(config.KubeConfig); err != nil {
-				fmt.Println(utils.Colorize(fmt.Sprintf("Failed to delete existing build pod: %s", err.Error()), utils.Red))
-			} else {
-				fmt.Print(utils.Colorize("Waiting for previous build pod to terminate", utils.Cyan))
-				if err := waitForBuildPodDeletion(config.KubeConfig, 45*time.Second); err != nil {
-					fmt.Println(utils.Colorize(" (timed out)", utils.Yellow))
-					fmt.Println(utils.Colorize("Previous build pod is still terminating; proceeding to recreate", utils.Yellow))
-				} else {
-					fmt.Println(utils.Colorize(" (done)", utils.Green))
-					fmt.Println(utils.Colorize("Previous build pod fully removed.", utils.Green))
-				}
-			}
-		}
+		flushBuildPod(config.KubeConfig)
 	}
 
-	if err := startBuildContainer(config.KubeConfig); err != nil {
-		panic(fmt.Sprintf("Failed to start build container: %s", err.Error()))
+	if err := createBuildPod(config.KubeConfig); err != nil {
+		return fmt.Errorf("start build container: %w", err)
 	}
 
 	projectPath := ""
@@ -54,86 +37,72 @@ func Build(projectName string, servicesToBuild []cfg.Service, skipWeb bool, forc
 	}
 	needsBuild, err := copySource(config.KubeConfig, projectName, projectPath, skipWeb)
 	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to copy source: %s", err.Error()), utils.Red))
-		return
+		return fmt.Errorf("copy source: %w", err)
 	}
-	if needsBuild || force {
-
-		for _, s := range servicesToBuild {
-			if skipWeb && filepath.Base(s.Path) == "web" {
-				continue
-			}
-			buildAndPushImagesBuildah(s, config.Registry, config.KubeConfig)
-		}
-	} else {
+	if !needsBuild && !force {
 		fmt.Printf("No changes detected in project %s, skipping build\n", projectName)
-	}
-}
-
-func startBuildContainer(kubeConfig string) error {
-	if err := createBuildPod(kubeConfig); err != nil {
-		return err
+		return nil
 	}
 
-	// Wait for build pod to be up
-	for range 60 {
-		exists, err := buildPodExists(kubeConfig)
-		if err != nil {
-			return fmt.Errorf("error checking build pod state: %w", err)
-		}
-		if exists {
-			return nil
-		}
-		fmt.Println("Waiting for build pod to become ready...")
-		time.Sleep(500 * time.Millisecond)
-	}
-	return fmt.Errorf("build pod did not become ready in time")
-}
-
-func buildAndPushImagesBuildah(service cfg.Service, registry string, kubeConfig string) {
-	contextPath := filepath.ToSlash(filepath.Join(workspacePath, service.Project, service.Context))
-	dockerfilePath := filepath.ToSlash(filepath.Join(workspacePath, service.Project, service.Path, service.Dockerfile, "Dockerfile"))
-
-	cmd := fmt.Sprintf(
-		"buildah bud -t %s/%s -f %s %s && buildah push %s/%s:latest docker://%s/%s:latest",
-		registry, service.Name, dockerfilePath, contextPath, registry, service.Name, registry, service.Name,
-	)
-
-	client, err := kube.NewClient(kubeConfig)
+	client, err := kube.NewClient(config.KubeConfig)
 	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to create Kubernetes client: %s", err.Error()), utils.Red))
+		return fmt.Errorf("create kube client: %w", err)
+	}
+
+	var failed []string
+	for _, s := range servicesToBuild {
+		if skipWeb && filepath.Base(s.Path) == "web" {
+			continue
+		}
+		if err := buildAndPushImage(client, s, config.Registry); err != nil {
+			fmt.Println(utils.Colorize(fmt.Sprintf("Build failed for %s: %s", s.Name, err.Error()), utils.Red))
+			failed = append(failed, s.Name)
+		}
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("build failed for: %s", strings.Join(failed, ", "))
+	}
+	return nil
+}
+
+// flushBuildPod deletes the build pod to clear its caches. Failures are reported but not fatal.
+func flushBuildPod(kubeConfig string) {
+	exists, err := buildPodExists(kubeConfig)
+	if err != nil {
+		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to check existing build pod for flush: %s", err.Error()), utils.Red))
 		return
 	}
+	if !exists {
+		return
+	}
+	fmt.Println(utils.Colorize("Deleting existing build pod", utils.Yellow))
+	if err := deleteBuildPod(kubeConfig); err != nil {
+		fmt.Println(utils.Colorize(fmt.Sprintf("Failed to delete existing build pod: %s", err.Error()), utils.Red))
+	}
+}
 
-	err = execInBuildPodStream(
+func buildctlArgs(service cfg.Service, registry string) []string {
+	contextPath := path.Join(workspacePath, service.Project, filepath.ToSlash(service.Context))
+	dockerfileDir := path.Join(workspacePath, service.Project, filepath.ToSlash(service.Path), filepath.ToSlash(service.Dockerfile))
+	image := fmt.Sprintf("%s/%s:latest", registry, service.Name)
+
+	return []string{
+		"buildctl", "build",
+		"--progress=plain",
+		"--frontend=dockerfile.v0",
+		"--local", "context=" + contextPath,
+		"--local", "dockerfile=" + dockerfileDir,
+		"--output", "type=image,name=" + image + ",push=true",
+	}
+}
+
+func buildAndPushImage(client *kube.Client, service cfg.Service, registry string) error {
+	return execInBuildPodStream(
 		context.Background(),
 		client,
-		[]string{"/bin/sh", "-c", cmd},
+		buildctlArgs(service, registry),
 		nil,
 		os.Stdout,
 		os.Stderr,
 	)
-	if err != nil {
-		fmt.Println(utils.Colorize(fmt.Sprintf("Buildah command failed for %s: %s", service.Name, err.Error()), utils.Red))
-	}
-}
-
-func waitForBuildPodDeletion(kubeConfig string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	ticker := time.NewTicker(750 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		exists, err := buildPodExists(kubeConfig)
-		if err != nil {
-			return err
-		}
-		if !exists {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("timeout waiting for build pod deletion")
-		}
-		fmt.Print(".")
-		<-ticker.C
-	}
 }

@@ -95,18 +95,21 @@ func TestBuildSyncPlanDeletedPhase(t *testing.T) {
 	}
 }
 
-func TestParseRemoteFindOutput(t *testing.T) {
-	out := "a.txt\t1700000000.123456789\t11\ninvalid line\nb/c.txt\t1700000001.5\t22\n"
-	parsed := parseRemoteFindOutput(out)
+func TestParseRemoteStatOutput(t *testing.T) {
+	out := "1700000000 11 /var/workspace/proj/a.txt\n" +
+		"invalid line\n" +
+		"1700000001 22 /var/workspace/proj/b/c d.txt\n" +
+		"1700000002 33 /var/workspace/other/x.txt\n"
+	parsed := parseRemoteStatOutput(out, "/var/workspace/proj")
 
 	if len(parsed) != 2 {
-		t.Fatalf("expected 2 parsed entries, got %d", len(parsed))
+		t.Fatalf("expected 2 parsed entries, got %d: %#v", len(parsed), parsed)
 	}
-	if parsed["a.txt"].mtimeNs != 1700000000123456789 || parsed["a.txt"].size != 11 {
+	if parsed["a.txt"].mtimeNs != 1700000000_000000000 || parsed["a.txt"].size != 11 {
 		t.Fatalf("unexpected parsed entry for a.txt: %#v", parsed["a.txt"])
 	}
-	if parsed["b/c.txt"].mtimeNs != 1700000001500000000 || parsed["b/c.txt"].size != 22 {
-		t.Fatalf("unexpected parsed entry for b/c.txt: %#v", parsed["b/c.txt"])
+	if parsed["b/c d.txt"].mtimeNs != 1700000001_000000000 || parsed["b/c d.txt"].size != 22 {
+		t.Fatalf("unexpected parsed entry for b/c d.txt: %#v", parsed["b/c d.txt"])
 	}
 }
 

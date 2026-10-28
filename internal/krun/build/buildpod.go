@@ -23,19 +23,23 @@ import (
 	watchtools "k8s.io/client-go/tools/watch"
 )
 
+const buildkitImage = "moby/buildkit:v0.25.1-rootless"
+
+// Left behind by the old buildah build pod.
+const legacyConfigMapName = "docker-build-registries"
+
+// Rootless BuildKit needs seccomp/AppArmor unconfined for its user namespace.
 const manifest = `
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: docker-build-registries
+  name: docker-build-buildkitd
   namespace: default
 data:
-  registries.conf: |
-    [registries.search]
-    registries = ['docker.io']
-
-    [registries.insecure]
-    registries = ['registry:5000']
+  buildkitd.toml: |
+    [registry."registry:5000"]
+      http = true
+      insecure = true
 ---
 apiVersion: v1
 kind: Pod
@@ -45,30 +49,47 @@ metadata:
   name: docker-build
   namespace: default
 spec:
+  automountServiceAccountToken: false
   securityContext:
-    fsGroup: 1001
+    fsGroup: 1000
   containers:
-  - image: quay.io/buildah/stable:latest
+  - image: ` + buildkitImage + `
     name: docker-build
+    args: ["--oci-worker-no-process-sandbox"]
     securityContext:
-      privileged: true
-      runAsGroup: 1001
-    command: ["sleep", "infinity"]
+      runAsUser: 1000
+      runAsGroup: 1000
+      seccompProfile:
+        type: Unconfined
+      appArmorProfile:
+        type: Unconfined
+    readinessProbe:
+      exec:
+        command: ["buildctl", "debug", "workers"]
+      initialDelaySeconds: 2
+      periodSeconds: 3
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+        ephemeral-storage: 1Gi
     volumeMounts:
       - mountPath: /var/workspace
         name: workspace
-      - mountPath: /etc/containers/registries.conf
-        name: docker-build-registries
-        subPath: registries.conf
+      - mountPath: /home/user/.local/share/buildkit
+        name: cache
+      - mountPath: /home/user/.config/buildkit
+        name: buildkitd-config
   volumes:
   - name: workspace
-    emptyDir: {}
-  - name: docker-build-registries
+    emptyDir:
+      sizeLimit: 10Gi
+  - name: cache
+    emptyDir:
+      sizeLimit: 20Gi
+  - name: buildkitd-config
     configMap:
-      name: docker-build-registries
-      items:
-        - key: registries.conf
-          path: registries.conf
+      name: docker-build-buildkitd
 `
 
 func buildPodExists(kubeConfig string) (bool, error) {
@@ -94,16 +115,35 @@ func createBuildPod(kubeConfig string) error {
 		return fmt.Errorf("create kube client: %w", err)
 	}
 
-	exists, err := buildPodExists(kubeConfig)
-	if err != nil {
-		return fmt.Errorf("failed to check if build pod exists: %w", err)
-	}
-	if exists {
+	ctx := context.Background()
+	pod, err := client.Clientset.CoreV1().Pods("default").Get(ctx, buildPodName, metav1.GetOptions{})
+	switch {
+	case k8serrors.IsNotFound(err):
+	case err != nil:
+		return fmt.Errorf("get build pod: %w", err)
+	case pod.DeletionTimestamp != nil:
+		fmt.Println("\033[33mWaiting for previous build pod to terminate\033[0m")
+		if err := waitForBuildPodGone(client, 90*time.Second); err != nil {
+			return err
+		}
+	case !usesImage(pod, buildkitImage):
+		fmt.Println("\033[33mReplacing outdated build pod\033[0m")
+		if err := deleteManifest(ctx, client, manifest); err != nil {
+			return fmt.Errorf("delete outdated build pod: %w", err)
+		}
+		err := client.Clientset.CoreV1().ConfigMaps("default").Delete(ctx, legacyConfigMapName, metav1.DeleteOptions{})
+		if err != nil && !k8serrors.IsNotFound(err) {
+			return fmt.Errorf("delete configmap %s: %w", legacyConfigMapName, err)
+		}
+		if err := waitForBuildPodGone(client, 90*time.Second); err != nil {
+			return err
+		}
+	case pod.Status.Phase == corev1.PodRunning:
 		return nil
 	}
 
 	fmt.Println("\033[32mCreating build container\033[0m")
-	if err := applyManifest(context.Background(), client, manifest); err != nil {
+	if err := applyManifest(ctx, client, manifest); err != nil {
 		return fmt.Errorf("failed to create build pod: %w", err)
 	}
 
@@ -112,6 +152,15 @@ func createBuildPod(kubeConfig string) error {
 	}
 
 	return nil
+}
+
+func usesImage(pod *corev1.Pod, image string) bool {
+	for _, c := range pod.Spec.Containers {
+		if c.Name == buildPodName {
+			return c.Image == image
+		}
+	}
+	return false
 }
 
 func deleteBuildPod(kubeConfig string) error {
@@ -123,6 +172,24 @@ func deleteBuildPod(kubeConfig string) error {
 		return fmt.Errorf("failed to initiate build pod deletion: %w", err)
 	}
 	return nil
+}
+
+// A terminating pod still reports phase Running, so wait for NotFound.
+func waitForBuildPodGone(client *kube.Client, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		_, err := client.Clientset.CoreV1().Pods("default").Get(context.Background(), buildPodName, metav1.GetOptions{})
+		if k8serrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("get build pod: %w", err)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for build pod deletion")
+		}
+		time.Sleep(750 * time.Millisecond)
+	}
 }
 
 func waitForBuildPodReady(client *kube.Client, timeout time.Duration) error {

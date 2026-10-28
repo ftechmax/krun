@@ -248,7 +248,10 @@ func handleBuild(cmd *cobra.Command, args []string) {
 			}
 		}
 	}
-	build.Build(projectName, servicesToBuild, skipWeb, forceBuild, flush, config)
+	if err := build.Build(projectName, servicesToBuild, skipWeb, forceBuild, flush, config); err != nil {
+		fmt.Println(utils.Colorize(err.Error(), utils.Red))
+		os.Exit(1)
+	}
 }
 
 func handleDeploy(cmd *cobra.Command, args []string) {
