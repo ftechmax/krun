@@ -5,6 +5,7 @@ go 1.27.0
 require (
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
+	github.com/moby/patternmatcher v0.6.1
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/sys v0.48.0
 	k8s.io/api v0.37.0

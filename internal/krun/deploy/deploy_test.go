@@ -34,99 +34,21 @@ var (
 	stsGVR       = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "statefulsets"}
 )
 
-func TestResolveOverlayPathsDefault(t *testing.T) {
+func TestResolveOverlayPath(t *testing.T) {
 	root := t.TempDir()
-	overlay := filepath.Join(root, "apps", "awesome-api", "k8s", "overlays", "local")
-	mkdirAll(t, overlay)
-
-	config := cfg.Config{
-		KrunConfig: cfg.KrunConfig{
-			KrunSourceConfig: cfg.KrunSourceConfig{Path: root},
-		},
-		ProjectPaths: map[string]string{
-			"awesome-api": "apps/awesome-api",
-		},
+	for _, environment := range []string{"local", "development", "production"} {
+		config := cfg.Config{KrunConfig: cfg.KrunConfig{KrunSourceConfig: cfg.KrunSourceConfig{Path: root}}, ProjectPaths: map[string]string{"api": "apps/api"}, Environment: environment}
+		got, err := resolveOverlayPath(config, "api")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := filepath.Join(root, "apps", "api", "k8s", "overlays", environment)
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
 	}
-
-	paths, err := resolveOverlayPaths(config, "awesome-api")
-	if err != nil {
-		t.Fatalf("resolveOverlayPaths returned error: %v", err)
-	}
-	if len(paths) != 1 {
-		t.Fatalf("expected 1 overlay path, got %d", len(paths))
-	}
-	if paths[0] != overlay {
-		t.Fatalf("unexpected overlay path: got %q want %q", paths[0], overlay)
-	}
-}
-
-func TestResolveOverlayPathsCloudEdge(t *testing.T) {
-	root := t.TempDir()
-	cloudOverlay := filepath.Join(root, "svc", "k8s", "cloud", "overlays", "local")
-	edgeOverlay := filepath.Join(root, "svc", "k8s", "edge", "overlays", "local")
-	mkdirAll(t, cloudOverlay)
-	mkdirAll(t, edgeOverlay)
-
-	config := cfg.Config{
-		KrunConfig: cfg.KrunConfig{
-			KrunSourceConfig: cfg.KrunSourceConfig{Path: root},
-		},
-		ProjectPaths: map[string]string{"svc": "svc"},
-	}
-
-	paths, err := resolveOverlayPaths(config, "svc")
-	if err != nil {
-		t.Fatalf("resolveOverlayPaths returned error: %v", err)
-	}
-	if len(paths) != 2 {
-		t.Fatalf("expected 2 overlay paths, got %d", len(paths))
-	}
-	if paths[0] != cloudOverlay || paths[1] != edgeOverlay {
-		t.Fatalf("unexpected overlay paths: %#v", paths)
-	}
-}
-
-func TestResolveOverlayPathsK8sRoot(t *testing.T) {
-	root := t.TempDir()
-	k8sDir := filepath.Join(root, "svc", "k8s")
-	mkdirAll(t, k8sDir)
-	writeFile(t, filepath.Join(k8sDir, "kustomization.yaml"), `
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-resources: []
-`)
-
-	config := cfg.Config{
-		KrunConfig: cfg.KrunConfig{
-			KrunSourceConfig: cfg.KrunSourceConfig{Path: root},
-		},
-		ProjectPaths: map[string]string{"svc": "svc"},
-	}
-
-	paths, err := resolveOverlayPaths(config, "svc")
-	if err != nil {
-		t.Fatalf("resolveOverlayPaths returned error: %v", err)
-	}
-	if len(paths) != 1 {
-		t.Fatalf("expected 1 overlay path, got %d", len(paths))
-	}
-	if paths[0] != k8sDir {
-		t.Fatalf("unexpected overlay path: got %q want %q", paths[0], k8sDir)
-	}
-}
-
-func TestResolveOverlayPathsMissingOverlay(t *testing.T) {
-	root := t.TempDir()
-	config := cfg.Config{
-		KrunConfig: cfg.KrunConfig{
-			KrunSourceConfig: cfg.KrunSourceConfig{Path: root},
-		},
-		ProjectPaths: map[string]string{"missing": "missing"},
-	}
-
-	_, err := resolveOverlayPaths(config, "missing")
-	if err == nil {
-		t.Fatalf("expected error for missing overlay, got nil")
+	if _, err := resolveOverlayPath(cfg.Config{Environment: "../production"}, "api"); err == nil {
+		t.Fatal("expected invalid environment to fail")
 	}
 }
 
@@ -234,6 +156,7 @@ metadata:
   name: awesome-api
   namespace: default
 spec:
+  replicas: 2
   selector:
     matchLabels:
       app: awesome-api
@@ -247,7 +170,7 @@ spec:
           image: registry:5000/awesome-api:latest
 `)
 
-	config := cfg.Config{
+	config := cfg.Config{Environment: "local",
 		KrunConfig: cfg.KrunConfig{
 			LocalRegistry: "registry:5000",
 		},
@@ -281,6 +204,12 @@ spec:
 		t.Fatalf("expected rendered deployment object")
 	}
 
+	// Rendering must preserve Kubernetes integer types, including during deep copies.
+	deployment = deployment.DeepCopy()
+	replicas, found, err := unstructured.NestedInt64(deployment.Object, "spec", "replicas")
+	if err != nil || !found || replicas != 2 {
+		t.Fatalf("replicas = %d, found=%v, err=%v", replicas, found, err)
+	}
 	containers, found, err := unstructured.NestedSlice(deployment.Object, "spec", "template", "spec", "containers")
 	if err != nil || !found || len(containers) != 1 {
 		t.Fatalf("expected one container, err=%v found=%v len=%d", err, found, len(containers))
@@ -321,7 +250,7 @@ data:
 	})
 	clientset := kubefake.NewSimpleClientset()
 	client.Clientset = clientset
-	config := cfg.Config{KrunConfig: cfg.KrunConfig{KrunSourceConfig: cfg.KrunSourceConfig{Path: root}}, ProjectPaths: map[string]string{"app": "app"}}
+	config := cfg.Config{Environment: "local", KrunConfig: cfg.KrunConfig{KrunSourceConfig: cfg.KrunSourceConfig{Path: root}}, ProjectPaths: map[string]string{"app": "app"}}
 
 	if _, err := handle(context.Background(), client, config, "app", false, false); err != nil {
 		t.Fatalf("handle default deploy: %v", err)
@@ -436,7 +365,7 @@ metadata:
   namespace: default
 `)
 
-	config := cfg.Config{
+	config := cfg.Config{Environment: "local",
 		KrunConfig: cfg.KrunConfig{
 			KrunSourceConfig: cfg.KrunSourceConfig{Path: root},
 		},

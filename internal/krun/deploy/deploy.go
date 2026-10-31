@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -19,6 +18,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
@@ -69,84 +69,37 @@ func Delete(projectName string, config cfg.Config) {
 }
 
 func handle(ctx context.Context, client *kube.Client, config cfg.Config, projectName string, deleteMode bool, createNamespace bool) ([]restartTarget, error) {
-	overlayPaths, err := resolveOverlayPaths(config, projectName)
+	overlayPath, err := resolveOverlayPath(config, projectName)
 	if err != nil {
 		return nil, err
 	}
 
-	var restartCandidates []*unstructured.Unstructured
-	for _, overlayPath := range overlayPaths {
-		objs, err := RenderKustomizeObjects(overlayPath)
-		if err != nil {
-			return nil, fmt.Errorf("render kustomize %s: %w", overlayPath, err)
-		}
-
-		replaceRegistryInObjects(objs, config.LocalRegistry, config.Registry)
-		if deleteMode {
-			if err := DeleteObjects(ctx, client, objs); err != nil {
-				return nil, fmt.Errorf("delete objects from %s: %w", overlayPath, err)
-			}
-			continue
-		}
-
-		if createNamespace {
-			if err := ensureNamespaces(ctx, client, objs); err != nil {
-				return nil, err
-			}
-		}
-
-		if err := ApplyObjects(ctx, client, objs); err != nil {
-			return nil, fmt.Errorf("apply objects from %s: %w", overlayPath, err)
-		}
-		restartCandidates = append(restartCandidates, objs...)
+	objs, err := RenderKustomizeObjects(overlayPath)
+	if err != nil {
+		return nil, fmt.Errorf("render kustomize %s: %w", overlayPath, err)
 	}
-
-	return collectRestartTargets(restartCandidates), nil
+	replaceRegistryInObjects(objs, config.LocalRegistry, config.Registry)
+	if deleteMode {
+		return nil, DeleteObjects(ctx, client, objs)
+	}
+	if createNamespace {
+		if err := ensureNamespaces(ctx, client, objs); err != nil {
+			return nil, err
+		}
+	}
+	if err := ApplyObjects(ctx, client, objs); err != nil {
+		return nil, err
+	}
+	return collectRestartTargets(objs), nil
 }
 
-func resolveOverlayPaths(config cfg.Config, projectName string) ([]string, error) {
-	servicePath := filepath.Join(config.Path, config.ProjectPaths[projectName])
-	k8sPath := filepath.Join(servicePath, "k8s")
-	k8sCloudPath := filepath.Join(k8sPath, "cloud")
-	k8sEdgePath := filepath.Join(k8sPath, "edge")
-
-	if isDir(k8sCloudPath) {
-		overlayPaths := []string{
-			filepath.Join(k8sCloudPath, "overlays", "local"),
-			filepath.Join(k8sEdgePath, "overlays", "local"),
-		}
-		for _, p := range overlayPaths {
-			if !isDir(p) {
-				return nil, fmt.Errorf("kustomize overlay not found: %s", p)
-			}
-		}
-		return overlayPaths, nil
+func resolveOverlayPath(config cfg.Config, projectName string) (string, error) {
+	switch config.Environment {
+	case "local", "development", "production":
+	default:
+		return "", fmt.Errorf("unknown environment %q: use local, development, or production", config.Environment)
 	}
-
-	localOverlay := filepath.Join(k8sPath, "overlays", "local")
-	if isDir(localOverlay) {
-		return []string{localOverlay}, nil
-	}
-
-	if hasKustomization(k8sPath) {
-		return []string{k8sPath}, nil
-	}
-
-	return nil, fmt.Errorf("kustomize overlay not found: %s", localOverlay)
-}
-
-func isDir(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
-}
-
-func hasKustomization(dir string) bool {
-	for _, name := range []string{"kustomization.yaml", "kustomization.yml", "Kustomization"} {
-		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
-			return true
-		}
-	}
-	return false
+	return filepath.Join(config.Path, config.ProjectPaths[projectName], "k8s", "overlays", config.Environment), nil
 }
 
 func RenderKustomizeObjects(overlayPath string) ([]*unstructured.Unstructured, error) {
@@ -159,12 +112,20 @@ func RenderKustomizeObjects(overlayPath string) ([]*unstructured.Unstructured, e
 		return nil, err
 	}
 
-	manifestYAML, err := resMap.AsYaml()
-	if err != nil {
-		return nil, fmt.Errorf("render manifest yaml: %w", err)
+	objects := make([]*unstructured.Unstructured, 0, resMap.Size())
+	for _, resource := range resMap.Resources() {
+		fields, err := resource.Map()
+		if err != nil {
+			return nil, err
+		}
+		// Kubernetes unstructured objects use int64 for integer fields.
+		fields, err = runtime.DefaultUnstructuredConverter.ToUnstructured(&fields)
+		if err != nil {
+			return nil, err
+		}
+		objects = append(objects, &unstructured.Unstructured{Object: fields})
 	}
-
-	return DecodeManifestObjects(manifestYAML)
+	return objects, nil
 }
 
 func DecodeManifestObjects(manifestYAML []byte) ([]*unstructured.Unstructured, error) {

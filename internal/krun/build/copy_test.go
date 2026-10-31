@@ -173,13 +173,13 @@ func TestParseRemoteStatOutput(t *testing.T) {
 	}
 }
 
-func TestCollectLocalFilesSkipWeb(t *testing.T) {
+func TestCollectLocalFilesDefaultExclusions(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "service", "api.go"), "package main")
 	writeTestFile(t, filepath.Join(root, "docs", "ignored.md"), "doc")
 	writeTestFile(t, filepath.Join(root, "web", "ui.ts"), "ui")
 
-	files, err := collectLocalFiles(root, true)
+	files, err := collectLocalFiles(root)
 	if err != nil {
 		t.Fatalf("collectLocalFiles returned error: %v", err)
 	}
@@ -190,8 +190,8 @@ func TestCollectLocalFilesSkipWeb(t *testing.T) {
 	if _, ok := files["docs/ignored.md"]; ok {
 		t.Fatalf("docs directory should be excluded")
 	}
-	if _, ok := files["web/ui.ts"]; ok {
-		t.Fatalf("web directory should be excluded when skipWeb=true")
+	if _, ok := files["web/ui.ts"]; !ok {
+		t.Fatalf("web directory should be included")
 	}
 }
 
@@ -211,7 +211,7 @@ func TestAddRequiredFilesKeepsIgnoredDockerfile(t *testing.T) {
 	writeTestFile(t, filepath.Join(root, "src", "api", "Dockerfile"), "FROM scratch")
 	writeTestFile(t, filepath.Join(root, "src", "worker", "Dockerfile"), "FROM scratch")
 
-	files, err := collectLocalFiles(root, false)
+	files, err := collectLocalFiles(root)
 	if err != nil {
 		t.Fatalf("collectLocalFiles returned error: %v", err)
 	}

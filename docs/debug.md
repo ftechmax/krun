@@ -18,9 +18,9 @@ krun (CLI)                                 krun-system namespace
                                                     - probe server (:8082)
 ```
 
-The CLI also starts the privileged hosts writer and sends it the helper's
-desired hosts entries. Each snapshot carries a revision, so when concurrent
-commands deliver snapshots out of order the writer drops the older one.
+The CLI starts the privileged hosts writer when needed. The helper sends
+combined hosts entries directly to that writer while holding its session
+operation lock, keeping hosts writes in the same order as session changes.
 
 ## CLI <-> Helper Transport
 
@@ -42,7 +42,7 @@ helper) or, on Linux,
 
 Enable and disable send the discovered `config.Service` directly as JSON.
 The helper keys sessions by `project/name`; namespace and application port
-defaults are applied during discovery. The CLI, helper, manager, and agent share
+defaults and dependency DNS targets are resolved during discovery. The CLI, helper, manager, and agent share
 an internal protocol and should be rebuilt and upgraded together. Stop a running helper with
 `krun debug helper stop` before replacing its binary.
 
@@ -59,20 +59,24 @@ an internal protocol and should be rebuilt and upgraded together. Stop a running
 
 ### Enable
 
-1. CLI starts the unprivileged helper if needed.
+1. CLI starts the privileged hosts writer and unprivileged helper if needed.
 2. Helper starts dependency port-forwards from `service_dependencies`.
 3. Helper creates a manager session (`POST /v1/sessions`); the manager injects
    the traffic-agent sidecar into the target workload.
 4. Helper starts the session stream and records the session as active. Local
    app connections are opened when intercepted traffic arrives.
-5. CLI applies the helper's combined hosts entries through the privileged
-   hosts writer and exports the running container's environment to `.env`.
+5. Helper applies the combined hosts entries through the privileged writer.
+   CLI exports the running container's environment to `.env`.
 
 On re-enable, the helper deletes the previous manager session before replacing
 its stream. If deletion fails, the existing local session stays intact.
 Dependency forwards remain available for reuse. Later failures roll back completed
 steps; a failed manager-session deletion leaves a `cleanup-pending` session
 for `disable` to retry. Local forward cleanup has no error return.
+
+A hosts-write failure is returned to the CLI without undoing the session
+change. Re-enable or disable retries the hosts update. Helper shutdown also
+clears the hosts block.
 
 Dependency forwards require a running pod and a port exposed by the Kubernetes
 Service. Numeric and named target ports are supported; an unmatched service
@@ -83,8 +87,8 @@ port is an error rather than being treated as a pod port.
 1. Helper stops the session stream and deletes the manager session.
 2. Manager removes the sidecar and restores the original probes.
 3. Helper removes dependency forwards; failed teardown remains retryable.
-4. After successful teardown, CLI applies the remaining sessions' hosts entries
-   and removes the service's `.env` file.
+4. Helper applies the remaining sessions' hosts entries. CLI removes the
+   service's `.env` file after successful teardown.
 
 ### List
 
@@ -215,8 +219,7 @@ reclaims their hosts file.
 
 ## krun-helper Responsibilities
 
-1. Report the hosts entries dependencies need; the CLI sends them to the
-   privileged hosts writer.
+1. Apply the combined dependency hosts entries through the privileged writer.
 2. Own dependency port-forward lifecycle.
 3. Maintain the manager port-forward that carries both REST and streams.
 4. Maintain session stream attachment(s).

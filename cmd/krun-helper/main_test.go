@@ -195,8 +195,9 @@ func newTestDaemon(t *testing.T, createErr error) (http.Handler, chan struct{}) 
 
 	shutdownCh := make(chan struct{}, 1)
 	sessions := session.NewManager(session.Options{
-		Forwards: stubForwards{},
-		API:      stubAPI{createErr: createErr},
+		Forwards:   stubForwards{},
+		WriteHosts: func([]contracts.HostsEntry) error { return nil },
+		API:        stubAPI{createErr: createErr},
 		Attach: func(string, string, int) (session.Stream, error) {
 			return stubStream{}, nil
 		},

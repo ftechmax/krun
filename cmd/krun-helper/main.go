@@ -92,6 +92,13 @@ func startHelperDaemon(socketEndpoint string, kubeConfigPath string, managerToke
 		return fmt.Errorf("load manager authentication: %w", err)
 	}
 
+	listener, err := helperipc.Listen(endpoint)
+	if err != nil {
+		return fmt.Errorf("failed to listen on helper endpoint: %w", err)
+	}
+	defer helperipc.Cleanup(endpoint)
+	defer listener.Close()
+
 	forwards, err := helperportforward.NewSessionRegistry(kubeConfigPath)
 	if err != nil {
 		return fmt.Errorf("failed to initialize port-forward registry: %w", err)
@@ -107,9 +114,18 @@ func startHelperDaemon(socketEndpoint string, kubeConfigPath string, managerToke
 	api := managerclient.NewSessionClient(managerAddress, authToken)
 	warnOnManagerSkew(api)
 
+	hostsClient := helperipc.NewClientForHosts(5 * time.Second)
+	defer hostsClient.CloseIdleConnections()
+
 	sessions := session.NewManager(session.Options{
 		Forwards: forwards,
-		API:      api,
+		WriteHosts: func(entries []contracts.HostsEntry) error {
+			_, err := helperipc.Call[contracts.HelperResponse](hostsClient, http.MethodPost, "/v1/hosts", struct {
+				Entries []contracts.HostsEntry `json:"entries"`
+			}{entries})
+			return err
+		},
+		API: api,
 		Attach: func(sessionID string, sessionToken string, interceptPort int) (session.Stream, error) {
 			return helperstream.Attach(managerAddress, sessionID, sessionToken, interceptPort)
 		},
@@ -118,12 +134,6 @@ func startHelperDaemon(socketEndpoint string, kubeConfigPath string, managerToke
 	defer sessions.Close()
 
 	shutdownCh := make(chan struct{}, 1)
-
-	listener, err := helperipc.Listen(endpoint)
-	if err != nil {
-		return fmt.Errorf("failed to listen on helper endpoint: %w", err)
-	}
-	defer helperipc.Cleanup(endpoint)
 
 	server := &http.Server{
 		Handler:           newHandler(&daemon{sessions: sessions, shutdownCh: shutdownCh}),
@@ -237,12 +247,9 @@ func (d *daemon) handleEnable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hosts := d.sessions.HostsSnapshot()
 	writeJSON(w, http.StatusOK, contracts.HelperResponse{
-		Success:       true,
-		Message:       "debug enable applied",
-		HostsEntries:  hosts.Entries,
-		HostsRevision: hosts.Revision,
+		Success: true,
+		Message: "debug enable applied",
 	})
 }
 
@@ -263,12 +270,9 @@ func (d *daemon) handleDisable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hosts := d.sessions.HostsSnapshot()
 	writeJSON(w, http.StatusOK, contracts.HelperResponse{
-		Success:       true,
-		Message:       "debug disable applied",
-		HostsEntries:  hosts.Entries,
-		HostsRevision: hosts.Revision,
+		Success: true,
+		Message: "debug disable applied",
 	})
 }
 

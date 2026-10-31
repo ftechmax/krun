@@ -62,3 +62,27 @@ func TestDiscoverServicesMissingSource(t *testing.T) {
 		t.Fatalf("expected missing source error, got %v", err)
 	}
 }
+
+func TestDiscoverServicesResolvesDependencies(t *testing.T) {
+	root := t.TempDir()
+	contents := `[{"name":"api","service_dependencies":[
+  {"host":" rabbitmq.default.svc ","port":5672},
+  {"host":"ferretdb.ferretdb-system.svc","port":27017},
+  {"host":" cache ","service":" redis ","namespace":" shared ","port":6379,"aliases":[" cache.local "]}
+ ]}]`
+	if err := os.WriteFile(filepath.Join(root, "krun.json"), []byte(contents), 0600); err != nil {
+		t.Fatal(err)
+	}
+	services, _, err := DiscoverServices(root, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []ServiceDependency{
+		{Host: "rabbitmq.default.svc", Service: "rabbitmq", Namespace: "default", Port: 5672},
+		{Host: "ferretdb.ferretdb-system.svc", Service: "ferretdb", Namespace: "ferretdb-system", Port: 27017},
+		{Host: "cache", Service: "redis", Namespace: "shared", Port: 6379, Aliases: []string{"cache.local"}},
+	}
+	if !reflect.DeepEqual(services[0].ServiceDependencies, want) {
+		t.Fatalf("dependencies = %+v, want %+v", services[0].ServiceDependencies, want)
+	}
+}

@@ -133,37 +133,6 @@ func TestHostsDaemonShutdownSignals(t *testing.T) {
 	}
 }
 
-// Concurrent CLI commands can deliver snapshots out of order. An older
-// snapshot from the same helper must not undo a newer one.
-func TestHostsDaemonIgnoresStaleSnapshot(t *testing.T) {
-	handler, hostsPath := newHostsTestHandler(t)
-
-	newer := `{"entries":[{"ip":"127.0.0.1","hostname":"a.default.svc"},{"ip":"127.0.0.1","hostname":"b.default.svc"}],"revision":{"epoch":"e1","seq":2}}`
-	older := `{"entries":[{"ip":"127.0.0.1","hostname":"a.default.svc"}],"revision":{"epoch":"e1","seq":1}}`
-
-	if rec := postHosts(t, handler, newer); rec.Code != http.StatusOK {
-		t.Fatalf("newer status = %d, body %s", rec.Code, rec.Body)
-	}
-	rec := postHosts(t, handler, older)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "stale") {
-		t.Fatalf("stale snapshot should be acknowledged and ignored, got %d %s", rec.Code, rec.Body)
-	}
-	content, _ := os.ReadFile(hostsPath)
-	if !strings.Contains(string(content), "b.default.svc") {
-		t.Fatalf("stale snapshot removed a newer entry:\n%s", content)
-	}
-
-	// A restarted helper starts a new epoch with a low sequence number.
-	restarted := `{"entries":[{"ip":"127.0.0.1","hostname":"c.default.svc"}],"revision":{"epoch":"e2","seq":1}}`
-	if rec := postHosts(t, handler, restarted); rec.Code != http.StatusOK {
-		t.Fatalf("new epoch status = %d, body %s", rec.Code, rec.Body)
-	}
-	content, _ = os.ReadFile(hostsPath)
-	if !strings.Contains(string(content), "c.default.svc") || strings.Contains(string(content), "b.default.svc") {
-		t.Fatalf("snapshot from a new epoch was not applied:\n%s", content)
-	}
-}
-
 // A request already in flight when shutdown starts must not write the block
 // back after shutdown strips it.
 func TestHostsDaemonShutdownDrainsBeforeStripping(t *testing.T) {
@@ -192,7 +161,7 @@ func TestHostsDaemonShutdownDrainsBeforeStripping(t *testing.T) {
 	writer.mu.Lock()
 	statusCh := make(chan int, 1)
 	go func() {
-		body := `{"entries":[{"ip":"127.0.0.1","hostname":"redis.default.svc"}],"revision":{"epoch":"e1","seq":1}}`
+		body := `{"entries":[{"ip":"127.0.0.1","hostname":"redis.default.svc"}]}`
 		resp, err := http.Post("http://"+listener.Addr().String()+"/v1/hosts", "application/json", strings.NewReader(body))
 		if err != nil {
 			statusCh <- -1
@@ -230,7 +199,7 @@ func TestHostsDaemonShutdownDrainsBeforeStripping(t *testing.T) {
 		t.Fatalf("pre-existing content lost:\n%s", content)
 	}
 
-	if err := writer.apply([]contracts.HostsEntry{{IP: "127.0.0.1", Hostname: "late.default.svc"}}, contracts.HostsRevision{}); !errors.Is(err, errHostsWriterClosed) {
+	if err := writer.apply([]contracts.HostsEntry{{IP: "127.0.0.1", Hostname: "late.default.svc"}}); !errors.Is(err, errHostsWriterClosed) {
 		t.Fatalf("writes after shutdown must be refused, got %v", err)
 	}
 }

@@ -15,7 +15,6 @@ func mergeHostEntries(sessions map[string]*Session) []contracts.HostsEntry {
 	seen := map[string]bool{}
 
 	addHost := func(host string) {
-		host = strings.TrimSpace(host)
 		if host == "" || seen[host] {
 			return
 		}
@@ -45,10 +44,9 @@ func portForwardsFor(serviceContext config.Service) []contracts.PortForward {
 	forwards := make([]contracts.PortForward, 0, len(serviceContext.ServiceDependencies))
 
 	for _, dependency := range serviceContext.ServiceDependencies {
-		serviceName, namespace := dependencyServiceTarget(dependency)
 		forward := contracts.PortForward{
-			Namespace:  namespace,
-			Service:    serviceName,
+			Namespace:  dependency.Namespace,
+			Service:    dependency.Service,
 			LocalPort:  dependency.Port,
 			RemotePort: dependency.Port,
 		}
@@ -56,26 +54,4 @@ func portForwardsFor(serviceContext config.Service) []contracts.PortForward {
 	}
 
 	return forwards
-}
-
-// dependencyServiceTarget resolves the Kubernetes service and namespace to
-// forward, preferring explicit fields and otherwise reading them out of a
-// cluster DNS name such as "rabbitmq.default.svc".
-func dependencyServiceTarget(dependency config.ServiceDependency) (string, string) {
-	serviceName := strings.TrimSpace(dependency.Service)
-	namespace := strings.TrimSpace(dependency.Namespace)
-	host := strings.TrimSpace(dependency.Host)
-
-	hostParts := strings.Split(host, ".")
-	if serviceName == "" {
-		serviceName = strings.TrimSpace(hostParts[0])
-	}
-	if namespace == "" && len(hostParts) >= 3 && strings.TrimSpace(hostParts[2]) == "svc" {
-		namespace = strings.TrimSpace(hostParts[1])
-	}
-	if namespace == "" {
-		namespace = "default"
-	}
-
-	return serviceName, namespace
 }

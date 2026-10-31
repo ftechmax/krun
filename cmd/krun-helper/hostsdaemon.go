@@ -103,36 +103,23 @@ func shutdownHostsDaemon(server *http.Server, serverErrCh <-chan error, writer *
 	return errors.Join(writer.closeAndRemove(), shutdownErr)
 }
 
-// hostsWriter serializes hosts-file updates. It drops snapshots older than
-// the last one applied (concurrent CLI commands can deliver them out of
-// order) and refuses updates once shutdown has stripped the block.
+// hostsWriter serializes writes and refuses updates after shutdown.
 type hostsWriter struct {
 	mu     sync.Mutex
-	last   contracts.HostsRevision
 	closed bool
 }
 
-var (
-	errHostsWriterClosed = errors.New("hosts writer is shutting down")
-	errStaleHosts        = errors.New("a newer hosts snapshot is already applied")
-)
+var errHostsWriterClosed = errors.New("hosts writer is shutting down")
 
-func (h *hostsWriter) apply(entries []contracts.HostsEntry, revision contracts.HostsRevision) error {
+func (h *hostsWriter) apply(entries []contracts.HostsEntry) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	if h.closed {
 		return errHostsWriterClosed
 	}
-	if revision.OlderThan(h.last) {
-		return errStaleHosts
-	}
 
-	if err := hostfile.Write(entries); err != nil {
-		return err
-	}
-	h.last = revision
-	return nil
+	return hostfile.Write(entries)
 }
 
 func (h *hostsWriter) closeAndRemove() error {
@@ -162,7 +149,9 @@ func newHostsHandler(writer *hostsWriter, shutdownCh chan<- struct{}) http.Handl
 func (h *hostsWriter) handleApply(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
-	var request contracts.HostsSnapshot
+	var request struct {
+		Entries []contracts.HostsEntry `json:"entries"`
+	}
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {
@@ -175,11 +164,8 @@ func (h *hostsWriter) handleApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := h.apply(request.Entries, request.Revision)
+	err := h.apply(request.Entries)
 	switch {
-	case errors.Is(err, errStaleHosts):
-		// Not a failure: the hosts file already reflects a newer state.
-		writeJSON(w, http.StatusOK, contracts.HelperResponse{Success: true, Message: "stale snapshot ignored"})
 	case errors.Is(err, errHostsWriterClosed):
 		writeJSON(w, http.StatusServiceUnavailable, contracts.HelperResponse{Success: false, Message: err.Error()})
 	case err != nil:

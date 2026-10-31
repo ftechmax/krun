@@ -37,25 +37,17 @@ is set.
 
 ### Exclusions
 
-The built-in excluded directories are `.github`, `.vs`, `.git`, `.angular`,
-`bin`, `obj`, `node_modules`, `k8s`, and `docs`. `--skip-web` also excludes `web`
-and skips services whose path ends in `web`.
+A project-root `.dockerignore` defines the source exclusions using Docker's
+pattern matcher, including `**`, character classes, and `!` negations.
 
-A project-root `.dockerignore` adds exclusions:
+Without a `.dockerignore`, krun excludes `.github`, `.vs`, `.git`, `.angular`,
+`bin`, `obj`, `node_modules`, `k8s`, and `docs` at any depth. When a
+`.dockerignore` exists, it replaces these defaults. Include those patterns
+in the file if you still want them excluded.
 
-- Patterns are relative to the project root: `*.log` matches top-level logs;
-  `**/*.log` matches at any depth.
-- `*` and `?` do not cross `/`; `**` spans any number of path segments.
-- A directory match excludes its descendants.
-- Lines starting with `#` are comments. A leading `!` re-includes a path;
-  the last matching pattern wins.
-
-Character classes and backslash escapes are unsupported. Negations cannot
-override built-in exclusions. Previously synced files that become ignored are
-deleted on the next sync.
-
-Each selected service's Dockerfile is always synced, even when an exclusion
-matches it, because BuildKit reads it from the workspace.
+Each selected service's Dockerfile is always synced because BuildKit
+reads it from the workspace. Previously synced files that become excluded
+are deleted on the next sync.
 
 ## Image build and push
 
@@ -66,22 +58,35 @@ fails, `krun build` exits with status 1.
 
 ## Deploy and delete
 
-The project path comes from service discovery. Overlay selection checks:
+The project path comes from service discovery. Deploy and delete use exactly
+`k8s/overlays/<environment>`, selected with `--environment`:
 
-1. `k8s/cloud`: if present, both `k8s/cloud/overlays/local` and
-   `k8s/edge/overlays/local` must exist.
-2. `k8s/overlays/local`.
-3. A Kustomization in `k8s` itself.
+| Environment | Target |
+| --- | --- |
+| `local` (default) | Local machine development |
+| `development` | Dev/test server |
+| `production` | Production server |
 
-For each overlay, krun renders manifests, replaces local-registry references
+```sh
+krun deploy my-app
+krun deploy my-app --environment development --use-remote-registry
+krun deploy my-app --environment production --use-remote-registry
+krun delete my-app --environment development
+```
+
+Environment selection is independent of registry selection and kubeconfig.
+Select the target cluster with `--kubeconfig`. The old cloud/edge and root
+Kustomization discovery paths are no longer supported.
+
+krun renders the selected overlay, replaces local-registry references
 with the selected registry, and applies or deletes the objects through the
 dynamic client and REST mapper. Apply uses server-side apply with field manager
 `krun` and forced field ownership; deletion uses background propagation and
 ignores resources that are already absent.
 
-`--create-namespace` checks and creates missing target namespaces in sorted
-order, excluding namespaces supplied by the manifests. Without the flag, krun
-does not make these extra Namespace API calls.
+`--create-namespace` creates missing target namespaces, excluding namespaces
+supplied by the manifests. Without the flag, krun does not make these extra
+Namespace API calls.
 
 After apply, Deployment and StatefulSet targets receive a rollout-restart
 annotation unless `--no-restart` is set. Targets absent at restart time are

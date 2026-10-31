@@ -44,6 +44,7 @@ type KrunConfig struct {
 type Config struct {
 	KrunConfig
 	KubeConfig   string
+	Environment  string
 	Registry     string
 	ProjectPaths map[string]string
 	// Version is the krun build version, used to detect a helper or cluster
@@ -161,6 +162,9 @@ func DiscoverServices(sourceDir string, searchDepth int) ([]Service, map[string]
 			if service.ContainerPort == 0 {
 				service.ContainerPort = 8080
 			}
+			for j := range service.ServiceDependencies {
+				service.ServiceDependencies[j].resolve()
+			}
 			if service.InterceptPort == 0 {
 				service.InterceptPort = 5000
 			}
@@ -174,4 +178,24 @@ func DiscoverServices(sourceDir string, searchDepth int) ([]Service, map[string]
 	}
 
 	return services, projectPaths, nil
+}
+
+// resolve fills the Kubernetes target from explicit fields or cluster DNS.
+func (d *ServiceDependency) resolve() {
+	d.Host = strings.TrimSpace(d.Host)
+	d.Service = strings.TrimSpace(d.Service)
+	d.Namespace = strings.TrimSpace(d.Namespace)
+	parts := strings.Split(d.Host, ".")
+	if d.Service == "" {
+		d.Service = parts[0]
+	}
+	if d.Namespace == "" && len(parts) >= 3 && parts[2] == "svc" {
+		d.Namespace = parts[1]
+	}
+	if d.Namespace == "" {
+		d.Namespace = "default"
+	}
+	for i := range d.Aliases {
+		d.Aliases[i] = strings.TrimSpace(d.Aliases[i])
+	}
 }

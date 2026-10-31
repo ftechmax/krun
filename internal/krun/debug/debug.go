@@ -1,9 +1,7 @@
 package debug
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -77,12 +75,17 @@ func List(config cfg.Config) {
 }
 
 func Enable(service cfg.Service, config cfg.Config, containerName string) {
+	if err := ensureHostsDaemon(); err != nil {
+		utils.Errf("cannot start hosts writer: %v", err)
+		return
+	}
+
 	if err := ensureHelperStarted(config); err != nil {
 		utils.Errf("cannot start helper: %v", err)
 		return
 	}
 
-	response, err := helperCall[contracts.HelperResponse](http.MethodPost, "/v1/debug/enable", service, commandTimeout)
+	_, err := helperCall[contracts.HelperResponse](http.MethodPost, "/v1/debug/enable", service, commandTimeout)
 	if err != nil {
 		utils.Errf("cannot apply debug enable via helper: %v", err)
 		return
@@ -90,14 +93,17 @@ func Enable(service cfg.Service, config cfg.Config, containerName string) {
 
 	utils.Okf("Session created")
 
-	reportHostsUpdate(response.HostsEntries, response.HostsRevision)
-
 	if err := deploy.CreateEnvFile(service, config, containerName); err != nil {
 		utils.Warnf("warning: could not create env file: %v", err)
 	}
 }
 
 func Disable(service cfg.Service, config cfg.Config) {
+	if err := ensureHostsDaemon(); err != nil {
+		utils.Errf("cannot start hosts writer: %v", err)
+		return
+	}
+
 	if err := ensureHelperStarted(config); err != nil {
 		utils.Errf("cannot start helper: %v", err)
 		return
@@ -113,7 +119,6 @@ func Disable(service cfg.Service, config cfg.Config) {
 		utils.Warnf("No active debug session found")
 	} else {
 		utils.Okf("Session removed")
-		reportHostsUpdate(response.HostsEntries, response.HostsRevision)
 		if err := deploy.RemoveEnvFile(service, config); err != nil {
 			utils.Warnf("warning: could not remove env file: %v", err)
 		}
@@ -474,49 +479,7 @@ func warnOnHelperSkew(cliVersion string, helperVersion string) {
 // decodes its JSON reply. A 4xx/5xx is returned as an error carrying the
 // helper's own message, which is what the CLI shows the user.
 func helperCall[T any](method string, path string, payload any, timeout time.Duration) (T, error) {
-	return ipcCall[T](helperipc.NewClient(timeout), method, path, payload)
-}
-
-// ipcCall sends one request over a local IPC endpoint and decodes its JSON
-// reply. A 4xx/5xx is returned as an error carrying the daemon's own message,
-// which is what the CLI shows the user.
-func ipcCall[T any](client *http.Client, method string, path string, payload any) (T, error) {
-	var result T
-
-	var body io.Reader
-	if payload != nil {
-		encoded, err := json.Marshal(payload)
-		if err != nil {
-			return result, err
-		}
-		body = bytes.NewReader(encoded)
-	}
-
-	request, err := http.NewRequest(method, helperipc.BaseURL+path, body)
-	if err != nil {
-		return result, err
-	}
-	if payload != nil {
-		request.Header.Set("Content-Type", "application/json")
-	}
-
-	response, err := client.Do(request)
-	if err != nil {
-		return result, err
-	}
-	defer response.Body.Close()
-
-	if response.StatusCode >= 400 {
-		var helperResponse contracts.HelperResponse
-		if err := json.NewDecoder(response.Body).Decode(&helperResponse); err == nil && helperResponse.Message != "" {
-			return result, errors.New(helperResponse.Message)
-		}
-		return result, fmt.Errorf("helper request failed with status %d", response.StatusCode)
-	}
-	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
-		return result, fmt.Errorf("invalid helper response: %w", err)
-	}
-	return result, nil
+	return helperipc.Call[T](helperipc.NewClient(timeout), method, path, payload)
 }
 
 func helperListSessions() ([]contracts.HelperDebugSession, error) {

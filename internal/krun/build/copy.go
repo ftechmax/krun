@@ -31,20 +31,8 @@ type syncPlan struct {
 	toDelete []string
 }
 
-var excludedDirectories = map[string]struct{}{
-	".github":      {},
-	".vs":          {},
-	".git":         {},
-	".angular":     {},
-	"bin":          {},
-	"obj":          {},
-	"node_modules": {},
-	"k8s":          {},
-	"docs":         {},
-}
-
 // requiredFiles are project-relative paths (such as Dockerfiles) synced even when excluded.
-func copySource(client *kube.Client, projectName string, localRoot string, skipWeb bool, requiredFiles []string) (bool, error) {
+func copySource(client *kube.Client, projectName string, localRoot string, requiredFiles []string) (bool, error) {
 	startTime := time.Now()
 	plusSym := utils.Colorize("+", utils.Green)
 	minusSym := utils.Colorize("-", utils.Red)
@@ -60,7 +48,7 @@ func copySource(client *kube.Client, projectName string, localRoot string, skipW
 		return false, err
 	}
 
-	localFiles, err := collectLocalFiles(localRoot, skipWeb)
+	localFiles, err := collectLocalFiles(localRoot)
 	if err != nil {
 		return false, fmt.Errorf("walk local source tree: %w", err)
 	}
@@ -130,7 +118,7 @@ func listRemoteFiles(ctx context.Context, client *kube.Client, remoteRoot string
 	return parseRemoteStatOutput(stdout, remoteRoot), nil
 }
 
-func collectLocalFiles(localRoot string, skipWeb bool) (map[string]fileStamp, error) {
+func collectLocalFiles(localRoot string) (map[string]fileStamp, error) {
 	localFiles := map[string]fileStamp{}
 
 	ignore, err := loadDockerignore(localRoot)
@@ -149,24 +137,20 @@ func collectLocalFiles(localRoot string, skipWeb bool) (map[string]fileStamp, er
 		}
 		relPath = filepath.ToSlash(relPath)
 
-		if d.IsDir() {
-			if relPath == "." {
-				return nil
-			}
-			name := d.Name()
-			if _, excluded := excludedDirectories[name]; excluded {
-				return filepath.SkipDir
-			}
-			if skipWeb && name == "web" {
-				return filepath.SkipDir
-			}
-			if ignore.canSkipDir(relPath) {
+		if relPath == "." {
+			return nil
+		}
+		ignored, err := ignore.MatchesOrParentMatches(relPath)
+		if err != nil {
+			return err
+		}
+		if ignored {
+			if d.IsDir() && !ignore.Exclusions() {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-
-		if ignore.matches(relPath) {
+		if d.IsDir() {
 			return nil
 		}
 

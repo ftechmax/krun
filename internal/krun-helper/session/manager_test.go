@@ -19,8 +19,8 @@ func TestEnableAppliesHostsPortForwardsAndStream(t *testing.T) {
 	}
 
 	wantHosts := []contracts.HostsEntry{{IP: "127.0.0.1", Hostname: "rabbitmq.default.svc"}}
-	if !slices.Equal(env.manager.HostsSnapshot().Entries, wantHosts) {
-		t.Fatalf("unexpected desired hosts entries: %+v", env.manager.HostsSnapshot().Entries)
+	if !slices.Equal(env.hosts, wantHosts) {
+		t.Fatalf("unexpected desired hosts entries: %+v", env.hosts)
 	}
 
 	if env.forwards.upsertCalls != 1 {
@@ -63,8 +63,8 @@ func TestEnableRollsBackWhenManagerCreateFails(t *testing.T) {
 	if env.forwards.removeCalls != 1 {
 		t.Fatalf("expected the port-forwards to be rolled back, got %d remove calls", env.forwards.removeCalls)
 	}
-	if len(env.manager.HostsSnapshot().Entries) != 0 {
-		t.Fatalf("a rolled-back session must leave no desired hosts, got %+v", env.manager.HostsSnapshot().Entries)
+	if len(env.hosts) != 0 {
+		t.Fatalf("a rolled-back session must leave no desired hosts, got %+v", env.hosts)
 	}
 	if len(env.manager.List()) != 0 {
 		t.Fatalf("expected no registered session after rollback, got %+v", env.manager.List())
@@ -81,8 +81,8 @@ func TestEnableRollsBackWhenPortForwardUpdateFails(t *testing.T) {
 	if env.api.createCalls != 0 {
 		t.Fatal("manager session must not be created after the forward update fails")
 	}
-	if len(env.manager.HostsSnapshot().Entries) != 0 {
-		t.Fatalf("a failed enable must leave no desired hosts, got %+v", env.manager.HostsSnapshot().Entries)
+	if len(env.hosts) != 0 {
+		t.Fatalf("a failed enable must leave no desired hosts, got %+v", env.hosts)
 	}
 }
 
@@ -161,8 +161,8 @@ func TestEnableReplacementUpdatesDependenciesWithoutPreemptiveRemove(t *testing.
 		t.Fatalf("replacement forwards = %+v, want %+v", env.forwards.lastForwards, wantForwards)
 	}
 	wantHosts := []contracts.HostsEntry{{IP: "127.0.0.1", Hostname: "redis.default.svc"}}
-	if !slices.Equal(env.manager.HostsSnapshot().Entries, wantHosts) {
-		t.Fatalf("replacement desired hosts = %+v, want %+v", env.manager.HostsSnapshot().Entries, wantHosts)
+	if !slices.Equal(env.hosts, wantHosts) {
+		t.Fatalf("replacement desired hosts = %+v, want %+v", env.hosts, wantHosts)
 	}
 }
 
@@ -180,8 +180,8 @@ func TestEnableReplacementUpsertFailureCleansPreservedLocalState(t *testing.T) {
 	if env.forwards.removeCalls != 1 {
 		t.Fatalf("preserved forwards were not cleaned, got %d remove calls", env.forwards.removeCalls)
 	}
-	if len(env.manager.HostsSnapshot().Entries) != 0 {
-		t.Fatalf("replacement rollback left desired hosts: %+v", env.manager.HostsSnapshot().Entries)
+	if len(env.hosts) != 0 {
+		t.Fatalf("replacement rollback left desired hosts: %+v", env.hosts)
 	}
 	if sessions := env.manager.List(); len(sessions) != 0 {
 		t.Fatalf("clean rollback left a tracked session: %+v", sessions)
@@ -258,8 +258,8 @@ func TestDisableRemovesOnlyItsOwnState(t *testing.T) {
 	// The hosts file holds one block for every session, so disabling one must
 	// leave the other's entries in place.
 	wantHosts := []contracts.HostsEntry{{IP: "127.0.0.1", Hostname: "redis.default.svc"}}
-	if !slices.Equal(env.manager.HostsSnapshot().Entries, wantHosts) {
-		t.Fatalf("unexpected desired hosts after disable: %+v", env.manager.HostsSnapshot().Entries)
+	if !slices.Equal(env.hosts, wantHosts) {
+		t.Fatalf("unexpected desired hosts after disable: %+v", env.hosts)
 	}
 	if env.forwards.lastKey != "proj-a/svc-a" {
 		t.Fatalf("expected port-forwards removed for proj-a/svc-a, got %q", env.forwards.lastKey)
@@ -334,8 +334,8 @@ func TestCloseReleasesLocalStateAndLeavesManagerSessions(t *testing.T) {
 	if env.forwards.clearCalls != 1 {
 		t.Fatalf("expected the port-forwards to be cleared, got %d", env.forwards.clearCalls)
 	}
-	if len(env.manager.HostsSnapshot().Entries) != 0 {
-		t.Fatalf("Close must leave no desired hosts, got %+v", env.manager.HostsSnapshot().Entries)
+	if len(env.hosts) != 0 {
+		t.Fatalf("Close must leave no desired hosts, got %+v", env.hosts)
 	}
 	// Helper shutdown only owns local cleanup; manager-side cleanup happens on
 	// replacement or when the manager next starts.
@@ -393,28 +393,9 @@ func TestCloseWaitsForEnableThenCleansItsResources(t *testing.T) {
 		t.Fatalf("enable failed: %v", err)
 	}
 	<-closeDone
-	if env.lastAttach.closes != 1 || env.forwards.clearCalls != 1 || len(env.manager.HostsSnapshot().Entries) != 0 {
+	if env.lastAttach.closes != 1 || env.forwards.clearCalls != 1 || len(env.hosts) != 0 {
 		t.Fatalf("Close did not clean completed Enable: stream=%d clear=%d desiredHosts=%+v",
-			env.lastAttach.closes, env.forwards.clearCalls, env.manager.HostsSnapshot().Entries)
-	}
-}
-
-func TestPortForwardsForResolvesTargets(t *testing.T) {
-	forwards := portForwardsFor(config.Service{
-		ServiceDependencies: []config.ServiceDependency{
-			{Host: "rabbitmq.default.svc", Port: 5672},
-			{Host: "ferretdb.ferretdb-system.svc", Port: 27017},
-			{Service: "cache", Namespace: "shared", Port: 6379},
-		},
-	})
-
-	want := []contracts.PortForward{
-		{Namespace: "default", Service: "rabbitmq", LocalPort: 5672, RemotePort: 5672},
-		{Namespace: "ferretdb-system", Service: "ferretdb", LocalPort: 27017, RemotePort: 27017},
-		{Namespace: "shared", Service: "cache", LocalPort: 6379, RemotePort: 6379},
-	}
-	if !slices.Equal(forwards, want) {
-		t.Fatalf("unexpected port-forwards:\n got=%+v\nwant=%+v", forwards, want)
+			env.lastAttach.closes, env.forwards.clearCalls, env.hosts)
 	}
 }
 
@@ -425,7 +406,7 @@ func TestMergeHostEntriesIncludesAliasesAndDeduplicates(t *testing.T) {
 		}}},
 		"b": {Context: config.Service{ServiceDependencies: []config.ServiceDependency{
 			{Host: "mongo.default.svc", Port: 27017},
-			{Host: " ", Port: 1},
+			{Host: "", Port: 1},
 		}}},
 	})
 
@@ -449,12 +430,14 @@ func dependencyContext(project, service, host string, dependencyPort, interceptP
 		ContainerPort: 8080,
 		InterceptPort: interceptPort,
 		ServiceDependencies: []config.ServiceDependency{
-			{Host: host, Port: dependencyPort},
+			{Host: host, Service: strings.Split(host, ".")[0], Namespace: "default", Port: dependencyPort},
 		},
 	}
 }
 
 type testEnv struct {
+	hosts    []contracts.HostsEntry
+	hostsErr error
 	manager  *Manager
 	forwards *fakeForwards
 	api      *fakeAPI
@@ -474,8 +457,9 @@ func newTestEnv(t *testing.T) *testEnv {
 		api:      &fakeAPI{},
 	}
 	env.manager = NewManager(Options{
-		Forwards: env.forwards,
-		API:      env.api,
+		Forwards:   env.forwards,
+		WriteHosts: func(entries []contracts.HostsEntry) error { env.hosts = entries; return env.hostsErr },
+		API:        env.api,
 		Attach: func(sessionID string, sessionToken string, interceptPort int) (Stream, error) {
 			if env.attachStarted != nil {
 				close(env.attachStarted)
@@ -563,40 +547,56 @@ type fakeStream struct {
 
 func (f *fakeStream) Close() { f.closes++ }
 
-// Snapshots are applied by the CLI after the helper returns them, so their
-// revisions must order them: each session change bumps the revision, and a new
-// helper instance starts a new epoch.
-func TestHostsSnapshotRevisionOrdersChanges(t *testing.T) {
+func TestHostsFailureKeepsActiveSessionForRetry(t *testing.T) {
 	env := newTestEnv(t)
-	initial := env.manager.HostsSnapshot().Revision
-	if initial.Epoch == "" {
-		t.Fatal("expected a non-empty epoch")
+	env.hostsErr = errors.New("writer unavailable")
+	if err := env.manager.Enable(workerContext()); err == nil || !strings.Contains(err.Error(), "hosts update failed") {
+		t.Fatalf("expected hosts error, got %v", err)
 	}
+	if sessions := env.manager.List(); len(sessions) != 1 || sessions[0].State != contracts.HelperSessionStateActive {
+		t.Fatalf("hosts failure lost active session: %+v", sessions)
+	}
+	env.hostsErr = nil
+	if _, err := env.manager.Disable(workerContext()); err != nil {
+		t.Fatal(err)
+	}
+	if len(env.hosts) != 0 {
+		t.Fatalf("disable left hosts: %+v", env.hosts)
+	}
+}
 
-	if err := env.manager.Enable(dependencyContext("proj-a", "svc-a", "rabbitmq.default.svc", 5672, 5001)); err != nil {
-		t.Fatalf("enable svc-a failed: %v", err)
+func TestHostsWritesAreSerializedWithSessionChanges(t *testing.T) {
+	env := newTestEnv(t)
+	started, release := make(chan struct{}), make(chan struct{})
+	writes := make(chan []contracts.HostsEntry, 3)
+	env.manager.writeHosts = func(entries []contracts.HostsEntry) error {
+		writes <- entries
+		if len(entries) == 1 {
+			close(started)
+			<-release
+		}
+		return nil
 	}
-	afterA := env.manager.HostsSnapshot()
-	if err := env.manager.Enable(dependencyContext("proj-b", "svc-b", "redis.default.svc", 6379, 5002)); err != nil {
-		t.Fatalf("enable svc-b failed: %v", err)
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- env.manager.Enable(workerContext()) }()
+	<-started
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- env.manager.Enable(dependencyContext("other", "api", "redis.default.svc", 6379, 5002))
+	}()
+	select {
+	case <-secondDone:
+		t.Fatal("second enable passed an in-flight hosts update")
+	case <-time.After(25 * time.Millisecond):
 	}
-	afterB := env.manager.HostsSnapshot()
-
-	if !initial.OlderThan(afterA.Revision) || !afterA.Revision.OlderThan(afterB.Revision) {
-		t.Fatalf("revisions must increase with each change: %+v, %+v, %+v", initial, afterA.Revision, afterB.Revision)
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
 	}
-	if len(afterA.Entries) != 1 || len(afterB.Entries) != 2 {
-		t.Fatalf("snapshot entries do not match their revision: %+v / %+v", afterA.Entries, afterB.Entries)
+	if err := <-secondDone; err != nil {
+		t.Fatal(err)
 	}
-
-	if _, err := env.manager.Disable(dependencyContext("proj-a", "svc-a", "rabbitmq.default.svc", 5672, 5001)); err != nil {
-		t.Fatalf("disable failed: %v", err)
-	}
-	if afterDisable := env.manager.HostsSnapshot().Revision; !afterB.Revision.OlderThan(afterDisable) {
-		t.Fatalf("disable must bump the revision: %+v then %+v", afterB.Revision, afterDisable)
-	}
-
-	if other := newTestEnv(t).manager.HostsSnapshot().Revision; other.Epoch == initial.Epoch || other.OlderThan(afterB.Revision) {
-		t.Fatalf("a new helper instance must start a new epoch, got %+v vs %+v", other, afterB.Revision)
+	if first, second := <-writes, <-writes; len(first) != 1 || len(second) != 2 {
+		t.Fatalf("hosts writes out of order: %+v, %+v", first, second)
 	}
 }

@@ -2,150 +2,8 @@ package build
 
 import (
 	"path/filepath"
-	"strings"
 	"testing"
 )
-
-func newTestMatcher(t *testing.T, content string) *ignoreMatcher {
-	t.Helper()
-	m, err := parseDockerignore(strings.NewReader(content))
-	if err != nil {
-		t.Fatalf("parseDockerignore returned error: %v", err)
-	}
-	return m
-}
-
-func TestDockerignoreMatchesBasicPatterns(t *testing.T) {
-	m := newTestMatcher(t, strings.Join([]string{
-		"# comment",
-		"",
-		"  ",
-		"secrets.env",
-		"/tmp",
-		"*.log",
-		"src/**/generated",
-	}, "\n"))
-
-	cases := map[string]bool{
-		"secrets.env":              true,
-		"nested/secrets.env":       false,
-		"tmp/cache.bin":            true,
-		"app.log":                  true,
-		"logs/app.log":             false,
-		"src/a/b/generated/out.go": true,
-		"src/generated/out.go":     true,
-		"other/generated/out.go":   false,
-		"src/main.go":              false,
-		"#comment":                 false,
-	}
-
-	for p, want := range cases {
-		if got := m.matches(p); got != want {
-			t.Errorf("matches(%q) = %v, want %v", p, got, want)
-		}
-	}
-}
-
-func TestDockerignoreNegationReincludes(t *testing.T) {
-	m := newTestMatcher(t, "*.md\n!README.md\n!CHANGELOG.md\nCHANGELOG.md\n")
-
-	if !m.matches("CHANGELOG.md") {
-		t.Errorf("expected CHANGELOG.md to be ignored")
-	}
-	if m.matches("README.md") {
-		t.Errorf("expected README.md to be re-included by negation")
-	}
-}
-
-func TestDockerignoreNegationInsideIgnoredDirectory(t *testing.T) {
-	m := newTestMatcher(t, "build\n!build/keep.txt\n")
-
-	if !m.matches("build/drop.txt") {
-		t.Errorf("expected build/drop.txt to be ignored via parent match")
-	}
-	if m.matches("build/keep.txt") {
-		t.Errorf("expected build/keep.txt to be re-included")
-	}
-	if m.canSkipDir("build") {
-		t.Errorf("directory with negations must not be pruned")
-	}
-}
-
-func TestDockerignoreCanSkipDirWithoutNegations(t *testing.T) {
-	m := newTestMatcher(t, "dist\n")
-
-	if !m.canSkipDir("dist") {
-		t.Errorf("expected dist to be prunable")
-	}
-	if m.canSkipDir("src") {
-		t.Errorf("unmatched directory must not be pruned")
-	}
-}
-
-func TestDockerignoreSingleStarStopsAtSeparator(t *testing.T) {
-	m := newTestMatcher(t, "src/*/temp\n")
-
-	if !m.matches("src/a/temp/file.txt") {
-		t.Errorf("expected src/a/temp/file.txt to be ignored")
-	}
-	if m.matches("src/a/b/temp/file.txt") {
-		t.Errorf("* must not span a path separator")
-	}
-}
-
-func TestDockerignoreTrailingDoubleStar(t *testing.T) {
-	m := newTestMatcher(t, "vendor/**\n")
-
-	if !m.matches("vendor/pkg/file.go") {
-		t.Errorf("expected vendor/pkg/file.go to be ignored")
-	}
-}
-
-func TestDockerignoreQuestionMark(t *testing.T) {
-	m := newTestMatcher(t, "file?.txt\n")
-
-	if !m.matches("file1.txt") {
-		t.Errorf("expected file1.txt to be ignored")
-	}
-	if m.matches("file10.txt") {
-		t.Errorf("? must match exactly one character")
-	}
-}
-
-func TestDockerignoreSpecialCharactersAreLiteral(t *testing.T) {
-	m := newTestMatcher(t, "a+b(c).txt\n")
-
-	if !m.matches("a+b(c).txt") {
-		t.Errorf("expected literal path to be ignored")
-	}
-	if m.matches("aab(c)Xtxt") {
-		t.Errorf("regexp metacharacters must be escaped")
-	}
-}
-
-func TestDockerignoreBareExclamationIsAnError(t *testing.T) {
-	if _, err := parseDockerignore(strings.NewReader("!\n")); err == nil {
-		t.Fatalf("expected error for bare exclusion pattern")
-	}
-}
-
-func TestNilMatcherIgnoresNothing(t *testing.T) {
-	var m *ignoreMatcher
-
-	if m.matches("anything") || m.canSkipDir("anything") {
-		t.Fatalf("nil matcher must not match")
-	}
-}
-
-func TestLoadDockerignoreMissingFile(t *testing.T) {
-	m, err := loadDockerignore(t.TempDir())
-	if err != nil {
-		t.Fatalf("loadDockerignore returned error: %v", err)
-	}
-	if m != nil {
-		t.Fatalf("expected nil matcher when .dockerignore is absent, got %#v", m)
-	}
-}
 
 func TestCollectLocalFilesRespectsDockerignore(t *testing.T) {
 	root := t.TempDir()
@@ -157,7 +15,7 @@ func TestCollectLocalFilesRespectsDockerignore(t *testing.T) {
 	writeTestFile(t, filepath.Join(root, "dist", "drop.txt"), "drop")
 	writeTestFile(t, filepath.Join(root, "dist", "keep.txt"), "keep")
 
-	files, err := collectLocalFiles(root, false)
+	files, err := collectLocalFiles(root)
 	if err != nil {
 		t.Fatalf("collectLocalFiles returned error: %v", err)
 	}
@@ -187,12 +45,29 @@ func TestCollectLocalFilesWithoutDockerignore(t *testing.T) {
 	writeTestFile(t, filepath.Join(root, "service", "api.go"), "package main")
 	writeTestFile(t, filepath.Join(root, "service", "debug.log"), "noise")
 
-	files, err := collectLocalFiles(root, false)
+	files, err := collectLocalFiles(root)
 	if err != nil {
 		t.Fatalf("collectLocalFiles returned error: %v", err)
 	}
 
 	if len(files) != 2 {
 		t.Fatalf("expected all files without .dockerignore, got %#v", files)
+	}
+}
+
+func TestDockerignoreOverridesDefaults(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, ".dockerignore"), "bin\n!bin/keep.txt\n**/test[0-9].log\n")
+	for _, file := range []string{"bin/drop.txt", "bin/keep.txt", "docs/guide.md", "nested/test1.log"} {
+		writeTestFile(t, filepath.Join(root, file), "contents")
+	}
+	files, err := collectLocalFiles(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for file, want := range map[string]bool{"bin/drop.txt": false, "bin/keep.txt": true, "docs/guide.md": true, "nested/test1.log": false} {
+		if _, got := files[file]; got != want {
+			t.Errorf("included %q = %v, want %v", file, got, want)
+		}
 	}
 }

@@ -2,8 +2,9 @@
 package session
 
 import (
-	"crypto/rand"
+	"errors"
 	"fmt"
+	"log"
 	"slices"
 	"strings"
 	"sync"
@@ -51,9 +52,10 @@ func (s *Session) closeStream() {
 }
 
 type Options struct {
-	Forwards PortForwarder
-	API      ManagerAPI
-	Attach   StreamAttacher
+	Forwards   PortForwarder
+	API        ManagerAPI
+	Attach     StreamAttacher
+	WriteHosts func([]contracts.HostsEntry) error
 }
 
 type Manager struct {
@@ -63,22 +65,20 @@ type Manager struct {
 	ops      sync.Mutex
 	mu       sync.RWMutex
 	sessions map[string]*Session
-	// hostsRevision changes with every change to sessions, under mu, so a
-	// snapshot and its revision always match.
-	hostsRevision contracts.HostsRevision
 
-	forwards PortForwarder
-	api      ManagerAPI
-	attach   StreamAttacher
+	forwards   PortForwarder
+	api        ManagerAPI
+	attach     StreamAttacher
+	writeHosts func([]contracts.HostsEntry) error
 }
 
 func NewManager(options Options) *Manager {
 	return &Manager{
-		sessions:      map[string]*Session{},
-		hostsRevision: contracts.HostsRevision{Epoch: rand.Text()},
-		forwards:      options.Forwards,
-		api:           options.API,
-		attach:        options.Attach,
+		sessions:   map[string]*Session{},
+		forwards:   options.Forwards,
+		api:        options.API,
+		attach:     options.Attach,
+		writeHosts: options.WriteHosts,
 	}
 }
 
@@ -89,6 +89,8 @@ func (m *Manager) Enable(serviceContext config.Service) (err error) {
 
 	m.ops.Lock()
 	defer m.ops.Unlock()
+	// Apply hosts after rollback/teardown and before the next mutation.
+	defer func() { err = errors.Join(err, m.updateHosts()) }()
 
 	previous, replacing := m.session(key)
 	if replacing {
@@ -136,11 +138,13 @@ func (m *Manager) Enable(serviceContext config.Service) (err error) {
 
 // Disable tears a session down. The bool reports whether there was a session
 // to remove, so the caller can tell "removed" from "nothing to do".
-func (m *Manager) Disable(serviceContext config.Service) (bool, error) {
+func (m *Manager) Disable(serviceContext config.Service) (found bool, err error) {
 	key := serviceContext.Project + "/" + serviceContext.Name
 
 	m.ops.Lock()
 	defer m.ops.Unlock()
+	// Apply hosts after rollback/teardown and before the next mutation.
+	defer func() { err = errors.Join(err, m.updateHosts()) }()
 
 	session, ok := m.takeSession(key)
 	if !ok {
@@ -182,13 +186,15 @@ func (m *Manager) Close() {
 	m.mu.Lock()
 	sessions := m.sessions
 	m.sessions = map[string]*Session{}
-	m.hostsRevision.Seq++
 	m.mu.Unlock()
 
 	for _, session := range sessions {
 		session.closeStream()
 	}
 	m.forwards.Clear()
+	if err := m.updateHosts(); err != nil {
+		log.Printf("clear hosts: %v", err)
+	}
 }
 
 func (m *Manager) removeForReplacement(previous *Session) error {
@@ -221,13 +227,14 @@ func (m *Manager) teardown(session *Session) error {
 	return nil
 }
 
-// HostsSnapshot returns the full hosts block for all stored sessions and the
-// revision it belongs to, read under one lock.
-func (m *Manager) HostsSnapshot() contracts.HostsSnapshot {
+func (m *Manager) updateHosts() error {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	return contracts.HostsSnapshot{Entries: mergeHostEntries(m.sessions), Revision: m.hostsRevision}
+	entries := mergeHostEntries(m.sessions)
+	m.mu.RUnlock()
+	if err := m.writeHosts(entries); err != nil {
+		return fmt.Errorf("session state updated, but hosts update failed: %w", err)
+	}
+	return nil
 }
 
 func (m *Manager) session(key string) (*Session, bool) {
@@ -241,7 +248,6 @@ func (m *Manager) storeSession(session *Session) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.sessions[session.Key] = session
-	m.hostsRevision.Seq++
 }
 
 func (m *Manager) takeSession(key string) (*Session, bool) {
@@ -250,7 +256,6 @@ func (m *Manager) takeSession(key string) (*Session, bool) {
 	session, ok := m.sessions[key]
 	if ok {
 		delete(m.sessions, key)
-		m.hostsRevision.Seq++
 	}
 	return session, ok
 }

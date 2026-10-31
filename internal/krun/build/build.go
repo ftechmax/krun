@@ -16,7 +16,7 @@ import (
 const workspacePath = "/var/workspace"
 const buildPodName = "docker-build"
 
-func Build(projectName string, servicesToBuild []cfg.Service, skipWeb bool, force bool, flush bool, config cfg.Config) error {
+func Build(projectName string, services []cfg.Service, force bool, flush bool, config cfg.Config) error {
 	fmt.Printf("Building project %s\n", projectName)
 
 	client, err := kube.NewClient(config.KubeConfig)
@@ -34,15 +34,7 @@ func Build(projectName string, servicesToBuild []cfg.Service, skipWeb bool, forc
 
 	localRoot := filepath.Join(config.Path, config.ProjectPaths[projectName])
 
-	var services []cfg.Service
-	for _, s := range servicesToBuild {
-		if skipWeb && filepath.Base(s.Path) == "web" {
-			continue
-		}
-		services = append(services, s)
-	}
-
-	needsBuild, err := copySource(client, projectName, localRoot, skipWeb, dockerfilePaths(services))
+	needsBuild, err := copySource(client, projectName, localRoot, dockerfilePaths(services))
 	if err != nil {
 		return fmt.Errorf("copy source: %w", err)
 	}

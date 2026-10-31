@@ -17,11 +17,8 @@ const (
 
 var hostsFilePathResolver = defaultHostsFilePath
 
+// Write replaces krun's block. The privileged IPC handler validates entries.
 func Write(entries []contracts.HostsEntry) error {
-	if err := Validate(entries); err != nil {
-		return err
-	}
-
 	path, err := hostsFilePathResolver()
 	if err != nil {
 		return err

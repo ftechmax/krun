@@ -87,30 +87,30 @@ krun [global options] <command> [command options] <service>
   krun list
   ```
 
-- `build [--skip-web, --force, --flush] <project|service>`  
+- `build [--force, --flush] <project|service>`
   Build a project or specific service.
-  Builds run inside a persistent `docker-build` pod in your cluster that caches layers and workspace files between builds. Use `--skip-web` to skip building the web service, `--force` to force a rebuild even if the source has not changed, and `--flush` to delete the existing build pod before building (clearing any cached layers or copied workspace files).
+  Builds run inside a persistent `docker-build` pod in your cluster that caches layers and workspace files between builds. Use `--force` to force a rebuild even if the source has not changed, and `--flush` to delete the existing build pod before building (clearing any cached layers or copied workspace files).
 
   ```sh
   krun build awesome-app
   krun build awesome-app-api
-  krun build --skip-web awesome-app
-  krun build --skip-web --force awesome-app
+  krun build --force awesome-app
   krun build --flush awesome-app
   ```
 
-- `deploy [--use-remote-registry, --no-restart, --create-namespace] <project>`
-  Deploy a project.  
+- `deploy [--environment local|development|production] [--use-remote-registry, --no-restart, --create-namespace] <project>`
+  Deploy a project from `k8s/overlays/<environment>`. The environment defaults to `local`; use `development` for a dev/test server or `production` for production. Select the target cluster with `--kubeconfig`.
   Use `--use-remote-registry` to deploy using the remote Docker registry defined in `krun-config.json`. If not specified, it will use the local Docker registry. Use `--no-restart` to skip the rollout restart after applying manifests. Use `--create-namespace` to discover and create missing target namespaces; without the flag, deploy does not require cluster-scoped Namespace access.
 
   ```sh
   krun deploy awesome-app
   krun deploy --use-remote-registry awesome-app
   krun deploy --no-restart awesome-app
+  krun deploy --environment production --use-remote-registry awesome-app
   ```
 
-- `delete <project>`
-  Delete a deployed project and its resources from the cluster.
+- `delete [--environment local|development|production] <project>`
+  Delete a deployed project using the selected environment overlay (default: `local`).
 
   ```sh
   krun delete awesome-app

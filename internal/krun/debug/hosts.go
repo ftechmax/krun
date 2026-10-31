@@ -11,27 +11,6 @@ import (
 	"github.com/ftechmax/krun/internal/utils"
 )
 
-// applyHostsEntries writes the helper's desired hosts block through the
-// privileged hosts writer, starting it if it is not already running.
-//
-// Starting it is the only time krun asks for elevation. The writer then stays
-// up, so a developer enables and disables debug sessions all day without
-// being prompted again. The unprivileged helper daemon cannot do this itself:
-// it is detached and has no controlling terminal, so sudo would refuse to
-// prompt it.
-//
-// The revision lets the writer drop this snapshot if a newer one from a
-// concurrent command already reached it.
-func applyHostsEntries(entries []contracts.HostsEntry, revision contracts.HostsRevision) error {
-	if err := ensureHostsDaemon(); err != nil {
-		return err
-	}
-
-	_, err := hostsCall[contracts.HelperResponse](
-		http.MethodPost, "/v1/hosts", contracts.HostsSnapshot{Entries: entries, Revision: revision}, listTimeout)
-	return err
-}
-
 // ensureHostsDaemon starts the privileged writer if it is not already up. The
 // elevation prompt happens here and only here.
 func ensureHostsDaemon() error {
@@ -74,16 +53,6 @@ func stopHostsDaemon() error {
 	return err
 }
 
-// reportHostsUpdate applies the block and explains the consequence if it
-// fails, rather than failing the whole command: the session is already up,
-// only dependency name resolution is missing.
-func reportHostsUpdate(entries []contracts.HostsEntry, revision contracts.HostsRevision) {
-	if err := applyHostsEntries(entries, revision); err != nil {
-		utils.Errf("could not update the hosts file: %v", err)
-		utils.Warnf("the debug session is active, but dependency hostnames will not resolve locally")
-	}
-}
-
 func hostsStatusLine() string {
 	if hostsDaemonRunning() {
 		return utils.Colorize("hosts writer is running", utils.Green)
@@ -95,5 +64,5 @@ func hostsStatusLine() string {
 }
 
 func hostsCall[T any](method string, path string, payload any, timeout time.Duration) (T, error) {
-	return ipcCall[T](helperipc.NewClientForHosts(timeout), method, path, payload)
+	return helperipc.Call[T](helperipc.NewClientForHosts(timeout), method, path, payload)
 }

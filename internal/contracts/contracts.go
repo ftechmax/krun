@@ -20,29 +20,6 @@ type ListDebugSessionsResponse struct {
 	Sessions []DebugSession `json:"sessions"`
 }
 
-// HostsSnapshot is the combined hosts block and its revision, passed from the
-// helper through the CLI to the privileged hosts writer.
-type HostsSnapshot struct {
-	Entries  []HostsEntry  `json:"entries"`
-	Revision HostsRevision `json:"revision"`
-}
-
-// HostsRevision orders the hosts snapshots of one helper instance. The CLI
-// applies a snapshot after the helper has returned it, so two concurrent
-// commands can reach the hosts writer out of order; the writer uses the
-// revision to drop the older one.
-type HostsRevision struct {
-	// Epoch identifies the helper instance. A restarted helper starts a new
-	// epoch, and its snapshots are never treated as older than the last one's.
-	Epoch string `json:"epoch"`
-	Seq   uint64 `json:"seq"`
-}
-
-// OlderThan reports whether r was taken before other by the same helper.
-func (r HostsRevision) OlderThan(other HostsRevision) bool {
-	return r.Epoch == other.Epoch && r.Seq < other.Seq
-}
-
 type HostsEntry struct {
 	IP       string `json:"ip"`
 	Hostname string `json:"hostname"`
@@ -75,13 +52,6 @@ type HelperDebugSessionsResponse struct {
 type HelperResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
-	// HostsEntries is the hosts block the machine should now have, covering
-	// every stored session. The helper computes it; the CLI applies it
-	// through the privileged hosts daemon.
-	HostsEntries []HostsEntry `json:"hosts_entries,omitempty"`
-	// HostsRevision is the revision HostsEntries was taken at; the CLI passes
-	// it on so the hosts writer can drop snapshots that arrive out of order.
-	HostsRevision HostsRevision `json:"hosts_revision,omitzero"`
 	// Version is the helper's build version, reported on /healthz so the CLI
 	// can detect a helper started by a different krun build.
 	Version string `json:"version,omitempty"`

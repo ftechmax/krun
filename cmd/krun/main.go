@@ -22,6 +22,7 @@ var (
 )
 
 var kubeConfigPath string
+var environment string
 
 func main() {
 	rootCmd := &cobra.Command{
@@ -55,7 +56,6 @@ func main() {
 		PreRun: initialize,
 		Run:    handleBuild,
 	}
-	buildCmd.Flags().Bool("skip-web", false, "Skip building the web component")
 	buildCmd.Flags().Bool("force", false, "Force build even if up to date")
 	buildCmd.Flags().Bool("flush", false, "Delete build cache")
 	rootCmd.AddCommand(buildCmd)
@@ -70,6 +70,7 @@ func main() {
 	deployCmd.Flags().Bool("use-remote-registry", false, "Use remote registry for deploy")
 	deployCmd.Flags().Bool("no-restart", false, "Skip rollout restart after apply")
 	deployCmd.Flags().Bool("create-namespace", false, "Create target namespaces if they do not exist")
+	deployCmd.Flags().StringVar(&environment, "environment", "local", "Deployment environment: local, development, production")
 	rootCmd.AddCommand(deployCmd)
 
 	deleteCmd := &cobra.Command{
@@ -80,6 +81,7 @@ func main() {
 		Run:     handleDelete,
 		Example: "krun delete myproject",
 	}
+	deleteCmd.Flags().StringVar(&environment, "environment", "local", "Deployment environment: local, development, production")
 	rootCmd.AddCommand(deleteCmd)
 
 	debugCmd := &cobra.Command{
@@ -163,8 +165,9 @@ func initialize(_ *cobra.Command, _ []string) {
 	}
 
 	config = cfg.Config{
-		KrunConfig: krunConfig,
-		Version:    version,
+		KrunConfig:  krunConfig,
+		Version:     version,
+		Environment: environment,
 	}
 
 	if kubeConfigPath != "" {
@@ -212,7 +215,6 @@ func handleList(cmd *cobra.Command, args []string) {
 }
 
 func handleBuild(cmd *cobra.Command, args []string) {
-	skipWeb, _ := cmd.Flags().GetBool("skip-web")
 	forceBuild, _ := cmd.Flags().GetBool("force")
 	flush, _ := cmd.Flags().GetBool("flush")
 	argServiceName := args[0]
@@ -227,7 +229,7 @@ func handleBuild(cmd *cobra.Command, args []string) {
 			servicesToBuild = append(servicesToBuild, s)
 		}
 	}
-	if err := build.Build(projectName, servicesToBuild, skipWeb, forceBuild, flush, config); err != nil {
+	if err := build.Build(projectName, servicesToBuild, forceBuild, flush, config); err != nil {
 		fmt.Println(utils.Colorize(err.Error(), utils.Red))
 		os.Exit(1)
 	}
