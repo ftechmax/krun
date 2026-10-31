@@ -28,14 +28,14 @@ func TestBuildLinuxLaunchSpecPrefersSudo(t *testing.T) {
 	if spec.path != "/usr/bin/sudo" {
 		t.Fatalf("expected sudo, got %q", spec.path)
 	}
-	// -b backgrounds the privileged process so it outlives the CLI; "--" stops
-	// a binary path beginning with a dash being read as a sudo option.
-	want := []string{"-b", "--", "/usr/local/bin/krun-helper", "hosts-daemon"}
+	// sudo runs in the foreground for its password prompt; the shell script
+	// detaches the daemon from the CLI terminal.
+	want := []string{"--", "/bin/sh", "-c", pkexecDetachScript, "sh", "/usr/local/bin/krun-helper", "hosts-daemon"}
 	if !slices.Equal(spec.args, want) {
 		t.Fatalf("args = %+v, want %+v", spec.args, want)
 	}
 	if spec.detached {
-		t.Fatal("sudo -b backgrounds on its own; krun must not also detach it")
+		t.Fatal("sudo must stay in the foreground so it can prompt for a password")
 	}
 }
 

@@ -101,13 +101,20 @@ func createBuildPod(client *kube.Client) error {
 	case k8serrors.IsNotFound(err):
 	case err != nil:
 		return fmt.Errorf("get build pod: %w", err)
-	case pod.DeletionTimestamp != nil:
+	case pod.DeletionTimestamp == nil && pod.Status.Phase == corev1.PodRunning && buildPodImage(pod) == buildkitImage:
+		return nil
+	default:
+		// A stale image or a pod that is not running is replaced, not reused.
+		if pod.DeletionTimestamp == nil {
+			fmt.Println("\033[33mReplacing stale build pod\033[0m")
+			if err := deleteBuildPod(client); err != nil {
+				return err
+			}
+		}
 		fmt.Println("\033[33mWaiting for previous build pod to terminate\033[0m")
 		if err := waitForBuildPodGone(client, 90*time.Second); err != nil {
 			return err
 		}
-	case pod.Status.Phase == corev1.PodRunning:
-		return nil
 	}
 
 	fmt.Println("\033[32mCreating build container\033[0m")
@@ -124,6 +131,15 @@ func createBuildPod(client *kube.Client) error {
 	}
 
 	return nil
+}
+
+func buildPodImage(pod *corev1.Pod) string {
+	for _, container := range pod.Spec.Containers {
+		if container.Name == buildPodName {
+			return container.Image
+		}
+	}
+	return ""
 }
 
 func deleteBuildPod(client *kube.Client) error {

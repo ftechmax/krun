@@ -87,7 +87,15 @@ func startHelperDaemon(socketEndpoint string, kubeConfigPath string, managerToke
 	if endpoint == "" {
 		endpoint = helperipc.DefaultEndpoint()
 	}
-	authToken, err := managerauth.ReadLocalToken(managerTokenFile)
+	tokenPath := strings.TrimSpace(managerTokenFile)
+	if tokenPath == "" {
+		defaultPath, err := managerauth.DefaultTokenPath()
+		if err != nil {
+			return fmt.Errorf("load manager authentication: %w", err)
+		}
+		tokenPath = defaultPath
+	}
+	authToken, err := managerauth.ReadLocalToken(tokenPath)
 	if err != nil {
 		return fmt.Errorf("load manager authentication: %w", err)
 	}

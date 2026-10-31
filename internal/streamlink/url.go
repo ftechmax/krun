@@ -3,6 +3,7 @@ package streamlink
 import (
 	"fmt"
 	"net/url"
+	"strings"
 )
 
 // Stream endpoints on the traffic-manager, one per peer role.
@@ -14,6 +15,9 @@ const (
 // URL builds a websocket endpoint from the manager's HTTP address.
 // Authentication stays in request headers.
 func URL(managerAddress string, path string, sessionID string) (string, error) {
+	if managerAddress != "" && !strings.Contains(managerAddress, "://") {
+		managerAddress = "http://" + managerAddress
+	}
 	parsed, err := url.Parse(managerAddress)
 	if err != nil {
 		return "", fmt.Errorf("invalid manager address %q: %w", managerAddress, err)

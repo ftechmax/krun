@@ -8,6 +8,9 @@ import (
 	"unsafe"
 )
 
+// DETACHED_PROCESS is not exported by the syscall package.
+const detachedProcess = 0x00000008
+
 var (
 	shell32          = syscall.NewLazyDLL("shell32.dll")
 	procShellExecute = shell32.NewProc("ShellExecuteW")
@@ -41,7 +44,12 @@ func startElevatedProcess(binaryPath string, args []string) error {
 // elevation. Used for the unprivileged helper daemon.
 func startBackgroundProcess(binaryPath string, args []string) error {
 	cmd := exec.Command(binaryPath, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow: true,
+		// Detach from the CLI console so closing it or pressing Ctrl+C there
+		// does not take the helper down.
+		CreationFlags: detachedProcess | syscall.CREATE_NEW_PROCESS_GROUP,
+	}
 	if err := cmd.Start(); err != nil {
 		return err
 	}

@@ -47,11 +47,12 @@ func buildLinuxLaunchSpec(binaryPath string, args []string, euid int, sudoPath s
 		}, nil
 	}
 
+	// sudo authenticates in the foreground; the script then detaches the
+	// daemon from the CLI terminal (no SIGHUP, no output into the shell).
 	if sudoPath != "" {
-		return linuxLaunchSpec{
-			path: sudoPath,
-			args: append([]string{"-b", "--", binaryPath}, args...),
-		}, nil
+		sudoArgs := []string{"--", "/bin/sh", "-c", pkexecDetachScript, "sh", binaryPath}
+		sudoArgs = append(sudoArgs, args...)
+		return linuxLaunchSpec{path: sudoPath, args: sudoArgs}, nil
 	}
 
 	if pkexecPath != "" {

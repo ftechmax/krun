@@ -25,9 +25,20 @@ func TestURLConvertsHTTPS(t *testing.T) {
 }
 
 func TestURLRejectsBadAddresses(t *testing.T) {
-	for _, address := range []string{"", "127.0.0.1:39481", "ftp://manager:8080"} {
+	for _, address := range []string{"", "ftp://manager:8080"} {
 		if _, err := URL(address, AgentPath, "session-1"); err == nil {
 			t.Fatalf("expected invalid manager address %q to fail", address)
 		}
+	}
+}
+
+func TestURLDefaultsBareAddressToHTTP(t *testing.T) {
+	got, err := URL("127.0.0.1:39481", AgentPath, "session-1")
+	if err != nil {
+		t.Fatalf("bare host:port: %v", err)
+	}
+	want := "ws://127.0.0.1:39481" + AgentPath + "?session_id=session-1"
+	if got != want {
+		t.Fatalf("URL = %q, want %q", got, want)
 	}
 }
