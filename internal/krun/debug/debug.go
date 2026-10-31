@@ -117,7 +117,7 @@ func Enable(service cfg.Service, config cfg.Config, containerName string) {
 
 	utils.Okf("Session created")
 
-	reportHostsUpdate(response.HostsEntries)
+	reportHostsUpdate(response.HostsEntries, response.HostsRevision)
 
 	if err := deploy.CreateEnvFile(service, config, containerName); err != nil {
 		utils.Warnf("warning: could not create env file: %v", err)
@@ -146,7 +146,7 @@ func Disable(service cfg.Service, config cfg.Config) {
 		utils.Warnf("No active debug session found")
 	} else {
 		utils.Okf("Session removed")
-		reportHostsUpdate(response.HostsEntries)
+		reportHostsUpdate(response.HostsEntries, response.HostsRevision)
 		if err := deploy.RemoveEnvFile(service, config); err != nil {
 			utils.Warnf("warning: could not remove env file: %v", err)
 		}

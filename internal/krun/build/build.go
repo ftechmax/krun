@@ -37,7 +37,16 @@ func Build(projectName string, servicesToBuild []cfg.Service, skipWeb bool, forc
 		projectPath = projectName
 	}
 	localRoot := filepath.Join(config.KrunSourceConfig.Path, filepath.FromSlash(projectPath))
-	needsBuild, err := copySource(client, projectName, localRoot, skipWeb)
+
+	var services []cfg.Service
+	for _, s := range servicesToBuild {
+		if skipWeb && filepath.Base(s.Path) == "web" {
+			continue
+		}
+		services = append(services, s)
+	}
+
+	needsBuild, err := copySource(client, projectName, localRoot, skipWeb, dockerfilePaths(services))
 	if err != nil {
 		return fmt.Errorf("copy source: %w", err)
 	}
@@ -47,10 +56,7 @@ func Build(projectName string, servicesToBuild []cfg.Service, skipWeb bool, forc
 	}
 
 	var failed []string
-	for _, s := range servicesToBuild {
-		if skipWeb && filepath.Base(s.Path) == "web" {
-			continue
-		}
+	for _, s := range services {
 		if err := buildAndPushImage(client, s, config.Registry); err != nil {
 			utils.Errf("Build failed for %s: %s", s.Name, err.Error())
 			failed = append(failed, s.Name)
@@ -79,9 +85,22 @@ func flushBuildPod(client *kube.Client) {
 	}
 }
 
+// dockerfilePaths returns each service's Dockerfile relative to the project root.
+func dockerfilePaths(services []cfg.Service) []string {
+	paths := make([]string, 0, len(services))
+	for _, s := range services {
+		paths = append(paths, path.Join(serviceDockerfileDir(s), "Dockerfile"))
+	}
+	return paths
+}
+
+func serviceDockerfileDir(service cfg.Service) string {
+	return path.Join(filepath.ToSlash(service.Path), filepath.ToSlash(service.Dockerfile))
+}
+
 func buildctlArgs(service cfg.Service, registry string) []string {
 	contextPath := path.Join(workspacePath, service.Project, filepath.ToSlash(service.Context))
-	dockerfileDir := path.Join(workspacePath, service.Project, filepath.ToSlash(service.Path), filepath.ToSlash(service.Dockerfile))
+	dockerfileDir := path.Join(workspacePath, service.Project, serviceDockerfileDir(service))
 	image := fmt.Sprintf("%s/%s:latest", registry, service.Name)
 
 	return []string{

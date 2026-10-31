@@ -19,7 +19,8 @@ krun (CLI)                                 krun-system namespace
 ```
 
 The CLI also starts the privileged hosts writer and sends it the helper's
-desired hosts entries.
+desired hosts entries. Each snapshot carries a revision, so when concurrent
+commands deliver snapshots out of order the writer drops the older one.
 
 ## CLI <-> Helper Transport
 
@@ -192,8 +193,9 @@ treats them as untrusted:
    a crafted entry from injecting extra lines into the hosts file.
 4. Unknown JSON fields and oversized bodies are rejected.
 
-`krun debug helper stop` stops the writer, which strips krun's block as it
-exits. That is also how a developer reclaims their hosts file.
+`krun debug helper stop` stops the writer, which finishes in-flight requests
+and then strips krun's block as it exits. That is also how a developer
+reclaims their hosts file.
 
 ## krun-helper Responsibilities
 

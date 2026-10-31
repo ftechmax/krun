@@ -667,3 +667,41 @@ type fakeStream struct {
 }
 
 func (f *fakeStream) Close() { f.closes++ }
+
+// Snapshots are applied by the CLI after the helper returns them, so their
+// revisions must order them: each session change bumps the revision, and a new
+// helper instance starts a new epoch.
+func TestHostsSnapshotRevisionOrdersChanges(t *testing.T) {
+	env := newTestEnv(t)
+	initial := env.manager.HostsSnapshot().Revision
+	if initial.Epoch == "" {
+		t.Fatal("expected a non-empty epoch")
+	}
+
+	if err := env.manager.Enable("", dependencyContext("proj-a", "svc-a", "rabbitmq.default.svc", 5672, 5001)); err != nil {
+		t.Fatalf("enable svc-a failed: %v", err)
+	}
+	afterA := env.manager.HostsSnapshot()
+	if err := env.manager.Enable("", dependencyContext("proj-b", "svc-b", "redis.default.svc", 6379, 5002)); err != nil {
+		t.Fatalf("enable svc-b failed: %v", err)
+	}
+	afterB := env.manager.HostsSnapshot()
+
+	if !initial.OlderThan(afterA.Revision) || !afterA.Revision.OlderThan(afterB.Revision) {
+		t.Fatalf("revisions must increase with each change: %+v, %+v, %+v", initial, afterA.Revision, afterB.Revision)
+	}
+	if len(afterA.Entries) != 1 || len(afterB.Entries) != 2 {
+		t.Fatalf("snapshot entries do not match their revision: %+v / %+v", afterA.Entries, afterB.Entries)
+	}
+
+	if _, err := env.manager.Disable("", dependencyContext("proj-a", "svc-a", "rabbitmq.default.svc", 5672, 5001)); err != nil {
+		t.Fatalf("disable failed: %v", err)
+	}
+	if afterDisable := env.manager.HostsSnapshot().Revision; !afterB.Revision.OlderThan(afterDisable) {
+		t.Fatalf("disable must bump the revision: %+v then %+v", afterB.Revision, afterDisable)
+	}
+
+	if other := newTestEnv(t).manager.HostsSnapshot().Revision; other.Epoch == initial.Epoch || other.OlderThan(afterB.Revision) {
+		t.Fatalf("a new helper instance must start a new epoch, got %+v vs %+v", other, afterB.Revision)
+	}
+}

@@ -5,8 +5,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -48,7 +50,8 @@ var excludedDirectories = map[string]struct{}{
 	"docs":         {},
 }
 
-func copySource(client *kube.Client, projectName string, localRoot string, skipWeb bool) (bool, error) {
+// requiredFiles are project-relative paths (such as Dockerfiles) synced even when excluded.
+func copySource(client *kube.Client, projectName string, localRoot string, skipWeb bool, requiredFiles []string) (bool, error) {
 	startTime := time.Now()
 	plusSym := utils.Colorize("+", utils.Green)
 	minusSym := utils.Colorize("-", utils.Red)
@@ -67,6 +70,9 @@ func copySource(client *kube.Client, projectName string, localRoot string, skipW
 	localFiles, err := collectLocalFiles(localRoot, skipWeb)
 	if err != nil {
 		return false, fmt.Errorf("walk local source tree: %w", err)
+	}
+	if err := addRequiredFiles(localFiles, localRoot, requiredFiles); err != nil {
+		return false, err
 	}
 
 	plan := buildSyncPlan(localFiles, remoteFiles)
@@ -191,6 +197,35 @@ func collectLocalFiles(localRoot string, skipWeb bool) (map[string]localFile, er
 	}
 
 	return localFiles, nil
+}
+
+// addRequiredFiles adds files the build needs even if exclusions dropped them.
+// Like Docker, an ignored Dockerfile is still sent. Missing files are left for the build to report.
+func addRequiredFiles(localFiles map[string]localFile, localRoot string, requiredFiles []string) error {
+	for _, rel := range requiredFiles {
+		rel = path.Clean(rel)
+		if _, ok := localFiles[rel]; ok || !filepath.IsLocal(filepath.FromSlash(rel)) {
+			continue
+		}
+		p := filepath.Join(localRoot, filepath.FromSlash(rel))
+		fi, err := os.Stat(p)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("stat required file %s: %w", rel, err)
+		}
+		if !fi.Mode().IsRegular() {
+			continue
+		}
+		localFiles[rel] = localFile{
+			relPath:   rel,
+			localPath: p,
+			mtimeNs:   fi.ModTime().UnixNano(),
+			size:      fi.Size(),
+		}
+	}
+	return nil
 }
 
 func buildSyncPlan(localFiles map[string]localFile, remoteFiles map[string]remoteEntry) syncPlan {

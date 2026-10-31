@@ -22,8 +22,15 @@ release bundle for that tag. Override the source with `KRUN_MANIFEST_URL`.
 
 ## Windows helper build
 
-`krun-helper.exe` carries an embedded `requireAdministrator` manifest so it
-elevates however it is launched. The manifest lives in
+`krun-helper.exe` carries an embedded `asInvoker` manifest, so it runs as
+whoever launches it. krun starts the helper daemon as the current user, and
+starts `krun-helper hosts-daemon` (the privileged process that writes the
+hosts file) through the ShellExecute `runas` verb, which shows the UAC prompt
+([elevate_windows.go](../internal/krun/debug/elevate_windows.go)). Do not switch
+the manifest to `requireAdministrator`: Windows then refuses the plain
+unelevated daemon launch with `ERROR_ELEVATION_REQUIRED`.
+
+The manifest lives in
 [cmd/krun-helper/resource_windows_amd64.syso](../cmd/krun-helper/resource_windows_amd64.syso),
 which the Go linker embeds automatically for `GOOS=windows GOARCH=amd64` — so
 `make build-windows` needs no post-link step and cross-compiles from Linux.
@@ -31,22 +38,17 @@ which the Go linker embeds automatically for `GOOS=windows GOARCH=amd64` — so
 Regenerate the `.syso` only if `scripts/krun-helper.manifest` changes:
 
 ```sh
-go run github.com/akavel/rsrc@latest \
+go run github.com/akavel/rsrc@v0.10.2 \
   -manifest scripts/krun-helper.manifest -arch amd64 \
   -o cmd/krun-helper/resource_windows_amd64.syso
 ```
 
 Verify any built binary with `python3 scripts/verify-uac-manifest.py krun-helper.exe`,
-which checks for an `RT_MANIFEST` resource requesting administrator rights. CI
-runs the same check.
+which checks for an `RT_MANIFEST` resource requesting `asInvoker`. CI runs the
+same check.
 
 Note the `.syso` is `amd64`-specific by filename; a Windows build for another
 architecture would need its own generated alongside it.
-
-The daemon itself is launched without elevation. The manifest matters for
-`krun-helper hosts-daemon`, the privileged process that writes the hosts file,
-which krun starts through the ShellExecute `runas` verb
-([elevate_windows.go](../internal/krun/debug/elevate_windows.go)).
 
 ## Inspecting a running helper
 

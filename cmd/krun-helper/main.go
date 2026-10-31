@@ -271,10 +271,12 @@ func (d *daemon) handleEnable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	hosts := d.sessions.HostsSnapshot()
 	writeJSON(w, http.StatusOK, contracts.HelperResponse{
-		Success:      true,
-		Message:      "debug enable applied",
-		HostsEntries: d.sessions.DesiredHosts(),
+		Success:       true,
+		Message:       "debug enable applied",
+		HostsEntries:  hosts.Entries,
+		HostsRevision: hosts.Revision,
 	})
 }
 
@@ -295,10 +297,12 @@ func (d *daemon) handleDisable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	hosts := d.sessions.HostsSnapshot()
 	writeJSON(w, http.StatusOK, contracts.HelperResponse{
-		Success:      true,
-		Message:      "debug disable applied",
-		HostsEntries: d.sessions.DesiredHosts(),
+		Success:       true,
+		Message:       "debug disable applied",
+		HostsEntries:  hosts.Entries,
+		HostsRevision: hosts.Revision,
 	})
 }
 

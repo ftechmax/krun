@@ -2,6 +2,7 @@
 package session
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"slices"
@@ -62,6 +63,9 @@ type Manager struct {
 	ops      sync.Mutex
 	mu       sync.RWMutex
 	sessions map[string]*Session
+	// hostsRevision changes with every change to sessions, under mu, so a
+	// snapshot and its revision always match.
+	hostsRevision contracts.HostsRevision
 
 	forwards PortForwarder
 	api      ManagerAPI
@@ -70,10 +74,11 @@ type Manager struct {
 
 func NewManager(options Options) *Manager {
 	return &Manager{
-		sessions: map[string]*Session{},
-		forwards: options.Forwards,
-		api:      options.API,
-		attach:   options.Attach,
+		sessions:      map[string]*Session{},
+		hostsRevision: contracts.HostsRevision{Epoch: rand.Text()},
+		forwards:      options.Forwards,
+		api:           options.API,
+		attach:        options.Attach,
 	}
 }
 
@@ -216,6 +221,7 @@ func (m *Manager) Close() error {
 	m.mu.Lock()
 	sessions := m.sessions
 	m.sessions = map[string]*Session{}
+	m.hostsRevision.Seq++
 	m.mu.Unlock()
 
 	for _, session := range sessions {
@@ -264,9 +270,13 @@ func (m *Manager) teardown(session *Session) []string {
 }
 
 // DesiredHosts returns the full hosts block for all stored sessions.
-// The CLI applies it through the privileged hosts daemon; the helper cannot
-// prompt for elevation because it has no controlling terminal.
 func (m *Manager) DesiredHosts() []contracts.HostsEntry {
+	return m.HostsSnapshot().Entries
+}
+
+// HostsSnapshot returns the full hosts block for all stored sessions and the
+// revision it belongs to, read under one lock.
+func (m *Manager) HostsSnapshot() contracts.HostsSnapshot {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -274,7 +284,7 @@ func (m *Manager) DesiredHosts() []contracts.HostsEntry {
 	for _, session := range m.sessions {
 		contexts = append(contexts, session.Context)
 	}
-	return mergeHostEntries(contexts)
+	return contracts.HostsSnapshot{Entries: mergeHostEntries(contexts), Revision: m.hostsRevision}
 }
 
 func (m *Manager) session(key string) (*Session, bool) {
@@ -288,12 +298,16 @@ func (m *Manager) storeSession(session *Session) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.sessions[session.Key] = session
+	m.hostsRevision.Seq++
 }
 
 func (m *Manager) takeSession(key string) (*Session, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	session, ok := m.sessions[key]
-	delete(m.sessions, key)
+	if ok {
+		delete(m.sessions, key)
+		m.hostsRevision.Seq++
+	}
 	return session, ok
 }

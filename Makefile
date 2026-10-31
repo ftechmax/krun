@@ -35,7 +35,7 @@ build-krun-windows:
 build-krun-linux:
 	$(GOENV_LINUX) $(GO) build -ldflags "$(LDFLAGS)" -buildvcs=$(BUILDVCS) -o $(LINUX_KRUN_BIN) ./cmd/krun
 
-# krun-helper.exe carries its requireAdministrator UAC manifest via the
+# krun-helper.exe carries its asInvoker UAC manifest via the
 # committed cmd/krun-helper/resource_windows_amd64.syso, which the Go linker
 # embeds automatically. No post-link mt.exe step, so this cross-compiles.
 build-helper-windows:

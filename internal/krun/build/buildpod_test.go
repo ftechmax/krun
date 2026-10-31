@@ -52,3 +52,12 @@ func TestBuildctlArgs(t *testing.T) {
 		t.Fatalf("unexpected args:\n got  %q\n want %q", got, want)
 	}
 }
+
+func TestDockerfilePathsMatchBuildctlDockerfileDir(t *testing.T) {
+	svc := cfg.Service{Project: "proj", Path: "src/api", Dockerfile: "docker"}
+	got := dockerfilePaths([]cfg.Service{svc, {Project: "proj", Path: "src/worker"}})
+	want := []string{"src/api/docker/Dockerfile", "src/worker/Dockerfile"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("unexpected Dockerfile paths: got %q want %q", got, want)
+	}
+}

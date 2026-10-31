@@ -19,13 +19,16 @@ import (
 // being prompted again. The unprivileged helper daemon cannot do this itself:
 // it is detached and has no controlling terminal, so sudo would refuse to
 // prompt it.
-func applyHostsEntries(entries []contracts.HostsEntry) error {
+//
+// The revision lets the writer drop this snapshot if a newer one from a
+// concurrent command already reached it.
+func applyHostsEntries(entries []contracts.HostsEntry, revision contracts.HostsRevision) error {
 	if err := ensureHostsDaemon(); err != nil {
 		return err
 	}
 
 	response, err := hostsCall[contracts.HelperResponse](
-		http.MethodPost, "/v1/hosts", contracts.ApplyHostsRequest{Entries: entries}, listTimeout)
+		http.MethodPost, "/v1/hosts", contracts.ApplyHostsRequest{Entries: entries, Revision: revision}, listTimeout)
 	if err != nil {
 		return err
 	}
@@ -80,8 +83,8 @@ func stopHostsDaemon() error {
 // reportHostsUpdate applies the block and explains the consequence if it
 // fails, rather than failing the whole command: the session is already up,
 // only dependency name resolution is missing.
-func reportHostsUpdate(entries []contracts.HostsEntry) {
-	if err := applyHostsEntries(entries); err != nil {
+func reportHostsUpdate(entries []contracts.HostsEntry, revision contracts.HostsRevision) {
+	if err := applyHostsEntries(entries, revision); err != nil {
 		utils.Errf("could not update the hosts file: %v", err)
 		utils.Warnf("the debug session is active, but dependency hostnames will not resolve locally")
 	}

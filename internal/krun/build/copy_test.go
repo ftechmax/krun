@@ -144,3 +144,45 @@ func writeTestFile(t *testing.T, path string, content string) {
 		t.Fatalf("write %s: %v", path, err)
 	}
 }
+
+func TestAddRequiredFilesKeepsIgnoredDockerfile(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, ".dockerignore"), "Dockerfile\n**/Dockerfile\n")
+	writeTestFile(t, filepath.Join(root, "src", "api", "Dockerfile"), "FROM scratch")
+	writeTestFile(t, filepath.Join(root, "src", "worker", "Dockerfile"), "FROM scratch")
+
+	files, err := collectLocalFiles(root, false)
+	if err != nil {
+		t.Fatalf("collectLocalFiles returned error: %v", err)
+	}
+	if _, ok := files["src/api/Dockerfile"]; ok {
+		t.Fatalf("expected .dockerignore to exclude src/api/Dockerfile before required files are added")
+	}
+
+	required := []string{"src/api/Dockerfile", "src/missing/Dockerfile", "../outside/Dockerfile"}
+	if err := addRequiredFiles(files, root, required); err != nil {
+		t.Fatalf("addRequiredFiles returned error: %v", err)
+	}
+
+	if f, ok := files["src/api/Dockerfile"]; !ok || f.size != int64(len("FROM scratch")) {
+		t.Fatalf("expected required src/api/Dockerfile to be synced, got %#v", files)
+	}
+	if _, ok := files["src/worker/Dockerfile"]; ok {
+		t.Fatalf("expected unrequired ignored Dockerfile to stay excluded")
+	}
+	if _, ok := files["src/missing/Dockerfile"]; ok {
+		t.Fatalf("expected missing required file to be skipped")
+	}
+	delete(files, ".dockerignore")
+	if len(files) != 1 {
+		t.Fatalf("expected only the required Dockerfile besides .dockerignore, got %#v", files)
+	}
+
+	// A remote copy of a required file must not be scheduled for deletion.
+	plan := buildSyncPlan(files, map[string]remoteEntry{
+		"src/api/Dockerfile": {mtimeNs: files["src/api/Dockerfile"].mtimeNs, size: files["src/api/Dockerfile"].size},
+	})
+	if len(plan.toDelete) != 0 || len(plan.toUpload) != 0 {
+		t.Fatalf("expected no changes for an up-to-date required file, got %#v", plan)
+	}
+}

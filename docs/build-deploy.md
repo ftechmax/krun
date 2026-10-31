@@ -54,6 +54,9 @@ Character classes and backslash escapes are unsupported. Negations cannot
 override built-in exclusions. Previously synced files that become ignored are
 deleted on the next sync.
 
+Each selected service's Dockerfile is always synced, even when an exclusion
+matches it, because BuildKit reads it from the workspace.
+
 ## Image build and push
 
 `buildctl` runs inside the build pod with output streamed to the terminal. Each

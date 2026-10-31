@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-"""Verify a Windows PE carries an RT_MANIFEST resource requesting administrator
-rights. Replaces the Windows-SDK mt.exe extraction the build used to need, so
-the check runs anywhere Python does."""
+"""Verify a Windows PE carries an RT_MANIFEST resource requesting asInvoker.
+
+krun-helper.exe must not require administrator rights: krun starts the helper
+daemon unelevated and elevates only the hosts writer through ShellExecute
+"runas". A requireAdministrator manifest makes the unelevated launch fail with
+ERROR_ELEVATION_REQUIRED. Parses the PE directly, so the check runs anywhere
+Python does."""
 import struct
 import sys
 
@@ -33,9 +37,11 @@ def main(path):
     data = open(path, "rb").read()
     if RT_MANIFEST not in resource_type_ids(data):
         raise SystemExit(f"{path}: no RT_MANIFEST resource")
-    if b'level="requireAdministrator"' not in data:
-        raise SystemExit(f"{path}: manifest does not requireAdministrator")
-    print(f"{path}: RT_MANIFEST present, requireAdministrator")
+    if b'level="requireAdministrator"' in data or b'level="highestAvailable"' in data:
+        raise SystemExit(f"{path}: manifest requests elevation; the helper daemon must launch unelevated")
+    if b'level="asInvoker"' not in data:
+        raise SystemExit(f"{path}: manifest does not request asInvoker")
+    print(f"{path}: RT_MANIFEST present, asInvoker")
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -57,8 +58,9 @@ func runHostsDaemon(endpoint string) error {
 	defer helperipc.Cleanup(endpoint)
 
 	shutdownCh := make(chan struct{}, 1)
+	writer := &hostsWriter{}
 	server := &http.Server{
-		Handler:           newHostsHandler(shutdownCh),
+		Handler:           newHostsHandler(writer, shutdownCh),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -81,25 +83,78 @@ func runHostsDaemon(endpoint string) error {
 	case <-shutdownCh:
 	}
 
-	// Leaving krun's block behind would point dependency names at a machine
-	// with nothing listening, so strip it on the way out.
-	removeErr := hostfile.File{}.Remove()
+	return shutdownHostsDaemon(server, serverErrCh, writer)
+}
 
+// shutdownHostsDaemon drains in-flight requests before stripping krun's block,
+// so a request that was already being handled cannot write the block back.
+// The writer is closed after draining, so a handler that outlives the drain
+// timeout is refused rather than writing after the block is gone.
+func shutdownHostsDaemon(server *http.Server, serverErrCh <-chan error, writer *hostsWriter) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	shutdownErr := server.Shutdown(shutdownCtx)
 	if serveErr := <-serverErrCh; !errors.Is(serveErr, http.ErrServerClosed) && serveErr != nil {
 		shutdownErr = errors.Join(shutdownErr, serveErr)
 	}
-	return errors.Join(removeErr, shutdownErr)
+
+	// Leaving krun's block behind would point dependency names at a machine
+	// with nothing listening, so strip it on the way out.
+	return errors.Join(writer.closeAndRemove(), shutdownErr)
 }
 
-func newHostsHandler(shutdownCh chan<- struct{}) http.Handler {
+// hostsWriter serializes hosts-file updates. It drops snapshots older than
+// the last one applied (concurrent CLI commands can deliver them out of
+// order) and refuses updates once shutdown has stripped the block.
+type hostsWriter struct {
+	mu     sync.Mutex
+	last   contracts.HostsRevision
+	closed bool
+}
+
+var (
+	errHostsWriterClosed = errors.New("hosts writer is shutting down")
+	errStaleHosts        = errors.New("a newer hosts snapshot is already applied")
+)
+
+func (h *hostsWriter) apply(entries []contracts.HostsEntry, revision contracts.HostsRevision) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.closed {
+		return errHostsWriterClosed
+	}
+	if revision.OlderThan(h.last) {
+		return errStaleHosts
+	}
+
+	var err error
+	if len(entries) == 0 {
+		err = hostfile.File{}.Remove()
+	} else {
+		err = hostfile.File{}.Write(entries)
+	}
+	if err != nil {
+		return err
+	}
+	h.last = revision
+	return nil
+}
+
+func (h *hostsWriter) closeAndRemove() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.closed = true
+	return hostfile.File{}.Remove()
+}
+
+func newHostsHandler(writer *hostsWriter, shutdownCh chan<- struct{}) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", only(http.MethodGet, func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, contracts.HelperResponse{Success: true, Message: "ok", Version: version})
 	}))
-	mux.HandleFunc("/v1/hosts", only(http.MethodPost, handleApplyHosts))
+	mux.HandleFunc("/v1/hosts", only(http.MethodPost, writer.handleApply))
 	mux.HandleFunc("/v1/shutdown", only(http.MethodPost, func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, contracts.HelperResponse{Success: true, Message: "shutting down"})
 		select {
@@ -110,7 +165,7 @@ func newHostsHandler(shutdownCh chan<- struct{}) http.Handler {
 	return mux
 }
 
-func handleApplyHosts(w http.ResponseWriter, r *http.Request) {
+func (h *hostsWriter) handleApply(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	var request contracts.ApplyHostsRequest
@@ -126,16 +181,16 @@ func handleApplyHosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var err error
-	if len(request.Entries) == 0 {
-		err = hostfile.File{}.Remove()
-	} else {
-		err = hostfile.File{}.Write(request.Entries)
-	}
-	if err != nil {
+	err := h.apply(request.Entries, request.Revision)
+	switch {
+	case errors.Is(err, errStaleHosts):
+		// Not a failure: the hosts file already reflects a newer state.
+		writeJSON(w, http.StatusOK, contracts.HelperResponse{Success: true, Message: "stale snapshot ignored"})
+	case errors.Is(err, errHostsWriterClosed):
+		writeJSON(w, http.StatusServiceUnavailable, contracts.HelperResponse{Success: false, Message: err.Error()})
+	case err != nil:
 		writeJSON(w, http.StatusInternalServerError, contracts.HelperResponse{Success: false, Message: err.Error()})
-		return
+	default:
+		writeJSON(w, http.StatusOK, contracts.HelperResponse{Success: true, Message: "hosts updated"})
 	}
-
-	writeJSON(w, http.StatusOK, contracts.HelperResponse{Success: true, Message: "hosts updated"})
 }
