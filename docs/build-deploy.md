@@ -7,12 +7,15 @@ shelling out to `kubectl`.
 ## Build pod
 
 `krun build` reuses `default/docker-build` to cache image layers and workspace
-files. The embedded manifest in `internal/krun/build/buildpod.go` defines a
-privileged Buildah container and its registry ConfigMap. The workspace uses
-`emptyDir`, so deleting the pod clears it.
+files. The embedded manifest in `internal/krun/build/buildpod.go` defines an
+unprivileged rootless BuildKit container and a `buildkitd.toml` ConfigMap that
+marks `registry:5000` as plain HTTP. The workspace and BuildKit cache use
+`emptyDir`, so deleting the pod clears them.
 
 The build path applies the manifest when the pod is not Running and watches for
-`PodReady=True`. `--flush` deletes the build resources before recreating them.
+`PodReady=True`. A terminating pod still reports phase Running, so krun waits
+until it is gone before recreating it. `--flush` deletes the build resources
+before recreating them.
 
 ## Source sync
 
@@ -53,9 +56,10 @@ deleted on the next sync.
 
 ## Image build and push
 
-Buildah runs inside the build pod with output streamed to the terminal. Each
-selected service is built from its configured Dockerfile and context, then
-pushed to the configured registry with the `latest` tag.
+`buildctl` runs inside the build pod with output streamed to the terminal. Each
+selected service is built from its configured Dockerfile and context and pushed
+to the configured registry with the `latest` tag in one step. If any service
+fails, `krun build` exits with status 1.
 
 ## Deploy and delete
 

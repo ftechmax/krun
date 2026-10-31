@@ -123,7 +123,7 @@ func copySource(client *kube.Client, projectName string, localRoot string, skipW
 
 func listRemoteFiles(ctx context.Context, client *kube.Client, remoteRoot string) (map[string]remoteEntry, error) {
 	stdout, stderr, err := execInBuildPod(ctx, client, []string{
-		"find", remoteRoot, "-type", "f", "-printf", "%P\t%T@\t%s\n",
+		"find", remoteRoot, "-type", "f", "-exec", "stat", "-c", "%Y %s %n", "{}", "+",
 	}, nil)
 	if err != nil {
 		if isMissingRemoteDirectory(stderr, err) {
@@ -131,7 +131,7 @@ func listRemoteFiles(ctx context.Context, client *kube.Client, remoteRoot string
 		}
 		return nil, fmt.Errorf("list remote files: %w (stderr: %s)", err, strings.TrimSpace(stderr))
 	}
-	return parseRemoteFindOutput(stdout), nil
+	return parseRemoteStatOutput(stdout, remoteRoot), nil
 }
 
 func collectLocalFiles(localRoot string, skipWeb bool) (map[string]localFile, error) {
@@ -349,49 +349,31 @@ func deleteRemoteFiles(ctx context.Context, client *kube.Client, remoteRoot stri
 	return nil
 }
 
-func parseRemoteFindOutput(output string) map[string]remoteEntry {
+// parses "<mtime seconds> <size> <absolute path>" lines and keys them by path
+func parseRemoteStatOutput(output string, remoteRoot string) map[string]remoteEntry {
+	prefix := path.Clean(remoteRoot) + "/"
 	entries := map[string]remoteEntry{}
 	for line := range strings.SplitSeq(output, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+		parts := strings.SplitN(line, " ", 3)
+		if len(parts) != 3 {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 3)
-		if len(parts) != 3 || parts[0] == "" {
+		rel, ok := strings.CutPrefix(parts[2], prefix)
+		if !ok || rel == "" {
 			continue
 		}
 
-		mtimeNs, err := parseFindMtime(parts[1])
+		mtimeSec, err := strconv.ParseInt(parts[0], 10, 64)
 		if err != nil {
 			continue
 		}
-		size, err := strconv.ParseInt(parts[2], 10, 64)
+		size, err := strconv.ParseInt(parts[1], 10, 64)
 		if err != nil {
 			continue
 		}
-		entries[parts[0]] = remoteEntry{mtimeNs: mtimeNs, size: size}
+		entries[rel] = remoteEntry{mtimeNs: mtimeSec * 1_000_000_000, size: size}
 	}
 	return entries
-}
-
-func parseFindMtime(value string) (int64, error) {
-	secFrac := strings.SplitN(value, ".", 2)
-	sec, err := strconv.ParseInt(secFrac[0], 10, 64)
-	if err != nil {
-		return 0, err
-	}
-	frac := int64(0)
-	if len(secFrac) == 2 {
-		f := secFrac[1]
-		for len(f) < 9 {
-			f += "0"
-		}
-		frac, err = strconv.ParseInt(f[:9], 10, 64)
-		if err != nil {
-			return 0, err
-		}
-	}
-	return sec*1_000_000_000 + frac, nil
 }
 
 func isMissingRemoteDirectory(stderr string, execErr error) bool {
