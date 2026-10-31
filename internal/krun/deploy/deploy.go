@@ -105,12 +105,7 @@ func handle(ctx context.Context, client *kube.Client, config cfg.Config, project
 }
 
 func resolveOverlayPaths(config cfg.Config, projectName string) ([]string, error) {
-	projectRelPath := projectName
-	if p, ok := config.ProjectPaths[projectName]; ok {
-		projectRelPath = p
-	}
-
-	servicePath := filepath.Join(config.KrunSourceConfig.Path, projectRelPath)
+	servicePath := filepath.Join(config.Path, config.ProjectPaths[projectName])
 	k8sPath := filepath.Join(servicePath, "k8s")
 	k8sCloudPath := filepath.Join(k8sPath, "cloud")
 	k8sEdgePath := filepath.Join(k8sPath, "edge")

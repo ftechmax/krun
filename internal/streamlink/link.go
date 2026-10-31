@@ -8,7 +8,6 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/ftechmax/krun/internal/contracts"
@@ -58,10 +57,7 @@ func Serve(
 			case envelope := <-sendCh:
 				_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 				if err := conn.WriteJSON(envelope); err != nil {
-					select {
-					case writeErrCh <- err:
-					default:
-					}
+					writeErrCh <- err
 					return
 				}
 			}
@@ -108,8 +104,6 @@ type Config struct {
 	Headers http.Header
 	// LogPrefix identifies this peer in connect/disconnect logs.
 	LogPrefix string
-	// QueueSize bounds the outbound envelope queue; zero picks the default.
-	QueueSize int
 }
 
 // Link is a session stream attachment that re-dials with bounded backoff for
@@ -122,22 +116,17 @@ type Link struct {
 	onReceive    func(contracts.StreamEnvelope)
 	onDisconnect func()
 
-	ctx       context.Context
-	cancel    context.CancelFunc
-	doneCh    chan struct{}
-	closeOnce sync.Once
+	ctx    context.Context
+	cancel context.CancelFunc
+	doneCh chan struct{}
 }
 
 // New builds a Link. Start must be called exactly once to run it.
 func New(parent context.Context, cfg Config) *Link {
-	queueSize := cfg.QueueSize
-	if queueSize <= 0 {
-		queueSize = defaultQueueSize
-	}
 	ctx, cancel := context.WithCancel(parent)
 	return &Link{
 		cfg:    cfg,
-		sendCh: make(chan contracts.StreamEnvelope, queueSize),
+		sendCh: make(chan contracts.StreamEnvelope, defaultQueueSize),
 		ctx:    ctx,
 		cancel: cancel,
 		doneCh: make(chan struct{}),
@@ -178,10 +167,8 @@ func (l *Link) Envelope(connectionID string, envelopeType string) contracts.Stre
 
 // Close stops the loop and waits for it to exit.
 func (l *Link) Close() {
-	l.closeOnce.Do(func() {
-		l.cancel()
-		<-l.doneCh
-	})
+	l.cancel()
+	<-l.doneCh
 }
 
 func (l *Link) run() {
@@ -198,10 +185,12 @@ func (l *Link) run() {
 		cancel()
 		if err != nil {
 			log.Printf("%s connect failed: %v", l.cfg.LogPrefix, err)
-			if !sleepWithContext(l.ctx, backoff) {
+			select {
+			case <-l.ctx.Done():
 				return
+			case <-time.After(backoff):
 			}
-			backoff = nextBackoff(backoff)
+			backoff = min(backoff*2, maxBackoff)
 			continue
 		}
 
@@ -214,22 +203,4 @@ func (l *Link) run() {
 			l.onDisconnect()
 		}
 	}
-}
-
-func sleepWithContext(ctx context.Context, delay time.Duration) bool {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return true
-	}
-}
-
-func nextBackoff(current time.Duration) time.Duration {
-	if next := current * 2; next < maxBackoff {
-		return next
-	}
-	return maxBackoff
 }

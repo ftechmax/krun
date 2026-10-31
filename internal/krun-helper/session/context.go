@@ -10,7 +10,7 @@ import (
 
 // mergeHostEntries collects every dependency hostname across the given
 // sessions into one sorted, deduplicated block pointing at localhost.
-func mergeHostEntries(contexts []config.Service) []contracts.HostsEntry {
+func mergeHostEntries(sessions map[string]*Session) []contracts.HostsEntry {
 	entries := make([]contracts.HostsEntry, 0)
 	seen := map[string]bool{}
 
@@ -23,8 +23,8 @@ func mergeHostEntries(contexts []config.Service) []contracts.HostsEntry {
 		entries = append(entries, contracts.HostsEntry{IP: "127.0.0.1", Hostname: host})
 	}
 
-	for _, serviceContext := range contexts {
-		for _, dependency := range serviceContext.ServiceDependencies {
+	for _, session := range sessions {
+		for _, dependency := range session.Context.ServiceDependencies {
 			addHost(dependency.Host)
 			for _, alias := range dependency.Aliases {
 				addHost(alias)

@@ -20,7 +20,6 @@ func TestServiceDir(t *testing.T) {
 		projectPaths map[string]string
 		service      cfg.Service
 		want         string
-		wantErr      bool
 	}{
 		{
 			name:    "base directory when the service has no project or path",
@@ -48,19 +47,6 @@ func TestServiceDir(t *testing.T) {
 			service:      cfg.Service{Name: "api", Project: "myproject", Path: "src/api"},
 			want:         filepath.Join(root, "apps", "myproject", "src", "api"),
 		},
-		{
-			name:         "unknown project falls back to the base",
-			base:         root,
-			projectPaths: map[string]string{"other": "apps/other"},
-			service:      cfg.Service{Name: "api", Project: "unknown"},
-			want:         root,
-		},
-		{
-			name:    "empty base directory is an error",
-			base:    "",
-			service: cfg.Service{Name: "api"},
-			wantErr: true,
-		},
 	}
 
 	for _, testCase := range cases {
@@ -70,16 +56,7 @@ func TestServiceDir(t *testing.T) {
 				ProjectPaths: testCase.projectPaths,
 			}
 
-			dir, err := serviceDir(testCase.service, config)
-			if testCase.wantErr {
-				if err == nil {
-					t.Fatal("expected an error")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
+			dir := serviceDir(testCase.service, config)
 			if dir != testCase.want {
 				t.Fatalf("got %q, want %q", dir, testCase.want)
 			}

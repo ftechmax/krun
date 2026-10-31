@@ -144,7 +144,7 @@ func loadRuntimeConfig() (runtimeConfig, error) {
 		return runtimeConfig{}, fmt.Errorf("%s is required", sessionIDEnv)
 	}
 
-	managerAddress := resolveManagerAddress()
+	managerAddress := strings.TrimSpace(os.Getenv(managerAddressEnv))
 	if managerAddress == "" {
 		return runtimeConfig{}, fmt.Errorf("manager address is required (%s)", managerAddressEnv)
 	}
@@ -183,16 +183,9 @@ func loadRuntimeConfig() (runtimeConfig, error) {
 
 func (cfg runtimeConfig) streamHeaders() http.Header {
 	headers := make(http.Header)
-	headers.Set("X-Krun-Session-ID", cfg.SessionID)
 	headers.Set("X-Krun-Agent-Version", version)
-	if strings.TrimSpace(cfg.SessionToken) != "" {
-		headers.Set("X-Krun-Session-Token", cfg.SessionToken)
-	}
+	headers.Set("X-Krun-Session-Token", cfg.SessionToken)
 	return headers
-}
-
-func resolveManagerAddress() string {
-	return strings.TrimSpace(os.Getenv(managerAddressEnv))
 }
 
 func parseRequiredPort(name string) (int, error) {
@@ -240,12 +233,11 @@ func acceptInterceptedConnections(ctx context.Context, listener net.Listener, li
 }
 
 func captureConnection(ctx context.Context, conn net.Conn, connectionID string, link *streamlink.Link, conns *streamlink.Conns) {
-	go func() {
-		<-ctx.Done()
-		_ = conn.Close()
-	}()
-
 	conns.Set(connectionID, conn)
+	if ctx.Err() != nil {
+		conns.CloseAndDelete(connectionID)
+		return
+	}
 
 	if err := link.Send(link.Envelope(connectionID, contracts.StreamTypeOpen)); err != nil {
 		log.Printf("send open envelope failed (connection_id=%s): %v", connectionID, err)

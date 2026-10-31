@@ -20,7 +20,7 @@ func TestWriteTarStreamFinalizesArchive(t *testing.T) {
 	defer reader.Close()
 	done := make(chan error, 1)
 	go func() {
-		done <- writeTarStream(writer, "project", []localFile{{relPath: "app.txt", localPath: filePath}})
+		done <- writeTarStream(writer, "project", filepath.Dir(filePath), []string{"app.txt"})
 	}()
 	compressed, err := io.ReadAll(reader)
 	if err != nil {
@@ -57,7 +57,7 @@ func TestWriteTarStreamPropagatesSourceErrorToReader(t *testing.T) {
 	defer reader.Close()
 	done := make(chan error, 1)
 	go func() {
-		done <- writeTarStream(writer, "project", []localFile{{relPath: "missing", localPath: filepath.Join(t.TempDir(), "missing")}})
+		done <- writeTarStream(writer, "project", t.TempDir(), []string{"missing"})
 	}()
 	_, readErr := io.ReadAll(reader)
 	writeErr := <-done
@@ -67,14 +67,14 @@ func TestWriteTarStreamPropagatesSourceErrorToReader(t *testing.T) {
 }
 
 func TestBuildSyncPlanCreatePhase(t *testing.T) {
-	local := map[string]localFile{
-		"new.txt": {relPath: "new.txt", localPath: "/tmp/new.txt", mtimeNs: 10, size: 5},
+	local := map[string]fileStamp{
+		"new.txt": {mtime: 10, size: 5},
 	}
-	remote := map[string]remoteEntry{}
+	remote := map[string]fileStamp{}
 
 	plan := buildSyncPlan(local, remote)
 
-	if len(plan.toUpload) != 1 || plan.toUpload[0].relPath != "new.txt" {
+	if len(plan.toUpload) != 1 || plan.toUpload[0] != "new.txt" {
 		t.Fatalf("expected new.txt in upload list, got %#v", plan.toUpload)
 	}
 	if len(plan.toDelete) != 0 {
@@ -83,18 +83,18 @@ func TestBuildSyncPlanCreatePhase(t *testing.T) {
 }
 
 func TestBuildSyncPlanChangedPhase(t *testing.T) {
-	local := map[string]localFile{
-		"same.txt":    {relPath: "same.txt", localPath: "/tmp/same.txt", mtimeNs: 10, size: 5},
-		"changed.txt": {relPath: "changed.txt", localPath: "/tmp/changed.txt", mtimeNs: 20, size: 9},
+	local := map[string]fileStamp{
+		"same.txt":    {mtime: 10, size: 5},
+		"changed.txt": {mtime: 20, size: 9},
 	}
-	remote := map[string]remoteEntry{
-		"same.txt":    {mtimeNs: 10, size: 5},
-		"changed.txt": {mtimeNs: 20, size: 8},
+	remote := map[string]fileStamp{
+		"same.txt":    {mtime: 10, size: 5},
+		"changed.txt": {mtime: 20, size: 8},
 	}
 
 	plan := buildSyncPlan(local, remote)
 
-	if len(plan.toUpload) != 1 || plan.toUpload[0].relPath != "changed.txt" {
+	if len(plan.toUpload) != 1 || plan.toUpload[0] != "changed.txt" {
 		t.Fatalf("expected changed.txt in upload list, got %#v", plan.toUpload)
 	}
 	if len(plan.toDelete) != 0 {
@@ -102,12 +102,12 @@ func TestBuildSyncPlanChangedPhase(t *testing.T) {
 	}
 }
 
-func TestBuildSyncPlanSecondPrecisionMtime(t *testing.T) {
-	local := map[string]localFile{
-		"same.txt": {relPath: "same.txt", localPath: "/tmp/same.txt", mtimeNs: 1700000000123456789, size: 5},
+func TestBuildSyncPlanUnchangedFile(t *testing.T) {
+	local := map[string]fileStamp{
+		"same.txt": {mtime: 1700000000, size: 5},
 	}
-	remote := map[string]remoteEntry{
-		"same.txt": {mtimeNs: 1700000000000000000, size: 5},
+	remote := map[string]fileStamp{
+		"same.txt": {mtime: 1700000000, size: 5},
 	}
 
 	plan := buildSyncPlan(local, remote)
@@ -121,11 +121,11 @@ func TestBuildSyncPlanSecondPrecisionMtime(t *testing.T) {
 }
 
 func TestBuildSyncPlanRemoteNewerSkipsUpload(t *testing.T) {
-	local := map[string]localFile{
-		"same.txt": {relPath: "same.txt", localPath: "/tmp/same.txt", mtimeNs: 1700000000000000000, size: 5},
+	local := map[string]fileStamp{
+		"same.txt": {mtime: 1700000000, size: 5},
 	}
-	remote := map[string]remoteEntry{
-		"same.txt": {mtimeNs: 1700000009000000000, size: 5},
+	remote := map[string]fileStamp{
+		"same.txt": {mtime: 1700000009, size: 5},
 	}
 
 	plan := buildSyncPlan(local, remote)
@@ -136,13 +136,13 @@ func TestBuildSyncPlanRemoteNewerSkipsUpload(t *testing.T) {
 }
 
 func TestBuildSyncPlanDeletedPhase(t *testing.T) {
-	local := map[string]localFile{
-		"keep.txt": {relPath: "keep.txt", localPath: "/tmp/keep.txt", mtimeNs: 1, size: 1},
+	local := map[string]fileStamp{
+		"keep.txt": {mtime: 1, size: 1},
 	}
-	remote := map[string]remoteEntry{
-		"keep.txt":   {mtimeNs: 1, size: 1},
-		"stale1.txt": {mtimeNs: 2, size: 2},
-		"stale2.txt": {mtimeNs: 3, size: 3},
+	remote := map[string]fileStamp{
+		"keep.txt":   {mtime: 1, size: 1},
+		"stale1.txt": {mtime: 2, size: 2},
+		"stale2.txt": {mtime: 3, size: 3},
 	}
 
 	plan := buildSyncPlan(local, remote)
@@ -165,10 +165,10 @@ func TestParseRemoteStatOutput(t *testing.T) {
 	if len(parsed) != 2 {
 		t.Fatalf("expected 2 parsed entries, got %d: %#v", len(parsed), parsed)
 	}
-	if parsed["a.txt"].mtimeNs != 1700000000_000000000 || parsed["a.txt"].size != 11 {
+	if parsed["a.txt"].mtime != 1700000000 || parsed["a.txt"].size != 11 {
 		t.Fatalf("unexpected parsed entry for a.txt: %#v", parsed["a.txt"])
 	}
-	if parsed["b/c d.txt"].mtimeNs != 1700000001_000000000 || parsed["b/c d.txt"].size != 22 {
+	if parsed["b/c d.txt"].mtime != 1700000001 || parsed["b/c d.txt"].size != 22 {
 		t.Fatalf("unexpected parsed entry for b/c d.txt: %#v", parsed["b/c d.txt"])
 	}
 }
@@ -239,8 +239,8 @@ func TestAddRequiredFilesKeepsIgnoredDockerfile(t *testing.T) {
 	}
 
 	// A remote copy of a required file must not be scheduled for deletion.
-	plan := buildSyncPlan(files, map[string]remoteEntry{
-		"src/api/Dockerfile": {mtimeNs: files["src/api/Dockerfile"].mtimeNs, size: files["src/api/Dockerfile"].size},
+	plan := buildSyncPlan(files, map[string]fileStamp{
+		"src/api/Dockerfile": {mtime: files["src/api/Dockerfile"].mtime, size: files["src/api/Dockerfile"].size},
 	})
 	if len(plan.toDelete) != 0 || len(plan.toUpload) != 0 {
 		t.Fatalf("expected no changes for an up-to-date required file, got %#v", plan)

@@ -28,7 +28,7 @@ func applyHostsEntries(entries []contracts.HostsEntry, revision contracts.HostsR
 	}
 
 	_, err := hostsCall[contracts.HelperResponse](
-		http.MethodPost, "/v1/hosts", contracts.ApplyHostsRequest{Entries: entries, Revision: revision}, listTimeout)
+		http.MethodPost, "/v1/hosts", contracts.HostsSnapshot{Entries: entries, Revision: revision}, listTimeout)
 	return err
 }
 

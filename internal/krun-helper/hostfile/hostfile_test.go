@@ -68,7 +68,7 @@ func TestRemoveDeletesBlock(t *testing.T) {
 
 	overrideHostsPath(t, hostsPath)
 
-	if err := Remove(); err != nil {
+	if err := Write(nil); err != nil {
 		t.Fatalf("Remove failed: %v", err)
 	}
 
@@ -89,7 +89,7 @@ func TestRemoveNoopWhenBlockAbsent(t *testing.T) {
 
 	overrideHostsPath(t, hostsPath)
 
-	if err := Remove(); err != nil {
+	if err := Write(nil); err != nil {
 		t.Fatalf("Remove failed: %v", err)
 	}
 
@@ -238,7 +238,7 @@ func TestHasBlock(t *testing.T) {
 		t.Fatalf("HasBlock after a write = (%v, %v), want (true, nil)", present, err)
 	}
 
-	if err := Remove(); err != nil {
+	if err := Write(nil); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	if present, err := HasBlock(); err != nil || present {

@@ -45,7 +45,6 @@ type forwardHandle struct {
 
 	cancel   context.CancelFunc
 	doneChan chan struct{}
-	stopOnce sync.Once
 }
 
 func NewSessionRegistry(kubeConfigPath string) (*SessionRegistry, error) {
@@ -311,8 +310,10 @@ func selectPodForPortForward(pods []corev1.Pod) (corev1.Pod, error) {
 		if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
 			continue
 		}
-		if selected == nil || (isPodReady(*pod) && !isPodReady(*selected)) ||
-			(isPodReady(*pod) == isPodReady(*selected) && pod.Name < selected.Name) {
+		if isPodReady(*pod) {
+			return *pod, nil
+		}
+		if selected == nil {
 			selected = pod
 		}
 	}
@@ -362,9 +363,7 @@ func resolveServiceTargetPort(service corev1.Service, pod corev1.Pod, requestedR
 }
 
 func (h *forwardHandle) stop() {
-	h.stopOnce.Do(func() {
-		h.cancel()
-	})
+	h.cancel()
 
 	select {
 	case <-h.doneChan:

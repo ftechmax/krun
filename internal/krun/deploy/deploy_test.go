@@ -71,6 +71,7 @@ func TestResolveOverlayPathsCloudEdge(t *testing.T) {
 		KrunConfig: cfg.KrunConfig{
 			KrunSourceConfig: cfg.KrunSourceConfig{Path: root},
 		},
+		ProjectPaths: map[string]string{"svc": "svc"},
 	}
 
 	paths, err := resolveOverlayPaths(config, "svc")
@@ -99,6 +100,7 @@ resources: []
 		KrunConfig: cfg.KrunConfig{
 			KrunSourceConfig: cfg.KrunSourceConfig{Path: root},
 		},
+		ProjectPaths: map[string]string{"svc": "svc"},
 	}
 
 	paths, err := resolveOverlayPaths(config, "svc")
@@ -119,6 +121,7 @@ func TestResolveOverlayPathsMissingOverlay(t *testing.T) {
 		KrunConfig: cfg.KrunConfig{
 			KrunSourceConfig: cfg.KrunSourceConfig{Path: root},
 		},
+		ProjectPaths: map[string]string{"missing": "missing"},
 	}
 
 	_, err := resolveOverlayPaths(config, "missing")
@@ -318,7 +321,7 @@ data:
 	})
 	clientset := kubefake.NewSimpleClientset()
 	client.Clientset = clientset
-	config := cfg.Config{KrunConfig: cfg.KrunConfig{KrunSourceConfig: cfg.KrunSourceConfig{Path: root}}}
+	config := cfg.Config{KrunConfig: cfg.KrunConfig{KrunSourceConfig: cfg.KrunSourceConfig{Path: root}}, ProjectPaths: map[string]string{"app": "app"}}
 
 	if _, err := handle(context.Background(), client, config, "app", false, false); err != nil {
 		t.Fatalf("handle default deploy: %v", err)
@@ -437,6 +440,7 @@ metadata:
 		KrunConfig: cfg.KrunConfig{
 			KrunSourceConfig: cfg.KrunSourceConfig{Path: root},
 		},
+		ProjectPaths: map[string]string{"awesome": "awesome"},
 	}
 	client := newFakeKubeClient(
 		seedConfigMap("default", "app-config", map[string]string{"MODE": "local"}),

@@ -20,8 +20,9 @@ type ListDebugSessionsResponse struct {
 	Sessions []DebugSession `json:"sessions"`
 }
 
-// ApplyHostsRequest is what the CLI sends the privileged hosts writer.
-type ApplyHostsRequest struct {
+// HostsSnapshot is the combined hosts block and its revision, passed from the
+// helper through the CLI to the privileged hosts writer.
+type HostsSnapshot struct {
 	Entries  []HostsEntry  `json:"entries"`
 	Revision HostsRevision `json:"revision"`
 }
@@ -40,13 +41,6 @@ type HostsRevision struct {
 // OlderThan reports whether r was taken before other by the same helper.
 func (r HostsRevision) OlderThan(other HostsRevision) bool {
 	return r.Epoch == other.Epoch && r.Seq < other.Seq
-}
-
-// HostsSnapshot is the hosts block for every stored session together with
-// the revision it was taken at.
-type HostsSnapshot struct {
-	Entries  []HostsEntry
-	Revision HostsRevision
 }
 
 type HostsEntry struct {

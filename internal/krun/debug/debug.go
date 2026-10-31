@@ -398,11 +398,6 @@ func ensureHelperStarted(config cfg.Config) error {
 	}
 
 	if err := startHelperProcess(config); err != nil {
-		// Handle races where another process started the helper concurrently.
-		if helperVersion, checkErr := helperCheckHealth(); checkErr == nil {
-			warnOnHelperSkew(config.Version, helperVersion)
-			return nil
-		}
 		return err
 	}
 
@@ -456,8 +451,7 @@ func resolveHelperBinaryPath() (string, error) {
 	return filepath.Join(filepath.Dir(krunBinaryPath), helperBinaryName), nil
 }
 
-// helperCheckHealth probes the running helper and reports the version it is
-// built from. A helper older than this contract reports an empty version.
+// helperCheckHealth reports the running helper's build version.
 func helperCheckHealth() (string, error) {
 	response, err := helperCall[contracts.HelperResponse](http.MethodGet, "/healthz", nil, healthTimeout)
 	if err != nil {
@@ -472,11 +466,7 @@ func warnOnHelperSkew(cliVersion string, helperVersion string) {
 		return
 	}
 
-	reported := helperVersion
-	if strings.TrimSpace(reported) == "" {
-		reported = "unknown (predates version reporting)"
-	}
-	utils.Warnf("WARNING: version skew - krun is %q but the running helper is %s", cliVersion, reported)
+	utils.Warnf("WARNING: version skew - krun is %q but the running helper is %q", cliVersion, helperVersion)
 	utils.Warnf("         a different krun build started the helper; restart it with: krun debug helper stop")
 }
 
@@ -516,23 +506,15 @@ func ipcCall[T any](client *http.Client, method string, path string, payload any
 	}
 	defer response.Body.Close()
 
-	responseBody, err := io.ReadAll(response.Body)
-	if err != nil {
-		return result, err
-	}
-	if len(responseBody) > 0 {
-		if err := json.Unmarshal(responseBody, &result); err != nil {
-			return result, fmt.Errorf("invalid helper response: %w", err)
-		}
-	}
-
 	if response.StatusCode >= 400 {
 		var helperResponse contracts.HelperResponse
-		_ = json.Unmarshal(responseBody, &helperResponse)
-		if helperResponse.Message != "" {
+		if err := json.NewDecoder(response.Body).Decode(&helperResponse); err == nil && helperResponse.Message != "" {
 			return result, errors.New(helperResponse.Message)
 		}
 		return result, fmt.Errorf("helper request failed with status %d", response.StatusCode)
+	}
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		return result, fmt.Errorf("invalid helper response: %w", err)
 	}
 	return result, nil
 }

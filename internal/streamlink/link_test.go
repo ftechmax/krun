@@ -196,16 +196,6 @@ func TestServeRejectsOversizedMessages(t *testing.T) {
 	}
 }
 
-func TestNextBackoffSaturatesAtMax(t *testing.T) {
-	delay := initialBackoff
-	for i := 0; i < 10; i++ {
-		delay = nextBackoff(delay)
-	}
-	if delay != maxBackoff {
-		t.Fatalf("expected backoff to saturate at %v, got %v", maxBackoff, delay)
-	}
-}
-
 func TestLinkReconnectsAfterPeerDisconnect(t *testing.T) {
 	var connections atomic.Int32
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -222,8 +212,7 @@ func TestLinkReconnectsAfterPeerDisconnect(t *testing.T) {
 	defer server.Close()
 
 	link := New(context.Background(), Config{
-		URL:       "ws" + strings.TrimPrefix(server.URL, "http"),
-		QueueSize: 1,
+		URL: "ws" + strings.TrimPrefix(server.URL, "http"),
 	})
 	link.Start(nil, nil)
 

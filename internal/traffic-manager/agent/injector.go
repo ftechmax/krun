@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -91,30 +90,25 @@ func (i *WorkloadInjector) Inject(ctx context.Context, session contracts.DebugSe
 
 	desiredContainer := i.buildContainer(session)
 	return i.mutateWorkload(ctx, namespace, workload, i.findWorkloadTarget, "with traffic-agent sidecar", func(target *workloadTarget) bool {
-		changed := false
-
-		updated := target.template.Spec.Containers
-		index := findContainerIndex(updated, contracts.AgentContainerName)
-		if index >= 0 {
-			if !reflect.DeepEqual(updated[index], desiredContainer) {
-				updated[index] = desiredContainer
-				target.template.Spec.Containers = updated
-				changed = true
-			}
+		containers := target.template.Spec.Containers
+		index := slices.IndexFunc(containers, func(container corev1.Container) bool {
+			return container.Name == contracts.AgentContainerName
+		})
+		if index < 0 {
+			target.template.Spec.Containers = append(containers, desiredContainer)
 		} else {
-			target.template.Spec.Containers = append(updated, desiredContainer)
-			changed = true
+			containers[index] = desiredContainer
 		}
 
-		if ensureInjectedLabel(target.object) {
-			changed = true
+		labels := target.object.GetLabels()
+		if labels == nil {
+			labels = map[string]string{}
 		}
+		labels[injectedLabelKey] = injectedLabelValue
+		target.object.SetLabels(labels)
 
-		if i.rewriteProbes(target, session.ServicePort) {
-			changed = true
-		}
-
-		return changed
+		i.rewriteProbes(target, session.ServicePort)
+		return true // Each enable supplies a new session ID and token.
 	})
 }
 
@@ -361,9 +355,8 @@ type savedProbes struct {
 // agent's probe server instead. Otherwise kubelet probes get redirected to
 // the developer's local app, and the pod goes NotReady the moment that app
 // is stopped or paused on a breakpoint.
-func (i *WorkloadInjector) rewriteProbes(target *workloadTarget, targetPort int) bool {
+func (i *WorkloadInjector) rewriteProbes(target *workloadTarget, targetPort int) {
 	saved := map[string]savedProbes{}
-	changed := false
 
 	for idx := range target.template.Spec.Containers {
 		container := &target.template.Spec.Containers[idx]
@@ -386,33 +379,27 @@ func (i *WorkloadInjector) rewriteProbes(target *workloadTarget, targetPort int)
 				continue
 			}
 			*slot.original = (*slot.probe).DeepCopy()
-			rewritten := (*slot.probe).DeepCopy()
-			rewriteProbePort(rewritten, i.options.ProbePort)
-			*slot.probe = rewritten
+			rewriteProbePort(*slot.probe, i.options.ProbePort)
 			rewrote = true
 		}
 		if rewrote {
 			saved[container.Name] = record
-			changed = true
 		}
 	}
 
-	if changed {
+	if len(saved) > 0 {
 		annotations := target.object.GetAnnotations()
 		// Keep an existing annotation: it holds the true originals from the
 		// first injection; a re-inject sees already-rewritten probes.
 		if _, exists := annotations[originalProbesAnnotation]; !exists {
-			data, err := json.Marshal(saved)
-			if err == nil {
-				if annotations == nil {
-					annotations = map[string]string{}
-				}
-				annotations[originalProbesAnnotation] = string(data)
-				target.object.SetAnnotations(annotations)
+			data, _ := json.Marshal(saved)
+			if annotations == nil {
+				annotations = map[string]string{}
 			}
+			annotations[originalProbesAnnotation] = string(data)
+			target.object.SetAnnotations(annotations)
 		}
 	}
-	return changed
 }
 
 // restoreProbes puts the original probe specs back and drops the annotation.
@@ -484,15 +471,6 @@ func rewriteProbePort(probe *corev1.Probe, probePort int) {
 	}
 }
 
-func findContainerIndex(containers []corev1.Container, name string) int {
-	for idx, container := range containers {
-		if container.Name == name {
-			return idx
-		}
-	}
-	return -1
-}
-
 func normalizeOptions(options Options) Options {
 	options.Image = strings.TrimSpace(options.Image)
 	if options.Image == "" {
@@ -514,20 +492,6 @@ func normalizeOptions(options Options) Options {
 	}
 
 	return options
-}
-
-func ensureInjectedLabel(obj metav1.Object) bool {
-	labels := obj.GetLabels()
-	if labels == nil {
-		obj.SetLabels(map[string]string{injectedLabelKey: injectedLabelValue})
-		return true
-	}
-	if labels[injectedLabelKey] == injectedLabelValue {
-		return false
-	}
-	labels[injectedLabelKey] = injectedLabelValue
-	obj.SetLabels(labels)
-	return true
 }
 
 func removeInjectedLabel(obj metav1.Object) bool {

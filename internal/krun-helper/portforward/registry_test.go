@@ -59,8 +59,8 @@ func TestSelectPodForPortForwardPrefersReadyRunning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("select pod: %v", err)
 	}
-	if pod.Name != "worker-a" {
-		t.Fatalf("expected worker-a, got %s", pod.Name)
+	if pod.Name != "worker-c" {
+		t.Fatalf("expected first ready pod worker-c, got %s", pod.Name)
 	}
 }
 

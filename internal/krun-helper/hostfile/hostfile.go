@@ -36,6 +36,9 @@ func Write(entries []contracts.HostsEntry) error {
 	withoutBlock := stripKrunBlock(string(content))
 
 	if len(entries) == 0 {
+		if withoutBlock == string(content) {
+			return nil
+		}
 		return writeHosts(path, withoutBlock)
 	}
 
@@ -52,25 +55,6 @@ func Write(entries []contracts.HostsEntry) error {
 	}
 
 	return writeHosts(path, result)
-}
-
-func Remove() error {
-	path, err := hostsFilePathResolver()
-	if err != nil {
-		return err
-	}
-
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("failed to read hosts file: %w", err)
-	}
-
-	withoutBlock := stripKrunBlock(string(content))
-	if withoutBlock == string(content) {
-		return nil
-	}
-
-	return writeHosts(path, withoutBlock)
 }
 
 func defaultHostsFilePath() (string, error) {

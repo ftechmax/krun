@@ -8,24 +8,6 @@ import (
 	"testing"
 )
 
-func TestResolveManagerAddressPrefersNewEnv(t *testing.T) {
-	t.Setenv(managerAddressEnv, "http://new-manager:8080")
-
-	got := resolveManagerAddress()
-	if got != "http://new-manager:8080" {
-		t.Fatalf("expected new manager address, got %q", got)
-	}
-}
-
-func TestResolveManagerAddressEmptyWhenUnset(t *testing.T) {
-	t.Setenv(managerAddressEnv, "")
-
-	got := resolveManagerAddress()
-	if got != "" {
-		t.Fatalf("expected empty manager address, got %q", got)
-	}
-}
-
 func TestLoadRuntimeConfig(t *testing.T) {
 	t.Setenv(managerAddressEnv, "http://manager.default.svc:8080")
 	t.Setenv(sessionIDEnv, "session-1")

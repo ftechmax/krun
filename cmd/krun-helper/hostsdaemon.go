@@ -128,13 +128,7 @@ func (h *hostsWriter) apply(entries []contracts.HostsEntry, revision contracts.H
 		return errStaleHosts
 	}
 
-	var err error
-	if len(entries) == 0 {
-		err = hostfile.Remove()
-	} else {
-		err = hostfile.Write(entries)
-	}
-	if err != nil {
+	if err := hostfile.Write(entries); err != nil {
 		return err
 	}
 	h.last = revision
@@ -146,7 +140,7 @@ func (h *hostsWriter) closeAndRemove() error {
 	defer h.mu.Unlock()
 
 	h.closed = true
-	return hostfile.Remove()
+	return hostfile.Write(nil)
 }
 
 func newHostsHandler(writer *hostsWriter, shutdownCh chan<- struct{}) http.Handler {
@@ -168,7 +162,7 @@ func newHostsHandler(writer *hostsWriter, shutdownCh chan<- struct{}) http.Handl
 func (h *hostsWriter) handleApply(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
-	var request contracts.ApplyHostsRequest
+	var request contracts.HostsSnapshot
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {

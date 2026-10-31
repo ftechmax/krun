@@ -21,20 +21,13 @@ import (
 	"github.com/ftechmax/krun/internal/utils"
 )
 
-type remoteEntry struct {
-	mtimeNs int64
-	size    int64
-}
-
-type localFile struct {
-	relPath   string
-	localPath string
-	mtimeNs   int64
-	size      int64
+type fileStamp struct {
+	mtime int64 // Whole seconds, matching the remote stat output.
+	size  int64
 }
 
 type syncPlan struct {
-	toUpload []localFile
+	toUpload []string
 	toDelete []string
 }
 
@@ -79,13 +72,13 @@ func copySource(client *kube.Client, projectName string, localRoot string, skipW
 
 	filesAdded := 0
 	filesUpdated := 0
-	for _, f := range plan.toUpload {
-		if _, existed := remoteFiles[f.relPath]; existed {
+	for _, rel := range plan.toUpload {
+		if _, existed := remoteFiles[rel]; existed {
 			filesUpdated++
-			fmt.Printf("%s %s\n", squigglySym, f.relPath)
+			fmt.Printf("%s %s\n", squigglySym, rel)
 		} else {
 			filesAdded++
-			fmt.Printf("%s %s\n", plusSym, f.relPath)
+			fmt.Printf("%s %s\n", plusSym, rel)
 		}
 	}
 
@@ -95,7 +88,7 @@ func copySource(client *kube.Client, projectName string, localRoot string, skipW
 	}
 
 	if len(plan.toUpload) > 0 {
-		if err := streamTarUpload(ctx, client, projectName, plan.toUpload); err != nil {
+		if err := streamTarUpload(ctx, client, projectName, localRoot, plan.toUpload); err != nil {
 			return false, err
 		}
 	}
@@ -127,21 +120,18 @@ func copySource(client *kube.Client, projectName string, localRoot string, skipW
 	return true, nil
 }
 
-func listRemoteFiles(ctx context.Context, client *kube.Client, remoteRoot string) (map[string]remoteEntry, error) {
+func listRemoteFiles(ctx context.Context, client *kube.Client, remoteRoot string) (map[string]fileStamp, error) {
 	stdout, stderr, err := execInBuildPod(ctx, client, []string{
-		"find", remoteRoot, "-type", "f", "-exec", "stat", "-c", "%Y %s %n", "{}", "+",
+		"sh", "-c", `mkdir -p "$1" && find "$1" -type f -exec stat -c '%Y %s %n' {} +`, "sh", remoteRoot,
 	}, nil)
 	if err != nil {
-		if isMissingRemoteDirectory(stderr, err) {
-			return map[string]remoteEntry{}, nil
-		}
 		return nil, fmt.Errorf("list remote files: %w (stderr: %s)", err, strings.TrimSpace(stderr))
 	}
 	return parseRemoteStatOutput(stdout, remoteRoot), nil
 }
 
-func collectLocalFiles(localRoot string, skipWeb bool) (map[string]localFile, error) {
-	localFiles := map[string]localFile{}
+func collectLocalFiles(localRoot string, skipWeb bool) (map[string]fileStamp, error) {
+	localFiles := map[string]fileStamp{}
 
 	ignore, err := loadDockerignore(localRoot)
 	if err != nil {
@@ -184,12 +174,7 @@ func collectLocalFiles(localRoot string, skipWeb bool) (map[string]localFile, er
 		if err != nil {
 			return err
 		}
-		localFiles[relPath] = localFile{
-			relPath:   relPath,
-			localPath: p,
-			mtimeNs:   fi.ModTime().UnixNano(),
-			size:      fi.Size(),
-		}
+		localFiles[relPath] = fileStamp{mtime: fi.ModTime().Unix(), size: fi.Size()}
 		return nil
 	})
 	if err != nil {
@@ -201,7 +186,7 @@ func collectLocalFiles(localRoot string, skipWeb bool) (map[string]localFile, er
 
 // addRequiredFiles adds files the build needs even if exclusions dropped them.
 // Like Docker, an ignored Dockerfile is still sent. Missing files are left for the build to report.
-func addRequiredFiles(localFiles map[string]localFile, localRoot string, requiredFiles []string) error {
+func addRequiredFiles(localFiles map[string]fileStamp, localRoot string, requiredFiles []string) error {
 	for _, rel := range requiredFiles {
 		rel = path.Clean(rel)
 		if _, ok := localFiles[rel]; ok || !filepath.IsLocal(filepath.FromSlash(rel)) {
@@ -218,33 +203,17 @@ func addRequiredFiles(localFiles map[string]localFile, localRoot string, require
 		if !fi.Mode().IsRegular() {
 			continue
 		}
-		localFiles[rel] = localFile{
-			relPath:   rel,
-			localPath: p,
-			mtimeNs:   fi.ModTime().UnixNano(),
-			size:      fi.Size(),
-		}
+		localFiles[rel] = fileStamp{mtime: fi.ModTime().Unix(), size: fi.Size()}
 	}
 	return nil
 }
 
-func buildSyncPlan(localFiles map[string]localFile, remoteFiles map[string]remoteEntry) syncPlan {
-	plan := syncPlan{
-		toUpload: []localFile{},
-		toDelete: []string{},
-	}
-
-	localKeys := make([]string, 0, len(localFiles))
-	for rel := range localFiles {
-		localKeys = append(localKeys, rel)
-	}
-	sort.Strings(localKeys)
-
-	for _, rel := range localKeys {
-		lf := localFiles[rel]
+func buildSyncPlan(localFiles, remoteFiles map[string]fileStamp) syncPlan {
+	var plan syncPlan
+	for rel, local := range localFiles {
 		remote, ok := remoteFiles[rel]
-		if !ok || shouldUpload(lf, remote) {
-			plan.toUpload = append(plan.toUpload, lf)
+		if !ok || local.size != remote.size || local.mtime > remote.mtime {
+			plan.toUpload = append(plan.toUpload, rel)
 		}
 	}
 
@@ -253,25 +222,18 @@ func buildSyncPlan(localFiles map[string]localFile, remoteFiles map[string]remot
 			plan.toDelete = append(plan.toDelete, rel)
 		}
 	}
+	sort.Strings(plan.toUpload)
 	sort.Strings(plan.toDelete)
 
 	return plan
 }
 
-func shouldUpload(local localFile, remote remoteEntry) bool {
-	if local.size != remote.size {
-		return true
-	}
-	// Compare whole seconds; subsecond differences do not trigger an upload.
-	return local.mtimeNs/1_000_000_000 > remote.mtimeNs/1_000_000_000
-}
-
-func streamTarUpload(ctx context.Context, client *kube.Client, projectName string, files []localFile) error {
+func streamTarUpload(ctx context.Context, client *kube.Client, projectName, localRoot string, files []string) error {
 	pr, pw := io.Pipe()
 	errCh := make(chan error, 1)
 
 	go func() {
-		errCh <- writeTarStream(pw, projectName, files)
+		errCh <- writeTarStream(pw, projectName, localRoot, files)
 	}()
 
 	_, stderr, execErr := execInBuildPod(ctx, client, []string{
@@ -289,7 +251,7 @@ func streamTarUpload(ctx context.Context, client *kube.Client, projectName strin
 	return nil
 }
 
-func writeTarStream(pw *io.PipeWriter, projectName string, files []localFile) (err error) {
+func writeTarStream(pw *io.PipeWriter, projectName, localRoot string, files []string) (err error) {
 	gzw := gzip.NewWriter(pw)
 	tw := tar.NewWriter(gzw)
 	defer func() {
@@ -297,38 +259,39 @@ func writeTarStream(pw *io.PipeWriter, projectName string, files []localFile) (e
 		_ = pw.CloseWithError(err)
 	}()
 
-	for _, f := range files {
-		fi, err := os.Lstat(f.localPath)
+	for _, rel := range files {
+		localPath := filepath.Join(localRoot, filepath.FromSlash(rel))
+		fi, err := os.Lstat(localPath)
 		if err != nil {
-			return fmt.Errorf("stat upload file %s: %w", f.relPath, err)
+			return fmt.Errorf("stat upload file %s: %w", rel, err)
 		}
 
 		linkTarget := ""
 		if fi.Mode()&os.ModeSymlink != 0 {
-			linkTarget, err = os.Readlink(f.localPath)
+			linkTarget, err = os.Readlink(localPath)
 			if err != nil {
-				return fmt.Errorf("read symlink %s: %w", f.relPath, err)
+				return fmt.Errorf("read symlink %s: %w", rel, err)
 			}
 		}
 
 		hdr, err := tar.FileInfoHeader(fi, linkTarget)
 		if err != nil {
-			return fmt.Errorf("create tar header %s: %w", f.relPath, err)
+			return fmt.Errorf("create tar header %s: %w", rel, err)
 		}
-		hdr.Name = path.Join(projectName, f.relPath)
+		hdr.Name = path.Join(projectName, rel)
 		hdr.Mode = int64(fi.Mode().Perm())
 		if err := tw.WriteHeader(hdr); err != nil {
-			return fmt.Errorf("write tar header %s: %w", f.relPath, err)
+			return fmt.Errorf("write tar header %s: %w", rel, err)
 		}
 
 		if fi.Mode().IsRegular() {
-			r, err := os.Open(f.localPath)
+			r, err := os.Open(localPath)
 			if err != nil {
-				return fmt.Errorf("open upload file %s: %w", f.relPath, err)
+				return fmt.Errorf("open upload file %s: %w", rel, err)
 			}
 			if _, err := io.Copy(tw, r); err != nil {
 				_ = r.Close()
-				return fmt.Errorf("write tar payload %s: %w", f.relPath, err)
+				return fmt.Errorf("write tar payload %s: %w", rel, err)
 			}
 			_ = r.Close()
 		}
@@ -359,9 +322,9 @@ func deleteRemoteFiles(ctx context.Context, client *kube.Client, remoteRoot stri
 }
 
 // parses "<mtime seconds> <size> <absolute path>" lines and keys them by path
-func parseRemoteStatOutput(output string, remoteRoot string) map[string]remoteEntry {
+func parseRemoteStatOutput(output string, remoteRoot string) map[string]fileStamp {
 	prefix := path.Clean(remoteRoot) + "/"
-	entries := map[string]remoteEntry{}
+	entries := map[string]fileStamp{}
 	for line := range strings.SplitSeq(output, "\n") {
 		parts := strings.SplitN(line, " ", 3)
 		if len(parts) != 3 {
@@ -380,16 +343,7 @@ func parseRemoteStatOutput(output string, remoteRoot string) map[string]remoteEn
 		if err != nil {
 			continue
 		}
-		entries[rel] = remoteEntry{mtimeNs: mtimeSec * 1_000_000_000, size: size}
+		entries[rel] = fileStamp{mtime: mtimeSec, size: size}
 	}
 	return entries
-}
-
-func isMissingRemoteDirectory(stderr string, execErr error) bool {
-	if execErr == nil {
-		return false
-	}
-	msg := strings.ToLower(stderr + " " + execErr.Error())
-	return strings.Contains(msg, "no such file or directory") ||
-		strings.Contains(msg, "cannot access")
 }

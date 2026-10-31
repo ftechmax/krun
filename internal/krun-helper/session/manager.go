@@ -221,22 +221,13 @@ func (m *Manager) teardown(session *Session) error {
 	return nil
 }
 
-// DesiredHosts returns the full hosts block for all stored sessions.
-func (m *Manager) DesiredHosts() []contracts.HostsEntry {
-	return m.HostsSnapshot().Entries
-}
-
 // HostsSnapshot returns the full hosts block for all stored sessions and the
 // revision it belongs to, read under one lock.
 func (m *Manager) HostsSnapshot() contracts.HostsSnapshot {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	contexts := make([]config.Service, 0, len(m.sessions))
-	for _, session := range m.sessions {
-		contexts = append(contexts, session.Context)
-	}
-	return contracts.HostsSnapshot{Entries: mergeHostEntries(contexts), Revision: m.hostsRevision}
+	return contracts.HostsSnapshot{Entries: mergeHostEntries(m.sessions), Revision: m.hostsRevision}
 }
 
 func (m *Manager) session(key string) (*Session, bool) {

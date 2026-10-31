@@ -6,11 +6,9 @@ package managerclient
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/ftechmax/krun/internal/config"
@@ -52,21 +50,12 @@ func (c *Client) CreateSession(serviceContext config.Service) (contracts.DebugSe
 		ServicePort: serviceContext.ContainerPort,
 	}
 
-	session, err := do[contracts.DebugSession](c, http.MethodPost, "/v1/sessions", request)
-	if err != nil {
-		return contracts.DebugSession{}, fmt.Errorf("create manager session: %w", err)
-	}
-	return session, nil
+	return do[contracts.DebugSession](c, http.MethodPost, "/v1/sessions", request)
 }
 
 func (c *Client) DeleteSession(sessionID string) error {
 	_, err := do[struct{}](c, http.MethodDelete, "/v1/sessions/"+sessionID, nil)
-	// A session the manager no longer knows about is already in the state we
-	// are asking for.
-	if err == nil || errors.Is(err, errNotFound) {
-		return nil
-	}
-	return fmt.Errorf("delete manager session %q: %w", sessionID, err)
+	return err
 }
 
 func (c *Client) Health() (string, error) {
@@ -75,8 +64,6 @@ func (c *Client) Health() (string, error) {
 	}](c, http.MethodGet, "/healthz", nil)
 	return health.Version, err
 }
-
-var errNotFound = errors.New("not found")
 
 func do[T any](c *Client, method string, path string, payload any) (T, error) {
 	var result T
@@ -108,32 +95,21 @@ func do[T any](c *Client, method string, path string, payload any) (T, error) {
 	}
 	defer response.Body.Close()
 
-	responseBody, err := io.ReadAll(response.Body)
-	if err != nil {
-		return result, fmt.Errorf("read response: %w", err)
-	}
-
-	if response.StatusCode == http.StatusNotFound {
-		return result, errNotFound
+	// A missing session is already deleted; successful deletes have no body.
+	if response.StatusCode == http.StatusNoContent || (method == http.MethodDelete && response.StatusCode == http.StatusNotFound) {
+		return result, nil
 	}
 	if response.StatusCode >= 400 {
-		return result, fmt.Errorf("manager responded %d: %s", response.StatusCode, managerErrorMessage(responseBody))
-	}
-
-	if len(responseBody) > 0 {
-		if err := json.Unmarshal(responseBody, &result); err != nil {
-			return result, fmt.Errorf("decode response: %w", err)
+		var failure struct {
+			Message string `json:"message"`
 		}
+		if err := json.NewDecoder(response.Body).Decode(&failure); err != nil {
+			return result, fmt.Errorf("manager responded %s", response.Status)
+		}
+		return result, fmt.Errorf("manager responded %d: %s", response.StatusCode, failure.Message)
+	}
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		return result, fmt.Errorf("decode response: %w", err)
 	}
 	return result, nil
-}
-
-func managerErrorMessage(body []byte) string {
-	var payload struct {
-		Message string `json:"message"`
-	}
-	if err := json.Unmarshal(body, &payload); err == nil && strings.TrimSpace(payload.Message) != "" {
-		return payload.Message
-	}
-	return strings.TrimSpace(string(body))
 }

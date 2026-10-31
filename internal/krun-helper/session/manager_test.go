@@ -19,8 +19,8 @@ func TestEnableAppliesHostsPortForwardsAndStream(t *testing.T) {
 	}
 
 	wantHosts := []contracts.HostsEntry{{IP: "127.0.0.1", Hostname: "rabbitmq.default.svc"}}
-	if !slices.Equal(env.manager.DesiredHosts(), wantHosts) {
-		t.Fatalf("unexpected desired hosts entries: %+v", env.manager.DesiredHosts())
+	if !slices.Equal(env.manager.HostsSnapshot().Entries, wantHosts) {
+		t.Fatalf("unexpected desired hosts entries: %+v", env.manager.HostsSnapshot().Entries)
 	}
 
 	if env.forwards.upsertCalls != 1 {
@@ -63,8 +63,8 @@ func TestEnableRollsBackWhenManagerCreateFails(t *testing.T) {
 	if env.forwards.removeCalls != 1 {
 		t.Fatalf("expected the port-forwards to be rolled back, got %d remove calls", env.forwards.removeCalls)
 	}
-	if len(env.manager.DesiredHosts()) != 0 {
-		t.Fatalf("a rolled-back session must leave no desired hosts, got %+v", env.manager.DesiredHosts())
+	if len(env.manager.HostsSnapshot().Entries) != 0 {
+		t.Fatalf("a rolled-back session must leave no desired hosts, got %+v", env.manager.HostsSnapshot().Entries)
 	}
 	if len(env.manager.List()) != 0 {
 		t.Fatalf("expected no registered session after rollback, got %+v", env.manager.List())
@@ -81,8 +81,8 @@ func TestEnableRollsBackWhenPortForwardUpdateFails(t *testing.T) {
 	if env.api.createCalls != 0 {
 		t.Fatal("manager session must not be created after the forward update fails")
 	}
-	if len(env.manager.DesiredHosts()) != 0 {
-		t.Fatalf("a failed enable must leave no desired hosts, got %+v", env.manager.DesiredHosts())
+	if len(env.manager.HostsSnapshot().Entries) != 0 {
+		t.Fatalf("a failed enable must leave no desired hosts, got %+v", env.manager.HostsSnapshot().Entries)
 	}
 }
 
@@ -161,8 +161,8 @@ func TestEnableReplacementUpdatesDependenciesWithoutPreemptiveRemove(t *testing.
 		t.Fatalf("replacement forwards = %+v, want %+v", env.forwards.lastForwards, wantForwards)
 	}
 	wantHosts := []contracts.HostsEntry{{IP: "127.0.0.1", Hostname: "redis.default.svc"}}
-	if !slices.Equal(env.manager.DesiredHosts(), wantHosts) {
-		t.Fatalf("replacement desired hosts = %+v, want %+v", env.manager.DesiredHosts(), wantHosts)
+	if !slices.Equal(env.manager.HostsSnapshot().Entries, wantHosts) {
+		t.Fatalf("replacement desired hosts = %+v, want %+v", env.manager.HostsSnapshot().Entries, wantHosts)
 	}
 }
 
@@ -180,8 +180,8 @@ func TestEnableReplacementUpsertFailureCleansPreservedLocalState(t *testing.T) {
 	if env.forwards.removeCalls != 1 {
 		t.Fatalf("preserved forwards were not cleaned, got %d remove calls", env.forwards.removeCalls)
 	}
-	if len(env.manager.DesiredHosts()) != 0 {
-		t.Fatalf("replacement rollback left desired hosts: %+v", env.manager.DesiredHosts())
+	if len(env.manager.HostsSnapshot().Entries) != 0 {
+		t.Fatalf("replacement rollback left desired hosts: %+v", env.manager.HostsSnapshot().Entries)
 	}
 	if sessions := env.manager.List(); len(sessions) != 0 {
 		t.Fatalf("clean rollback left a tracked session: %+v", sessions)
@@ -258,8 +258,8 @@ func TestDisableRemovesOnlyItsOwnState(t *testing.T) {
 	// The hosts file holds one block for every session, so disabling one must
 	// leave the other's entries in place.
 	wantHosts := []contracts.HostsEntry{{IP: "127.0.0.1", Hostname: "redis.default.svc"}}
-	if !slices.Equal(env.manager.DesiredHosts(), wantHosts) {
-		t.Fatalf("unexpected desired hosts after disable: %+v", env.manager.DesiredHosts())
+	if !slices.Equal(env.manager.HostsSnapshot().Entries, wantHosts) {
+		t.Fatalf("unexpected desired hosts after disable: %+v", env.manager.HostsSnapshot().Entries)
 	}
 	if env.forwards.lastKey != "proj-a/svc-a" {
 		t.Fatalf("expected port-forwards removed for proj-a/svc-a, got %q", env.forwards.lastKey)
@@ -334,8 +334,8 @@ func TestCloseReleasesLocalStateAndLeavesManagerSessions(t *testing.T) {
 	if env.forwards.clearCalls != 1 {
 		t.Fatalf("expected the port-forwards to be cleared, got %d", env.forwards.clearCalls)
 	}
-	if len(env.manager.DesiredHosts()) != 0 {
-		t.Fatalf("Close must leave no desired hosts, got %+v", env.manager.DesiredHosts())
+	if len(env.manager.HostsSnapshot().Entries) != 0 {
+		t.Fatalf("Close must leave no desired hosts, got %+v", env.manager.HostsSnapshot().Entries)
 	}
 	// Helper shutdown only owns local cleanup; manager-side cleanup happens on
 	// replacement or when the manager next starts.
@@ -393,9 +393,9 @@ func TestCloseWaitsForEnableThenCleansItsResources(t *testing.T) {
 		t.Fatalf("enable failed: %v", err)
 	}
 	<-closeDone
-	if env.lastAttach.closes != 1 || env.forwards.clearCalls != 1 || len(env.manager.DesiredHosts()) != 0 {
+	if env.lastAttach.closes != 1 || env.forwards.clearCalls != 1 || len(env.manager.HostsSnapshot().Entries) != 0 {
 		t.Fatalf("Close did not clean completed Enable: stream=%d clear=%d desiredHosts=%+v",
-			env.lastAttach.closes, env.forwards.clearCalls, env.manager.DesiredHosts())
+			env.lastAttach.closes, env.forwards.clearCalls, env.manager.HostsSnapshot().Entries)
 	}
 }
 
@@ -419,14 +419,14 @@ func TestPortForwardsForResolvesTargets(t *testing.T) {
 }
 
 func TestMergeHostEntriesIncludesAliasesAndDeduplicates(t *testing.T) {
-	entries := mergeHostEntries([]config.Service{
-		{ServiceDependencies: []config.ServiceDependency{
+	entries := mergeHostEntries(map[string]*Session{
+		"a": {Context: config.Service{ServiceDependencies: []config.ServiceDependency{
 			{Host: "mongo.default.svc", Port: 27017, Aliases: []string{"mongodb-server-0.mongo.default.svc.cluster.local"}},
-		}},
-		{ServiceDependencies: []config.ServiceDependency{
+		}}},
+		"b": {Context: config.Service{ServiceDependencies: []config.ServiceDependency{
 			{Host: "mongo.default.svc", Port: 27017},
 			{Host: " ", Port: 1},
-		}},
+		}}},
 	})
 
 	want := []contracts.HostsEntry{

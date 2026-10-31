@@ -33,10 +33,7 @@ var excludedVars = map[string]bool{
 }
 
 func CreateEnvFile(service cfg.Service, config cfg.Config, containerName string) error {
-	dir, err := serviceDir(service, config)
-	if err != nil {
-		return err
-	}
+	dir := serviceDir(service, config)
 
 	namespace := service.Namespace
 
@@ -64,12 +61,7 @@ func CreateEnvFile(service cfg.Service, config cfg.Config, containerName string)
 }
 
 func RemoveEnvFile(service cfg.Service, config cfg.Config) error {
-	dir, err := serviceDir(service, config)
-	if err != nil {
-		return err
-	}
-
-	if err := os.Remove(filepath.Join(dir, ".env")); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(filepath.Join(serviceDir(service, config), ".env")); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove .env file: %w", err)
 	}
 	return nil
@@ -115,20 +107,8 @@ func writeDotEnv(dir, contents string) error {
 	return file.Close()
 }
 
-func serviceDir(service cfg.Service, config cfg.Config) (string, error) {
-	baseDir := config.KrunConfig.Path
-	if service.Project != "" && config.ProjectPaths != nil {
-		if rel, ok := config.ProjectPaths[service.Project]; ok && rel != "" {
-			baseDir = filepath.Join(baseDir, filepath.FromSlash(rel))
-		}
-	}
-	if strings.TrimSpace(baseDir) == "" {
-		return "", fmt.Errorf("project path not available for service %s", service.Name)
-	}
-	if strings.TrimSpace(service.Path) != "" {
-		baseDir = filepath.Join(baseDir, filepath.FromSlash(service.Path))
-	}
-	return baseDir, nil
+func serviceDir(service cfg.Service, config cfg.Config) string {
+	return filepath.Join(config.Path, config.ProjectPaths[service.Project], service.Path)
 }
 
 func findRunningPod(ctx context.Context, client *kube.Client, namespace, serviceName string) (*corev1.Pod, error) {

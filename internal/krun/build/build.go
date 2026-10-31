@@ -32,11 +32,7 @@ func Build(projectName string, servicesToBuild []cfg.Service, skipWeb bool, forc
 		return fmt.Errorf("start build container: %w", err)
 	}
 
-	projectPath := config.ProjectPaths[projectName]
-	if projectPath == "" {
-		projectPath = projectName
-	}
-	localRoot := filepath.Join(config.KrunSourceConfig.Path, filepath.FromSlash(projectPath))
+	localRoot := filepath.Join(config.Path, config.ProjectPaths[projectName])
 
 	var services []cfg.Service
 	for _, s := range servicesToBuild {
