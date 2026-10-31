@@ -1,7 +1,6 @@
 package hostfile
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,15 +17,7 @@ const (
 
 var hostsFilePathResolver = defaultHostsFilePath
 
-// File is the machine's hosts file as a value, so callers can depend on the
-// behaviour rather than on this package's functions.
-type File struct{}
-
-func (File) Write(entries []contracts.HostsEntry) error { return update(entries) }
-
-func (File) Remove() error { return remove() }
-
-func update(entries []contracts.HostsEntry) error {
+func Write(entries []contracts.HostsEntry) error {
 	if err := Validate(entries); err != nil {
 		return err
 	}
@@ -63,7 +54,7 @@ func update(entries []contracts.HostsEntry) error {
 	return writeHosts(path, result)
 }
 
-func remove() error {
+func Remove() error {
 	path, err := hostsFilePathResolver()
 	if err != nil {
 		return err
@@ -105,34 +96,22 @@ func writeHosts(path string, content string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create temp hosts file: %w", err)
 	}
+	defer tempFile.Close()
 	tempName := tempFile.Name()
 	defer os.Remove(tempName)
 
 	if _, err := tempFile.WriteString(content); err != nil {
-		closeErr := tempFile.Close()
-		if closeErr != nil {
-			closeErr = fmt.Errorf("failed to close temp hosts file: %w", closeErr)
-		}
-		return errors.Join(fmt.Errorf("failed to write temp hosts file: %w", err), closeErr)
+		return fmt.Errorf("failed to write temp hosts file: %w", err)
 	}
 	if err := tempFile.Chmod(perm); err != nil {
-		closeErr := tempFile.Close()
-		if closeErr != nil {
-			closeErr = fmt.Errorf("failed to close temp hosts file: %w", closeErr)
-		}
-		return errors.Join(fmt.Errorf("failed to set temp hosts file permissions: %w", err), closeErr)
+		return fmt.Errorf("failed to set temp hosts file permissions: %w", err)
 	}
 	if err := tempFile.Close(); err != nil {
 		return fmt.Errorf("failed to close temp hosts file: %w", err)
 	}
 
 	if err := os.Rename(tempName, path); err != nil {
-		if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
-			return fmt.Errorf("failed to replace hosts file: %w", err)
-		}
-		if retryErr := os.Rename(tempName, path); retryErr != nil {
-			return fmt.Errorf("failed to replace hosts file: %w", retryErr)
-		}
+		return fmt.Errorf("replace hosts file: %w", err)
 	}
 
 	return nil
@@ -175,9 +154,6 @@ func buildKrunBlock(entries []contracts.HostsEntry, newline string) string {
 	for _, entry := range entries {
 		hostname := strings.TrimSpace(entry.Hostname)
 		ip := strings.TrimSpace(entry.IP)
-		if hostname == "" || ip == "" {
-			continue
-		}
 		builder.WriteString(ip)
 		builder.WriteString("\t")
 		builder.WriteString(hostname)

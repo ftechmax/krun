@@ -5,7 +5,6 @@ package managerclient
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ftechmax/krun/internal/config"
 	"github.com/ftechmax/krun/internal/contracts"
 )
 
@@ -38,38 +38,19 @@ type Client struct {
 	http      *http.Client
 }
 
-func NewSessionClient(baseURL string, authToken string) (*Client, error) {
-	trimmedBaseURL := strings.TrimRight(strings.TrimSpace(baseURL), "/")
-	if trimmedBaseURL == "" {
-		return nil, errors.New("manager base URL is required")
-	}
-	trimmedToken := strings.TrimSpace(authToken)
-	if trimmedToken == "" {
-		return nil, errors.New("manager auth token is required")
-	}
+func NewSessionClient(baseURL string, authToken string) *Client {
 	return &Client{
-		baseURL:   trimmedBaseURL,
-		authToken: trimmedToken,
+		baseURL:   baseURL,
+		authToken: authToken,
 		http:      &http.Client{Timeout: requestTimeout},
-	}, nil
+	}
 }
 
-func (c *Client) CreateSession(serviceContext contracts.DebugServiceContext) (contracts.DebugSession, error) {
-	serviceName := strings.TrimSpace(serviceContext.ServiceName)
-	if serviceName == "" {
-		return contracts.DebugSession{}, errors.New("create manager session: service_name is required")
-	}
-	if serviceContext.ContainerPort <= 0 {
-		return contracts.DebugSession{}, errors.New("create manager session: service_port must be greater than 0")
-	}
-	if serviceContext.InterceptPort <= 0 {
-		return contracts.DebugSession{}, errors.New("create manager session: local_port must be greater than 0")
-	}
-
+func (c *Client) CreateSession(serviceContext config.Service) (contracts.DebugSession, error) {
 	request := contracts.CreateDebugSessionRequest{
-		Namespace:   normalizeNamespace(serviceContext.Namespace),
-		ServiceName: serviceName,
-		Workload:    serviceName,
+		Namespace:   serviceContext.Namespace,
+		ServiceName: serviceContext.Name,
+		Workload:    serviceContext.Name,
 		ServicePort: serviceContext.ContainerPort,
 		LocalPort:   serviceContext.InterceptPort,
 		ClientID:    managerClientID,
@@ -79,70 +60,30 @@ func (c *Client) CreateSession(serviceContext contracts.DebugServiceContext) (co
 	if err != nil {
 		return contracts.DebugSession{}, fmt.Errorf("create manager session: %w", err)
 	}
-	if strings.TrimSpace(session.SessionID) == "" {
-		return contracts.DebugSession{}, errors.New("create manager session: empty session id")
-	}
 	return session, nil
 }
 
 func (c *Client) DeleteSession(sessionID string) error {
-	trimmedSessionID := strings.TrimSpace(sessionID)
-	if trimmedSessionID == "" {
-		return nil
-	}
-
-	_, err := do[struct{}](c, http.MethodDelete, "/v1/sessions/"+trimmedSessionID, nil)
+	_, err := do[struct{}](c, http.MethodDelete, "/v1/sessions/"+sessionID, nil)
 	// A session the manager no longer knows about is already in the state we
 	// are asking for.
 	if err == nil || errors.Is(err, errNotFound) {
 		return nil
 	}
-	return fmt.Errorf("delete manager session %q: %w", trimmedSessionID, err)
+	return fmt.Errorf("delete manager session %q: %w", sessionID, err)
 }
 
-// Health reports the manager's build version. It deliberately skips the
-// shared auth token: /healthz is intentionally unauthenticated.
 func (c *Client) Health() (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
-	defer cancel()
-
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/healthz", nil)
-	if err != nil {
-		return "", err
-	}
-	response, err := c.http.Do(request)
-	if err != nil {
-		return "", err
-	}
-	defer response.Body.Close()
-
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
-		return "", fmt.Errorf("read health response: %w", err)
-	}
-	if response.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("manager health responded %d: %s", response.StatusCode, managerErrorMessage(body))
-	}
-
-	var health struct {
+	health, err := do[struct {
 		Version string `json:"version"`
-	}
-	if err := json.Unmarshal(body, &health); err != nil {
-		return "", fmt.Errorf("decode health response: %w", err)
-	}
-	if strings.TrimSpace(health.Version) == "" {
-		return "", errors.New("manager reported no version")
-	}
-	return health.Version, nil
+	}](c, http.MethodGet, "/healthz", nil)
+	return health.Version, err
 }
 
 var errNotFound = errors.New("not found")
 
 func do[T any](c *Client, method string, path string, payload any) (T, error) {
 	var result T
-
-	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
-	defer cancel()
 
 	var body io.Reader
 	if payload != nil {
@@ -153,7 +94,7 @@ func do[T any](c *Client, method string, path string, payload any) (T, error) {
 		body = bytes.NewReader(encoded)
 	}
 
-	request, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
+	request, err := http.NewRequest(method, c.baseURL+path, body)
 	if err != nil {
 		return result, err
 	}
@@ -161,7 +102,9 @@ func do[T any](c *Client, method string, path string, payload any) (T, error) {
 		request.Header.Set("Content-Type", "application/json")
 	}
 
-	request.Header.Set(authTokenHeader, c.authToken)
+	if path != "/healthz" {
+		request.Header.Set(authTokenHeader, c.authToken)
+	}
 
 	response, err := c.http.Do(request)
 	if err != nil {
@@ -197,11 +140,4 @@ func managerErrorMessage(body []byte) string {
 		return payload.Message
 	}
 	return strings.TrimSpace(string(body))
-}
-
-func normalizeNamespace(namespace string) string {
-	if trimmed := strings.TrimSpace(namespace); trimmed != "" {
-		return trimmed
-	}
-	return "default"
 }

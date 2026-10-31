@@ -1,40 +1,16 @@
 package session
 
 import (
-	"net"
 	"slices"
 	"strings"
 
+	"github.com/ftechmax/krun/internal/config"
 	"github.com/ftechmax/krun/internal/contracts"
 )
 
-const defaultNamespace = "default"
-
-// resolveKey names a session. An explicit key wins; otherwise the key is
-// derived from the project and service so two projects can debug services of
-// the same name without colliding.
-func resolveKey(sessionKey string, project string, serviceName string) string {
-	if trimmed := strings.TrimSpace(sessionKey); trimmed != "" {
-		return trimmed
-	}
-
-	trimmedProject := strings.TrimSpace(project)
-	trimmedService := strings.TrimSpace(serviceName)
-	switch {
-	case trimmedProject == "" && trimmedService == "":
-		return ""
-	case trimmedProject == "":
-		return trimmedService
-	case trimmedService == "":
-		return trimmedProject
-	default:
-		return trimmedProject + "/" + trimmedService
-	}
-}
-
 // mergeHostEntries collects every dependency hostname across the given
 // sessions into one sorted, deduplicated block pointing at localhost.
-func mergeHostEntries(contexts []contracts.DebugServiceContext) []contracts.HostsEntry {
+func mergeHostEntries(contexts []config.Service) []contracts.HostsEntry {
 	entries := make([]contracts.HostsEntry, 0)
 	seen := map[string]bool{}
 
@@ -57,9 +33,6 @@ func mergeHostEntries(contexts []contracts.DebugServiceContext) []contracts.Host
 	}
 
 	slices.SortFunc(entries, func(a, b contracts.HostsEntry) int {
-		if a.Hostname == b.Hostname {
-			return strings.Compare(a.IP, b.IP)
-		}
 		return strings.Compare(a.Hostname, b.Hostname)
 	})
 	return entries
@@ -68,26 +41,17 @@ func mergeHostEntries(contexts []contracts.DebugServiceContext) []contracts.Host
 // portForwardsFor turns a service's declared dependencies into the local
 // port-forwards the app needs while it runs outside the cluster. Local and
 // remote ports match so connection strings work unchanged.
-func portForwardsFor(serviceContext contracts.DebugServiceContext) []contracts.PortForward {
+func portForwardsFor(serviceContext config.Service) []contracts.PortForward {
 	forwards := make([]contracts.PortForward, 0, len(serviceContext.ServiceDependencies))
-	seen := map[contracts.PortForward]bool{}
 
 	for _, dependency := range serviceContext.ServiceDependencies {
 		serviceName, namespace := dependencyServiceTarget(dependency)
-		if serviceName == "" || dependency.Port <= 0 {
-			continue
-		}
-
 		forward := contracts.PortForward{
 			Namespace:  namespace,
 			Service:    serviceName,
 			LocalPort:  dependency.Port,
 			RemotePort: dependency.Port,
 		}
-		if seen[forward] {
-			continue
-		}
-		seen[forward] = true
 		forwards = append(forwards, forward)
 	}
 
@@ -97,26 +61,20 @@ func portForwardsFor(serviceContext contracts.DebugServiceContext) []contracts.P
 // dependencyServiceTarget resolves the Kubernetes service and namespace to
 // forward, preferring explicit fields and otherwise reading them out of a
 // cluster DNS name such as "rabbitmq.default.svc".
-func dependencyServiceTarget(dependency contracts.DebugServiceDependencyContext) (string, string) {
+func dependencyServiceTarget(dependency config.ServiceDependency) (string, string) {
 	serviceName := strings.TrimSpace(dependency.Service)
 	namespace := strings.TrimSpace(dependency.Namespace)
 	host := strings.TrimSpace(dependency.Host)
 
-	if host != "" {
-		if parsedHost, _, err := net.SplitHostPort(host); err == nil {
-			host = parsedHost
-		}
-	}
-
 	hostParts := strings.Split(host, ".")
-	if serviceName == "" && len(hostParts) > 0 {
+	if serviceName == "" {
 		serviceName = strings.TrimSpace(hostParts[0])
 	}
 	if namespace == "" && len(hostParts) >= 3 && strings.TrimSpace(hostParts[2]) == "svc" {
 		namespace = strings.TrimSpace(hostParts[1])
 	}
 	if namespace == "" {
-		namespace = defaultNamespace
+		namespace = "default"
 	}
 
 	return serviceName, namespace

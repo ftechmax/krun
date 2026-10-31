@@ -15,8 +15,8 @@ import (
 func newTestRegistry() (*SessionRegistry, *startTracker) {
 	tracker := &startTracker{}
 	r := &SessionRegistry{
-		sessions: map[string]map[string]*forwardHandle{},
-		shared:   map[string]*sharedForward{},
+		sessions: map[string]map[contracts.PortForward]*forwardHandle{},
+		shared:   map[contracts.PortForward]*sharedForward{},
 	}
 	r.startForwardFn = tracker.start
 	return r, tracker
@@ -65,16 +65,13 @@ func TestSelectPodForPortForwardPrefersReadyRunning(t *testing.T) {
 	}
 }
 
-func TestSelectPodForPortForwardFallsBackToPending(t *testing.T) {
-	pod, err := selectPodForPortForward([]corev1.Pod{
+func TestSelectPodForPortForwardRequiresRunningPod(t *testing.T) {
+	_, err := selectPodForPortForward([]corev1.Pod{
 		makePod("done", corev1.PodSucceeded, true),
 		makePod("starting", corev1.PodPending, false),
 	})
-	if err != nil {
-		t.Fatalf("select pod: %v", err)
-	}
-	if pod.Name != "starting" {
-		t.Fatalf("expected starting, got %s", pod.Name)
+	if err == nil {
+		t.Fatal("expected an error when no pod is running")
 	}
 }
 
@@ -112,7 +109,7 @@ func TestResolveServiceTargetPortUsesNamedTargetPort(t *testing.T) {
 	}
 }
 
-func TestResolveServiceTargetPortFallsBackToRequestedPort(t *testing.T) {
+func TestResolveServiceTargetPortRejectsMissingServicePort(t *testing.T) {
 	service := corev1.Service{
 		Spec: corev1.ServiceSpec{
 			Ports: []corev1.ServicePort{
@@ -124,12 +121,8 @@ func TestResolveServiceTargetPortFallsBackToRequestedPort(t *testing.T) {
 		},
 	}
 
-	targetPort, err := resolveServiceTargetPort(service, corev1.Pod{}, 9090)
-	if err != nil {
-		t.Fatalf("resolve target port: %v", err)
-	}
-	if targetPort != 9090 {
-		t.Fatalf("expected 9090, got %d", targetPort)
+	if _, err := resolveServiceTargetPort(service, corev1.Pod{}, 9090); err == nil {
+		t.Fatal("expected an error for a port the service does not expose")
 	}
 }
 
@@ -147,8 +140,39 @@ func TestUpsertSharesForwardAcrossSessions(t *testing.T) {
 	if tracker.count() != 1 {
 		t.Fatalf("expected 1 startForward call, got %d", tracker.count())
 	}
-	if r.shared[portForwardKey(redis[0])].refCount != 2 {
-		t.Fatalf("expected refCount 2, got %d", r.shared[portForwardKey(redis[0])].refCount)
+	if r.shared[redis[0]].refCount != 2 {
+		t.Fatalf("expected refCount 2, got %d", r.shared[redis[0]].refCount)
+	}
+}
+
+func TestUpsertDeduplicatesWithinSession(t *testing.T) {
+	r, tracker := newTestRegistry()
+	redis := makeForward("default", "redis", 6379)
+	if err := r.Upsert("session-a", []contracts.PortForward{redis, redis}); err != nil {
+		t.Fatal(err)
+	}
+	if tracker.count() != 1 || r.shared[redis].refCount != 1 {
+		t.Fatal("duplicate dependency acquired the forward twice")
+	}
+	r.Remove("session-a")
+	if len(r.shared) != 0 {
+		t.Fatal("duplicate dependency left a forward behind")
+	}
+}
+
+func TestBoundLocalPortUsesAllocationForOriginalSpec(t *testing.T) {
+	r, tracker := newTestRegistry()
+	forward := contracts.PortForward{Namespace: "krun-system", Service: "manager", RemotePort: 8080}
+	r.startForwardFn = func(spec contracts.PortForward) (*forwardHandle, error) {
+		handle, err := tracker.start(spec)
+		handle.spec.LocalPort = 39481
+		return handle, err
+	}
+	if err := r.Upsert("manager", []contracts.PortForward{forward}); err != nil {
+		t.Fatal(err)
+	}
+	if port, ok := r.BoundLocalPort("manager", forward); !ok || port != 39481 {
+		t.Fatalf("bound port = %d, found = %v", port, ok)
 	}
 }
 
@@ -159,11 +183,9 @@ func TestRemoveOneSessionKeepsSharedForward(t *testing.T) {
 	r.Upsert("session-a", redis)
 	r.Upsert("session-b", redis)
 
-	if err := r.Remove("session-a"); err != nil {
-		t.Fatalf("remove session-a: %v", err)
-	}
+	r.Remove("session-a")
 
-	key := portForwardKey(redis[0])
+	key := redis[0]
 	sf, ok := r.shared[key]
 	if !ok {
 		t.Fatal("shared forward was removed while session-b still uses it")
@@ -198,9 +220,7 @@ func TestClearStopsAllSharedForwards(t *testing.T) {
 	r.Upsert("session-a", redis)
 	r.Upsert("session-b", rabbit)
 
-	if err := r.Clear(); err != nil {
-		t.Fatalf("clear: %v", err)
-	}
+	r.Clear()
 
 	if len(r.shared) != 0 {
 		t.Fatalf("expected shared map to be empty, got %d entries", len(r.shared))
@@ -235,7 +255,7 @@ func TestUpsertRollsBackSharedRefsOnStartFailure(t *testing.T) {
 	}
 
 	// Redis shared refCount should remain 1 (rolled back).
-	key := portForwardKey(redis)
+	key := redis
 	if r.shared[key].refCount != 1 {
 		t.Fatalf("expected refCount 1 after rollback, got %d", r.shared[key].refCount)
 	}
@@ -255,12 +275,12 @@ func TestUpsertReplacingForwardsReleasesOldShared(t *testing.T) {
 	// Replace session-a's forwards: drop redis, add rabbitmq.
 	r.Upsert("session-a", rabbit)
 
-	redisKey := portForwardKey(redis[0])
+	redisKey := redis[0]
 	if _, ok := r.shared[redisKey]; ok {
 		t.Fatal("redis shared forward should have been cleaned up")
 	}
 
-	rabbitKey := portForwardKey(rabbit[0])
+	rabbitKey := rabbit[0]
 	if _, ok := r.shared[rabbitKey]; !ok {
 		t.Fatal("rabbitmq shared forward should exist")
 	}
@@ -275,7 +295,7 @@ func TestUpsertReplacingForwardsKeepsOverlappingHandle(t *testing.T) {
 	if err := r.Upsert("session-a", []contracts.PortForward{redis, rabbit}); err != nil {
 		t.Fatalf("initial upsert: %v", err)
 	}
-	redisKey := portForwardKey(redis)
+	redisKey := redis
 	originalRedis := r.sessions["session-a"][redisKey]
 
 	if err := r.Upsert("session-a", []contracts.PortForward{redis, postgres}); err != nil {
@@ -287,10 +307,10 @@ func TestUpsertReplacingForwardsKeepsOverlappingHandle(t *testing.T) {
 	if got := r.sessions["session-a"][redisKey]; got != originalRedis {
 		t.Fatal("replacement restarted the overlapping redis forward")
 	}
-	if _, ok := r.shared[portForwardKey(rabbit)]; ok {
+	if _, ok := r.shared[rabbit]; ok {
 		t.Fatal("obsolete rabbitmq forward was retained")
 	}
-	if _, ok := r.shared[portForwardKey(postgres)]; !ok {
+	if _, ok := r.shared[postgres]; !ok {
 		t.Fatal("new postgres forward was not registered")
 	}
 }

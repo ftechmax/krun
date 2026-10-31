@@ -59,13 +59,7 @@ func List(config cfg.Config) {
 	fmt.Println("Active debug sessions")
 	fmt.Println("---------------------")
 	for _, session := range sessions {
-		serviceName := strings.TrimSpace(session.Context.ServiceName)
-		namespace := strings.TrimSpace(session.Context.Namespace)
-		if namespace == "" {
-			namespace = "default"
-		}
-
-		fmt.Printf("Service: %s (namespace: %s)\n", serviceName, namespace)
+		fmt.Printf("Service: %s (namespace: %s)\n", session.Context.Name, session.Context.Namespace)
 		if session.State == contracts.HelperSessionStateCleanupPending {
 			utils.Warnf("State: cleanup pending")
 		}
@@ -76,20 +70,7 @@ func List(config cfg.Config) {
 			fmt.Println("  (none)")
 		} else {
 			for _, dependency := range session.Context.ServiceDependencies {
-				host := strings.TrimSpace(dependency.Host)
-				if host == "" {
-					service := strings.TrimSpace(dependency.Service)
-					dependencyNamespace := strings.TrimSpace(dependency.Namespace)
-					if dependencyNamespace == "" {
-						dependencyNamespace = "default"
-					}
-					if service == "" {
-						host = "(unknown)"
-					} else {
-						host = fmt.Sprintf("%s.%s.svc", service, dependencyNamespace)
-					}
-				}
-				fmt.Printf("  - %s:%d\n", host, dependency.Port)
+				fmt.Printf("  - %s:%d\n", dependency.Host, dependency.Port)
 			}
 		}
 		fmt.Println("")
@@ -102,16 +83,9 @@ func Enable(service cfg.Service, config cfg.Config, containerName string) {
 		return
 	}
 
-	request := contracts.DebugSessionCommandRequest{
-		Context: buildDebugServiceContext(service),
-	}
-	response, err := helperCall[contracts.HelperResponse](http.MethodPost, "/v1/debug/enable", request, commandTimeout)
+	response, err := helperCall[contracts.HelperResponse](http.MethodPost, "/v1/debug/enable", service, commandTimeout)
 	if err != nil {
 		utils.Errf("cannot apply debug enable via helper: %v", err)
-		return
-	}
-	if !response.Success {
-		utils.Errf("helper refused debug enable: %s", response.Message)
 		return
 	}
 
@@ -130,15 +104,9 @@ func Disable(service cfg.Service, config cfg.Config) {
 		return
 	}
 
-	response, err := helperCall[contracts.HelperResponse](http.MethodPost, "/v1/debug/disable", contracts.DebugSessionCommandRequest{
-		Context: buildDebugServiceContext(service),
-	}, commandTimeout)
+	response, err := helperCall[contracts.HelperResponse](http.MethodPost, "/v1/debug/disable", service, commandTimeout)
 	if err != nil {
 		utils.Errf("cannot apply debug disable via helper: %v", err)
-		return
-	}
-	if !response.Success {
-		utils.Errf("helper refused debug disable: %s", response.Message)
 		return
 	}
 
@@ -188,7 +156,7 @@ func HelperStatus(config cfg.Config) {
 		if session.State == contracts.HelperSessionStateCleanupPending {
 			suffix = " [cleanup pending]"
 		}
-		fmt.Printf("  - %s (intercept port %d)%s\n", session.Context.ServiceName, session.Context.InterceptPort, suffix)
+		fmt.Printf("  - %s (intercept port %d)%s\n", session.Context.Name, session.Context.InterceptPort, suffix)
 	}
 }
 
@@ -206,13 +174,9 @@ func HelperStop() {
 		return
 	}
 
-	response, err := helperCall[contracts.HelperResponse](http.MethodPost, "/v1/shutdown", nil, listTimeout)
+	_, err := helperCall[contracts.HelperResponse](http.MethodPost, "/v1/shutdown", nil, listTimeout)
 	if err != nil {
 		utils.Errf("failed to stop helper: %v", err)
-		return
-	}
-	if !response.Success {
-		utils.Errf("helper refused shutdown: %s", response.Message)
 		return
 	}
 
@@ -602,26 +566,4 @@ func ipcCall[T any](client *http.Client, method string, path string, payload any
 func helperListSessions() ([]contracts.HelperDebugSession, error) {
 	response, err := helperCall[contracts.HelperDebugSessionsResponse](http.MethodGet, "/v1/debug/sessions", nil, listTimeout)
 	return response.Sessions, err
-}
-
-func buildDebugServiceContext(service cfg.Service) contracts.DebugServiceContext {
-	dependencies := make([]contracts.DebugServiceDependencyContext, 0, len(service.ServiceDependencies))
-	for _, dependency := range service.ServiceDependencies {
-		dependencies = append(dependencies, contracts.DebugServiceDependencyContext{
-			Host:      dependency.Host,
-			Namespace: dependency.Namespace,
-			Service:   dependency.Service,
-			Port:      dependency.Port,
-			Aliases:   dependency.Aliases,
-		})
-	}
-
-	return contracts.DebugServiceContext{
-		Project:             service.Project,
-		ServiceName:         service.Name,
-		Namespace:           service.Namespace,
-		ContainerPort:       service.ContainerPort,
-		InterceptPort:       service.InterceptPort,
-		ServiceDependencies: dependencies,
-	}
 }

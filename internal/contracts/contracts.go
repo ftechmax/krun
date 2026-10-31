@@ -1,5 +1,7 @@
 package contracts
 
+import "github.com/ftechmax/krun/internal/config"
+
 type DebugSession struct {
 	SessionID    string `json:"session_id"`
 	SessionToken string `json:"session_token,omitempty"`
@@ -66,32 +68,10 @@ type PortForward struct {
 	RemotePort int    `json:"remote_port"`
 }
 
-type DebugServiceDependencyContext struct {
-	Host      string   `json:"host"`
-	Namespace string   `json:"namespace,omitempty"`
-	Service   string   `json:"service,omitempty"`
-	Port      int      `json:"port"`
-	Aliases   []string `json:"aliases,omitempty"`
-}
-
-type DebugServiceContext struct {
-	Project             string                          `json:"project,omitempty"`
-	ServiceName         string                          `json:"service_name"`
-	Namespace           string                          `json:"namespace,omitempty"`
-	ContainerPort       int                             `json:"container_port"`
-	InterceptPort       int                             `json:"intercept_port"`
-	ServiceDependencies []DebugServiceDependencyContext `json:"service_dependencies,omitempty"`
-}
-
-type DebugSessionCommandRequest struct {
-	SessionKey string              `json:"session_key,omitempty"`
-	Context    DebugServiceContext `json:"context"`
-}
-
 type HelperDebugSession struct {
-	SessionKey string              `json:"session_key"`
-	Context    DebugServiceContext `json:"context"`
-	State      string              `json:"state,omitempty"`
+	SessionKey string         `json:"session_key"`
+	Context    config.Service `json:"context"`
+	State      string         `json:"state,omitempty"`
 }
 
 const AgentContainerName = "krun-traffic-agent"

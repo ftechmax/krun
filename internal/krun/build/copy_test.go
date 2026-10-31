@@ -1,10 +1,70 @@
 package build
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestWriteTarStreamFinalizesArchive(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "app.txt")
+	if err := os.WriteFile(filePath, []byte("source contents"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	done := make(chan error, 1)
+	go func() {
+		done <- writeTarStream(writer, "project", []localFile{{relPath: "app.txt", localPath: filePath}})
+	}()
+	compressed, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	unzip, err := gzip.NewReader(bytes.NewReader(compressed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unzip.Close()
+	archive, err := io.ReadAll(unzip) // Also verifies the gzip trailer.
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := tar.NewReader(bytes.NewReader(archive))
+	header, err := entries.Next()
+	if err != nil || header.Name != "project/app.txt" {
+		t.Fatalf("archive header = %+v, err = %v", header, err)
+	}
+	contents, err := io.ReadAll(entries)
+	if err != nil || string(contents) != "source contents" {
+		t.Fatalf("archive contents = %q, err = %v", contents, err)
+	}
+	if _, err := entries.Next(); err != io.EOF {
+		t.Fatalf("archive end = %v, want EOF", err)
+	}
+}
+
+func TestWriteTarStreamPropagatesSourceErrorToReader(t *testing.T) {
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	done := make(chan error, 1)
+	go func() {
+		done <- writeTarStream(writer, "project", []localFile{{relPath: "missing", localPath: filepath.Join(t.TempDir(), "missing")}})
+	}()
+	_, readErr := io.ReadAll(reader)
+	writeErr := <-done
+	if !errors.Is(readErr, os.ErrNotExist) || !errors.Is(writeErr, os.ErrNotExist) {
+		t.Fatalf("reader error = %v, writer error = %v; want missing source", readErr, writeErr)
+	}
+}
 
 func TestBuildSyncPlanCreatePhase(t *testing.T) {
 	local := map[string]localFile{

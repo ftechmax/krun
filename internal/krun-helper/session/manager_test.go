@@ -7,13 +7,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ftechmax/krun/internal/config"
 	"github.com/ftechmax/krun/internal/contracts"
 )
 
 func TestEnableAppliesHostsPortForwardsAndStream(t *testing.T) {
 	env := newTestEnv(t)
 
-	if err := env.manager.Enable("", workerContext()); err != nil {
+	if err := env.manager.Enable(workerContext()); err != nil {
 		t.Fatalf("enable failed: %v", err)
 	}
 
@@ -55,7 +56,7 @@ func TestEnableRollsBackWhenManagerCreateFails(t *testing.T) {
 	env := newTestEnv(t)
 	env.api.createErr = errors.New("manager unavailable")
 
-	if err := env.manager.Enable("", workerContext()); err == nil {
+	if err := env.manager.Enable(workerContext()); err == nil {
 		t.Fatal("expected enable to fail when the manager rejects the session")
 	}
 
@@ -74,7 +75,7 @@ func TestEnableRollsBackWhenPortForwardUpdateFails(t *testing.T) {
 	env := newTestEnv(t)
 	env.forwards.upsertErr = errors.New("forward unavailable")
 
-	if err := env.manager.Enable("", workerContext()); err == nil {
+	if err := env.manager.Enable(workerContext()); err == nil {
 		t.Fatal("expected enable to fail")
 	}
 	if env.api.createCalls != 0 {
@@ -89,7 +90,7 @@ func TestEnableRollsBackManagerSessionWhenStreamAttachFails(t *testing.T) {
 	env := newTestEnv(t)
 	env.attachErr = errors.New("stream refused")
 
-	if err := env.manager.Enable("", workerContext()); err == nil {
+	if err := env.manager.Enable(workerContext()); err == nil {
 		t.Fatal("expected enable to fail when the stream cannot attach")
 	}
 
@@ -113,12 +114,12 @@ func TestEnableReplacesPreviousSession(t *testing.T) {
 	env := newTestEnv(t)
 	env.api.createIDs = []string{"mgr-session-1", "mgr-session-2"}
 
-	if err := env.manager.Enable("", workerContext()); err != nil {
+	if err := env.manager.Enable(workerContext()); err != nil {
 		t.Fatalf("first enable failed: %v", err)
 	}
 	firstStream := env.lastAttach
 
-	if err := env.manager.Enable("", workerContext()); err != nil {
+	if err := env.manager.Enable(workerContext()); err != nil {
 		t.Fatalf("second enable failed: %v", err)
 	}
 
@@ -145,10 +146,10 @@ func TestEnableReplacementUpdatesDependenciesWithoutPreemptiveRemove(t *testing.
 
 	first := dependencyContext("proj", "service", "rabbitmq.default.svc", 5672, 5001)
 	second := dependencyContext("proj", "service", "redis.default.svc", 6379, 5001)
-	if err := env.manager.Enable("", first); err != nil {
+	if err := env.manager.Enable(first); err != nil {
 		t.Fatalf("first enable failed: %v", err)
 	}
-	if err := env.manager.Enable("", second); err != nil {
+	if err := env.manager.Enable(second); err != nil {
 		t.Fatalf("replacement failed: %v", err)
 	}
 
@@ -167,12 +168,12 @@ func TestEnableReplacementUpdatesDependenciesWithoutPreemptiveRemove(t *testing.
 
 func TestEnableReplacementUpsertFailureCleansPreservedLocalState(t *testing.T) {
 	env := newTestEnv(t)
-	if err := env.manager.Enable("", workerContext()); err != nil {
+	if err := env.manager.Enable(workerContext()); err != nil {
 		t.Fatalf("first enable failed: %v", err)
 	}
 
 	env.forwards.upsertErr = errors.New("replacement forward failed")
-	err := env.manager.Enable("", workerContext())
+	err := env.manager.Enable(workerContext())
 	if err == nil || !strings.Contains(err.Error(), "replacement forward failed") {
 		t.Fatalf("expected replacement forward error, got %v", err)
 	}
@@ -187,38 +188,15 @@ func TestEnableReplacementUpsertFailureCleansPreservedLocalState(t *testing.T) {
 	}
 }
 
-func TestEnableReplacementCleanupFailureIsRetryable(t *testing.T) {
-	env := newTestEnv(t)
-	if err := env.manager.Enable("", workerContext()); err != nil {
-		t.Fatalf("first enable failed: %v", err)
-	}
-
-	env.forwards.upsertErr = errors.New("replacement forward failed")
-	env.forwards.removeErr = errors.New("cleanup forward failed")
-	err := env.manager.Enable("", workerContext())
-	if err == nil || !strings.Contains(err.Error(), "rollback failed") {
-		t.Fatalf("expected replacement rollback failure, got %v", err)
-	}
-	sessions := env.manager.List()
-	if len(sessions) != 1 || sessions[0].State != contracts.HelperSessionStateCleanupPending {
-		t.Fatalf("expected cleanup-pending replacement, got %+v", sessions)
-	}
-
-	env.forwards.removeErr = nil
-	if _, err := env.manager.Disable("", workerContext()); err != nil {
-		t.Fatalf("cleanup retry failed: %v", err)
-	}
-}
-
 func TestEnablePreservesPreviousSessionWhenReplacementDeleteFails(t *testing.T) {
 	env := newTestEnv(t)
-	if err := env.manager.Enable("", workerContext()); err != nil {
+	if err := env.manager.Enable(workerContext()); err != nil {
 		t.Fatalf("first enable failed: %v", err)
 	}
 	firstStream := env.lastAttach
 
 	env.api.deleteErr = errors.New("manager unavailable")
-	err := env.manager.Enable("", workerContext())
+	err := env.manager.Enable(workerContext())
 	if err == nil || !strings.Contains(err.Error(), "replace previous manager session") {
 		t.Fatalf("expected replacement delete error, got %v", err)
 	}
@@ -235,77 +213,25 @@ func TestEnablePreservesPreviousSessionWhenReplacementDeleteFails(t *testing.T) 
 }
 
 func TestEnableTracksIncompleteRollbackForDisableRetry(t *testing.T) {
-	tests := []struct {
-		name       string
-		configure  func(*testEnv)
-		makeUsable func(*testEnv)
-	}{
-		{
-			name: "manager session delete",
-			configure: func(env *testEnv) {
-				env.api.deleteErr = errors.New("manager delete failed")
-			},
-			makeUsable: func(env *testEnv) { env.api.deleteErr = nil },
-		},
-		{
-			name: "port-forward remove",
-			configure: func(env *testEnv) {
-				env.forwards.removeErr = errors.New("forward remove failed")
-			},
-			makeUsable: func(env *testEnv) { env.forwards.removeErr = nil },
-		},
-	}
-
-	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			env := newTestEnv(t)
-			env.attachErr = errors.New("stream attach failed")
-			testCase.configure(env)
-
-			err := env.manager.Enable("", workerContext())
-			if err == nil || !strings.Contains(err.Error(), "rollback failed") {
-				t.Fatalf("expected rollback failure, got %v", err)
-			}
-			sessions := env.manager.List()
-			if len(sessions) != 1 || sessions[0].State != contracts.HelperSessionStateCleanupPending {
-				t.Fatalf("expected cleanup-pending session, got %+v", sessions)
-			}
-
-			testCase.makeUsable(env)
-			if _, err := env.manager.Disable("", workerContext()); err != nil {
-				t.Fatalf("cleanup retry failed: %v", err)
-			}
-			if len(env.manager.List()) != 0 {
-				t.Fatalf("cleanup retry left a session: %+v", env.manager.List())
-			}
-		})
-	}
-}
-
-func TestEnableReportsEveryRollbackFailure(t *testing.T) {
 	env := newTestEnv(t)
-	env.attachErr = errors.New("attach failed")
-	env.api.deleteErr = errors.New("delete failed")
-	env.forwards.removeErr = errors.New("remove failed")
+	env.attachErr = errors.New("stream attach failed")
+	env.api.deleteErr = errors.New("manager delete failed")
 
-	err := env.manager.Enable("awesome-app3/orders", dependencyContext(
-		"awesome-app3", "orders", "rabbitmq.default.svc", 5672, 5001,
-	))
-	if err == nil {
-		t.Fatal("expected enable failure")
-	}
-	for _, text := range []string{
-		"manager stream attach failed: attach failed",
-		"delete manager session: delete failed",
-		"remove port-forwards: remove failed",
-	} {
-		if !strings.Contains(err.Error(), text) {
-			t.Fatalf("Enable error %q does not contain %q", err, text)
-		}
+	err := env.manager.Enable(workerContext())
+	if err == nil || !strings.Contains(err.Error(), "rollback failed") {
+		t.Fatalf("expected rollback failure, got %v", err)
 	}
 	sessions := env.manager.List()
 	if len(sessions) != 1 || sessions[0].State != contracts.HelperSessionStateCleanupPending {
 		t.Fatalf("expected cleanup-pending session, got %+v", sessions)
+	}
+
+	env.api.deleteErr = nil
+	if _, err := env.manager.Disable(workerContext()); err != nil {
+		t.Fatalf("cleanup retry failed: %v", err)
+	}
+	if len(env.manager.List()) != 0 {
+		t.Fatalf("cleanup retry left a session: %+v", env.manager.List())
 	}
 }
 
@@ -313,15 +239,15 @@ func TestDisableRemovesOnlyItsOwnState(t *testing.T) {
 	env := newTestEnv(t)
 	env.api.createIDs = []string{"mgr-a", "mgr-b"}
 
-	if err := env.manager.Enable("", dependencyContext("proj-a", "svc-a", "rabbitmq.default.svc", 5672, 5001)); err != nil {
+	if err := env.manager.Enable(dependencyContext("proj-a", "svc-a", "rabbitmq.default.svc", 5672, 5001)); err != nil {
 		t.Fatalf("enable svc-a failed: %v", err)
 	}
-	if err := env.manager.Enable("", dependencyContext("proj-b", "svc-b", "redis.default.svc", 6379, 5002)); err != nil {
+	if err := env.manager.Enable(dependencyContext("proj-b", "svc-b", "redis.default.svc", 6379, 5002)); err != nil {
 		t.Fatalf("enable svc-b failed: %v", err)
 	}
 	streamA := env.streams[0]
 
-	found, err := env.manager.Disable("", dependencyContext("proj-a", "svc-a", "rabbitmq.default.svc", 5672, 5001))
+	found, err := env.manager.Disable(dependencyContext("proj-a", "svc-a", "rabbitmq.default.svc", 5672, 5001))
 	if err != nil {
 		t.Fatalf("disable failed: %v", err)
 	}
@@ -354,7 +280,7 @@ func TestDisableRemovesOnlyItsOwnState(t *testing.T) {
 func TestDisableReportsUnknownSession(t *testing.T) {
 	env := newTestEnv(t)
 
-	found, err := env.manager.Disable("", workerContext())
+	found, err := env.manager.Disable(workerContext())
 	if err != nil {
 		t.Fatalf("disable of an unknown session returned an error: %v", err)
 	}
@@ -365,12 +291,12 @@ func TestDisableReportsUnknownSession(t *testing.T) {
 
 func TestDisableKeepsSessionWhenTeardownFails(t *testing.T) {
 	env := newTestEnv(t)
-	if err := env.manager.Enable("", workerContext()); err != nil {
+	if err := env.manager.Enable(workerContext()); err != nil {
 		t.Fatalf("enable failed: %v", err)
 	}
 
 	env.api.deleteErr = errors.New("manager unreachable")
-	found, err := env.manager.Disable("", workerContext())
+	found, err := env.manager.Disable(workerContext())
 	if !found || err == nil {
 		t.Fatalf("expected a found session and a teardown error, got found=%v err=%v", found, err)
 	}
@@ -385,7 +311,7 @@ func TestDisableKeepsSessionWhenTeardownFails(t *testing.T) {
 	}
 
 	env.api.deleteErr = nil
-	if _, err := env.manager.Disable("", workerContext()); err != nil {
+	if _, err := env.manager.Disable(workerContext()); err != nil {
 		t.Fatalf("retried disable failed: %v", err)
 	}
 	if len(env.manager.List()) != 0 {
@@ -395,14 +321,12 @@ func TestDisableKeepsSessionWhenTeardownFails(t *testing.T) {
 
 func TestCloseReleasesLocalStateAndLeavesManagerSessions(t *testing.T) {
 	env := newTestEnv(t)
-	if err := env.manager.Enable("", workerContext()); err != nil {
+	if err := env.manager.Enable(workerContext()); err != nil {
 		t.Fatalf("enable failed: %v", err)
 	}
 	stream := env.lastAttach
 
-	if err := env.manager.Close(); err != nil {
-		t.Fatalf("close failed: %v", err)
-	}
+	env.manager.Close()
 
 	if stream.closes != 1 {
 		t.Fatalf("expected the stream to be closed, got %d", stream.closes)
@@ -425,7 +349,7 @@ func TestListReturnsWhileEnableIsBlocked(t *testing.T) {
 	env.attachStarted = make(chan struct{})
 	env.attachRelease = make(chan struct{})
 	enableDone := make(chan error, 1)
-	go func() { enableDone <- env.manager.Enable("", workerContext()) }()
+	go func() { enableDone <- env.manager.Enable(workerContext()) }()
 
 	<-env.attachStarted
 	listDone := make(chan []contracts.HelperDebugSession, 1)
@@ -450,14 +374,17 @@ func TestCloseWaitsForEnableThenCleansItsResources(t *testing.T) {
 	env.attachStarted = make(chan struct{})
 	env.attachRelease = make(chan struct{})
 	enableDone := make(chan error, 1)
-	go func() { enableDone <- env.manager.Enable("", workerContext()) }()
+	go func() { enableDone <- env.manager.Enable(workerContext()) }()
 	<-env.attachStarted
 
-	closeDone := make(chan error, 1)
-	go func() { closeDone <- env.manager.Close() }()
+	closeDone := make(chan struct{})
+	go func() {
+		env.manager.Close()
+		close(closeDone)
+	}()
 	select {
-	case err := <-closeDone:
-		t.Fatalf("Close returned before Enable completed: %v", err)
+	case <-closeDone:
+		t.Fatal("Close returned before Enable completed")
 	case <-time.After(25 * time.Millisecond):
 	}
 
@@ -465,31 +392,19 @@ func TestCloseWaitsForEnableThenCleansItsResources(t *testing.T) {
 	if err := <-enableDone; err != nil {
 		t.Fatalf("enable failed: %v", err)
 	}
-	if err := <-closeDone; err != nil {
-		t.Fatalf("close failed: %v", err)
-	}
+	<-closeDone
 	if env.lastAttach.closes != 1 || env.forwards.clearCalls != 1 || len(env.manager.DesiredHosts()) != 0 {
 		t.Fatalf("Close did not clean completed Enable: stream=%d clear=%d desiredHosts=%+v",
 			env.lastAttach.closes, env.forwards.clearCalls, env.manager.DesiredHosts())
 	}
 }
 
-func TestEnableRequiresASessionIdentity(t *testing.T) {
-	env := newTestEnv(t)
-
-	if err := env.manager.Enable("", contracts.DebugServiceContext{}); err == nil {
-		t.Fatal("expected an error when neither a session key nor a service name is given")
-	}
-}
-
-func TestPortForwardsForResolvesTargetsAndDeduplicates(t *testing.T) {
-	forwards := portForwardsFor(contracts.DebugServiceContext{
-		ServiceDependencies: []contracts.DebugServiceDependencyContext{
-			{Host: "rabbitmq.default.svc", Port: 5672},
+func TestPortForwardsForResolvesTargets(t *testing.T) {
+	forwards := portForwardsFor(config.Service{
+		ServiceDependencies: []config.ServiceDependency{
 			{Host: "rabbitmq.default.svc", Port: 5672},
 			{Host: "ferretdb.ferretdb-system.svc", Port: 27017},
 			{Service: "cache", Namespace: "shared", Port: 6379},
-			{Host: "no-port.default.svc"},
 		},
 	})
 
@@ -504,11 +419,11 @@ func TestPortForwardsForResolvesTargetsAndDeduplicates(t *testing.T) {
 }
 
 func TestMergeHostEntriesIncludesAliasesAndDeduplicates(t *testing.T) {
-	entries := mergeHostEntries([]contracts.DebugServiceContext{
-		{ServiceDependencies: []contracts.DebugServiceDependencyContext{
+	entries := mergeHostEntries([]config.Service{
+		{ServiceDependencies: []config.ServiceDependency{
 			{Host: "mongo.default.svc", Port: 27017, Aliases: []string{"mongodb-server-0.mongo.default.svc.cluster.local"}},
 		}},
-		{ServiceDependencies: []contracts.DebugServiceDependencyContext{
+		{ServiceDependencies: []config.ServiceDependency{
 			{Host: "mongo.default.svc", Port: 27017},
 			{Host: " ", Port: 1},
 		}},
@@ -523,34 +438,17 @@ func TestMergeHostEntriesIncludesAliasesAndDeduplicates(t *testing.T) {
 	}
 }
 
-func TestResolveKey(t *testing.T) {
-	cases := []struct {
-		key, project, service, want string
-	}{
-		{" explicit ", "proj", "svc", "explicit"},
-		{"", "proj", "svc", "proj/svc"},
-		{"", "", "svc", "svc"},
-		{"", "proj", "", "proj"},
-		{"", "", "", ""},
-	}
-	for _, testCase := range cases {
-		if got := resolveKey(testCase.key, testCase.project, testCase.service); got != testCase.want {
-			t.Fatalf("resolveKey(%q,%q,%q) = %q, want %q", testCase.key, testCase.project, testCase.service, got, testCase.want)
-		}
-	}
-}
-
-func workerContext() contracts.DebugServiceContext {
+func workerContext() config.Service {
 	return dependencyContext("awesome-app3", "awesome-app3-worker", "rabbitmq.default.svc", 5672, 5001)
 }
 
-func dependencyContext(project, service, host string, dependencyPort, interceptPort int) contracts.DebugServiceContext {
-	return contracts.DebugServiceContext{
+func dependencyContext(project, service, host string, dependencyPort, interceptPort int) config.Service {
+	return config.Service{
 		Project:       project,
-		ServiceName:   service,
+		Name:          service,
 		ContainerPort: 8080,
 		InterceptPort: interceptPort,
-		ServiceDependencies: []contracts.DebugServiceDependencyContext{
+		ServiceDependencies: []config.ServiceDependency{
 			{Host: host, Port: dependencyPort},
 		},
 	}
@@ -602,7 +500,6 @@ type fakeForwards struct {
 	lastKey      string
 	lastForwards []contracts.PortForward
 	upsertErr    error
-	removeErr    error
 }
 
 func (f *fakeForwards) Upsert(sessionKey string, forwards []contracts.PortForward) error {
@@ -615,15 +512,13 @@ func (f *fakeForwards) Upsert(sessionKey string, forwards []contracts.PortForwar
 	return nil
 }
 
-func (f *fakeForwards) Remove(sessionKey string) error {
+func (f *fakeForwards) Remove(sessionKey string) {
 	f.removeCalls++
 	f.lastKey = sessionKey
-	return f.removeErr
 }
 
-func (f *fakeForwards) Clear() error {
+func (f *fakeForwards) Clear() {
 	f.clearCalls++
-	return nil
 }
 
 type fakeAPI struct {
@@ -635,7 +530,7 @@ type fakeAPI struct {
 	deleteErr     error
 }
 
-func (f *fakeAPI) CreateSession(serviceContext contracts.DebugServiceContext) (contracts.DebugSession, error) {
+func (f *fakeAPI) CreateSession(serviceContext config.Service) (contracts.DebugSession, error) {
 	f.createCalls++
 	if f.createErr != nil {
 		return contracts.DebugSession{}, f.createErr
@@ -649,7 +544,7 @@ func (f *fakeAPI) CreateSession(serviceContext contracts.DebugServiceContext) (c
 	return contracts.DebugSession{
 		SessionID:    sessionID,
 		SessionToken: sessionID + "-token",
-		ServiceName:  serviceContext.ServiceName,
+		ServiceName:  serviceContext.Name,
 	}, nil
 }
 
@@ -678,11 +573,11 @@ func TestHostsSnapshotRevisionOrdersChanges(t *testing.T) {
 		t.Fatal("expected a non-empty epoch")
 	}
 
-	if err := env.manager.Enable("", dependencyContext("proj-a", "svc-a", "rabbitmq.default.svc", 5672, 5001)); err != nil {
+	if err := env.manager.Enable(dependencyContext("proj-a", "svc-a", "rabbitmq.default.svc", 5672, 5001)); err != nil {
 		t.Fatalf("enable svc-a failed: %v", err)
 	}
 	afterA := env.manager.HostsSnapshot()
-	if err := env.manager.Enable("", dependencyContext("proj-b", "svc-b", "redis.default.svc", 6379, 5002)); err != nil {
+	if err := env.manager.Enable(dependencyContext("proj-b", "svc-b", "redis.default.svc", 6379, 5002)); err != nil {
 		t.Fatalf("enable svc-b failed: %v", err)
 	}
 	afterB := env.manager.HostsSnapshot()
@@ -694,7 +589,7 @@ func TestHostsSnapshotRevisionOrdersChanges(t *testing.T) {
 		t.Fatalf("snapshot entries do not match their revision: %+v / %+v", afterA.Entries, afterB.Entries)
 	}
 
-	if _, err := env.manager.Disable("", dependencyContext("proj-a", "svc-a", "rabbitmq.default.svc", 5672, 5001)); err != nil {
+	if _, err := env.manager.Disable(dependencyContext("proj-a", "svc-a", "rabbitmq.default.svc", 5672, 5001)); err != nil {
 		t.Fatalf("disable failed: %v", err)
 	}
 	if afterDisable := env.manager.HostsSnapshot().Revision; !afterB.Revision.OlderThan(afterDisable) {

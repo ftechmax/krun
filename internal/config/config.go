@@ -153,6 +153,11 @@ func DiscoverServices(sourceDir string, searchDepth int) ([]Service, map[string]
 		for i := range projectServices {
 			service := &projectServices[i]
 			service.Project = project
+			service.Name = strings.TrimSpace(service.Name)
+			service.Namespace = strings.TrimSpace(service.Namespace)
+			if service.Namespace == "" {
+				service.Namespace = "default"
+			}
 			if service.ContainerPort == 0 {
 				service.ContainerPort = 8080
 			}

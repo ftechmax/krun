@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/ftechmax/krun/internal/config"
 	"github.com/ftechmax/krun/internal/contracts"
 )
 
@@ -28,9 +29,9 @@ func TestManagerClientCreateSession(t *testing.T) {
 	})
 	defer closeFn()
 
-	created, err := client.CreateSession(contracts.DebugServiceContext{
-		Namespace:     " dev ",
-		ServiceName:   " orders-api ",
+	created, err := client.CreateSession(config.Service{
+		Namespace:     "dev",
+		Name:          "orders-api",
 		ContainerPort: 8080,
 		InterceptPort: 5000,
 	})
@@ -41,10 +42,10 @@ func TestManagerClientCreateSession(t *testing.T) {
 		t.Fatalf("expected created session id, got %q", created.SessionID)
 	}
 	if createReq.Namespace != "dev" {
-		t.Fatalf("expected normalized namespace, got %q", createReq.Namespace)
+		t.Fatalf("expected service namespace, got %q", createReq.Namespace)
 	}
 	if createReq.ServiceName != "orders-api" {
-		t.Fatalf("expected trimmed service name, got %q", createReq.ServiceName)
+		t.Fatalf("expected service name, got %q", createReq.ServiceName)
 	}
 	if createReq.Workload != "orders-api" {
 		t.Fatalf("expected workload to match service name, got %q", createReq.Workload)
@@ -57,49 +58,6 @@ func TestManagerClientCreateSession(t *testing.T) {
 	}
 }
 
-func TestManagerClientCreateSessionValidation(t *testing.T) {
-	client, closeFn := newTestManagerClient(t, func(w http.ResponseWriter, r *http.Request) {
-		t.Fatalf("expected no request to be sent, got %s %s", r.Method, r.URL.Path)
-	})
-	defer closeFn()
-
-	if _, err := client.CreateSession(contracts.DebugServiceContext{
-		ContainerPort: 8080,
-		InterceptPort: 5000,
-	}); err == nil {
-		t.Fatalf("expected error for empty service_name")
-	}
-	if _, err := client.CreateSession(contracts.DebugServiceContext{
-		ServiceName:   "orders-api",
-		ContainerPort: 0,
-		InterceptPort: 5000,
-	}); err == nil {
-		t.Fatalf("expected error for invalid service_port")
-	}
-	if _, err := client.CreateSession(contracts.DebugServiceContext{
-		ServiceName:   "orders-api",
-		ContainerPort: 8080,
-		InterceptPort: 0,
-	}); err == nil {
-		t.Fatalf("expected error for invalid local_port")
-	}
-}
-
-func TestManagerClientCreateSessionRejectsEmptySessionID(t *testing.T) {
-	client, closeFn := newTestManagerClient(t, func(w http.ResponseWriter, _ *http.Request) {
-		writeJSONResponse(t, w, http.StatusCreated, contracts.DebugSession{ServiceName: "orders-api"})
-	})
-	defer closeFn()
-
-	if _, err := client.CreateSession(contracts.DebugServiceContext{
-		ServiceName:   "orders-api",
-		ContainerPort: 8080,
-		InterceptPort: 5000,
-	}); err == nil {
-		t.Fatal("expected an error when the manager returns no session id")
-	}
-}
-
 func TestManagerClientCreateSessionSurfacesManagerError(t *testing.T) {
 	client, closeFn := newTestManagerClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		writeJSONResponse(t, w, http.StatusNotFound, map[string]string{
@@ -108,8 +66,8 @@ func TestManagerClientCreateSessionSurfacesManagerError(t *testing.T) {
 	})
 	defer closeFn()
 
-	_, err := client.CreateSession(contracts.DebugServiceContext{
-		ServiceName:   "orders-api",
+	_, err := client.CreateSession(config.Service{
+		Name:          "orders-api",
 		ContainerPort: 8080,
 		InterceptPort: 5000,
 	})
@@ -148,23 +106,18 @@ func TestManagerClientDeleteSessionNotFoundIsIgnored(t *testing.T) {
 	}
 }
 
-func TestManagerClientDeleteSessionIgnoresBlankID(t *testing.T) {
-	client, closeFn := newTestManagerClient(t, func(_ http.ResponseWriter, r *http.Request) {
-		t.Fatalf("expected no request for a blank session id, got %s %s", r.Method, r.URL.Path)
-	})
-	defer closeFn()
-
-	if err := client.DeleteSession("  "); err != nil {
-		t.Fatalf("expected blank session id to be a no-op, got %v", err)
-	}
-}
-
-func TestNormalizeNamespace(t *testing.T) {
-	if got := normalizeNamespace(""); got != "default" {
-		t.Fatalf("expected default namespace, got %q", got)
-	}
-	if got := normalizeNamespace("  dev  "); got != "dev" {
-		t.Fatalf("expected trimmed namespace, got %q", got)
+func TestManagerClientHealthOmitsAuthentication(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/healthz" || r.Header.Get(authTokenHeader) != "" {
+			t.Errorf("unexpected health request: %s, auth present: %v", r.URL.Path, r.Header.Get(authTokenHeader) != "")
+		}
+		writeJSONResponse(t, w, http.StatusOK, map[string]string{"version": "test-version"})
+	}))
+	defer server.Close()
+	client := NewSessionClient(server.URL, testAuthToken)
+	version, err := client.Health()
+	if err != nil || version != "test-version" {
+		t.Fatalf("health version = %q, err = %v", version, err)
 	}
 }
 
@@ -185,15 +138,6 @@ func newTestManagerClient(t *testing.T, handler http.HandlerFunc) (*Client, func
 		authToken: testAuthToken,
 		http:      server.Client(),
 	}, server.Close
-}
-
-func TestNewSessionClientRequiresConfiguration(t *testing.T) {
-	if _, err := NewSessionClient("", testAuthToken); err == nil {
-		t.Fatal("expected an error for an empty manager URL")
-	}
-	if _, err := NewSessionClient("http://127.0.0.1:8080", "  "); err == nil {
-		t.Fatal("expected an error for an empty manager token")
-	}
 }
 
 func writeJSONResponse(t *testing.T, w http.ResponseWriter, code int, payload any) {

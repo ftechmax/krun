@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ftechmax/krun/internal/config"
 	"github.com/ftechmax/krun/internal/contracts"
 	"github.com/ftechmax/krun/internal/krun-helper/session"
 )
@@ -84,7 +85,7 @@ func TestRejectsPayloadWithoutSessionIdentity(t *testing.T) {
 	handler, _ := newTestDaemon(t, nil)
 
 	for _, path := range []string{"/v1/debug/enable", "/v1/debug/disable"} {
-		body, _ := json.Marshal(contracts.DebugSessionCommandRequest{})
+		body, _ := json.Marshal(config.Service{})
 		if rec := post(handler, path, body); rec.Code != http.StatusBadRequest {
 			t.Fatalf("%s: expected status 400, got %d", path, rec.Code)
 		}
@@ -124,35 +125,25 @@ func TestShutdownSignalsTheDaemon(t *testing.T) {
 	}
 }
 
-func TestUnexpectedServeErrorStillCleansResources(t *testing.T) {
+func TestUnexpectedServeError(t *testing.T) {
 	serveErr := errors.New("serve failed")
-	cleanupErr := errors.New("cleanup failed")
 	serverErrors := make(chan error, 1)
 	serverErrors <- serveErr
-	cleanupCalls := 0
 
 	err := runHelperServer(
 		&fakeServerControl{},
 		serverErrors,
 		make(chan os.Signal),
 		make(chan struct{}),
-		func() error {
-			cleanupCalls++
-			return cleanupErr
-		},
 	)
-	if !errors.Is(err, serveErr) || !errors.Is(err, cleanupErr) {
+	if !errors.Is(err, serveErr) {
 		t.Fatalf("expected joined serve and cleanup errors, got %v", err)
-	}
-	if cleanupCalls != 1 {
-		t.Fatalf("cleanup calls = %d, want 1", cleanupCalls)
 	}
 }
 
-func TestShutdownFailureClosesServerAndStillCleansResources(t *testing.T) {
+func TestShutdownFailureClosesServer(t *testing.T) {
 	shutdownErr := errors.New("shutdown timed out")
 	closeErr := errors.New("forced close failed")
-	cleanupErr := errors.New("cleanup failed")
 	serverErrors := make(chan error, 1)
 	control := &fakeServerControl{
 		shutdownErr: shutdownErr,
@@ -163,25 +154,20 @@ func TestShutdownFailureClosesServerAndStillCleansResources(t *testing.T) {
 	}
 	shutdown := make(chan struct{}, 1)
 	shutdown <- struct{}{}
-	cleanupCalls := 0
 
 	err := runHelperServer(
 		control,
 		serverErrors,
 		make(chan os.Signal),
 		shutdown,
-		func() error {
-			cleanupCalls++
-			return cleanupErr
-		},
 	)
-	for _, target := range []error{shutdownErr, closeErr, cleanupErr} {
+	for _, target := range []error{shutdownErr, closeErr} {
 		if !errors.Is(err, target) {
 			t.Fatalf("expected error %v in %v", target, err)
 		}
 	}
-	if control.shutdownCalls != 1 || control.closeCalls != 1 || cleanupCalls != 1 {
-		t.Fatalf("calls: shutdown=%d close=%d cleanup=%d", control.shutdownCalls, control.closeCalls, cleanupCalls)
+	if control.shutdownCalls != 1 || control.closeCalls != 1 {
+		t.Fatalf("calls: shutdown=%d close=%d", control.shutdownCalls, control.closeCalls)
 	}
 }
 
@@ -219,13 +205,11 @@ func newTestDaemon(t *testing.T, createErr error) (http.Handler, chan struct{}) 
 }
 
 func commandBody(project string, service string) []byte {
-	body, _ := json.Marshal(contracts.DebugSessionCommandRequest{
-		Context: contracts.DebugServiceContext{
-			Project:       project,
-			ServiceName:   service,
-			ContainerPort: 8080,
-			InterceptPort: 5001,
-		},
+	body, _ := json.Marshal(config.Service{
+		Project:       project,
+		Name:          service,
+		ContainerPort: 8080,
+		InterceptPort: 5001,
 	})
 	return body
 }
@@ -262,12 +246,12 @@ func listSessions(t *testing.T, handler http.Handler) []contracts.HelperDebugSes
 type stubForwards struct{}
 
 func (stubForwards) Upsert(string, []contracts.PortForward) error { return nil }
-func (stubForwards) Remove(string) error                          { return nil }
-func (stubForwards) Clear() error                                 { return nil }
+func (stubForwards) Remove(string)                                {}
+func (stubForwards) Clear()                                       {}
 
 type stubAPI struct{ createErr error }
 
-func (s stubAPI) CreateSession(contracts.DebugServiceContext) (contracts.DebugSession, error) {
+func (s stubAPI) CreateSession(config.Service) (contracts.DebugSession, error) {
 	if s.createErr != nil {
 		return contracts.DebugSession{}, s.createErr
 	}

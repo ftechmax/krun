@@ -40,6 +40,11 @@ Poking around: `krun debug helper status` (read-only, never auto-starts the
 helper) or, on Linux,
 `curl --unix-socket "$XDG_RUNTIME_DIR/krun/krun-helper.sock" http://localhost/v1/debug/sessions`.
 
+Enable and disable send the discovered `config.Service` directly as JSON.
+The helper keys sessions by `project/name`; namespace and application port
+defaults are applied during discovery. Restart a running helper with
+`krun debug helper stop` when upgrading from the older context-based payload.
+
 ## Traffic Flow (Breakpoint Path)
 
 1. Caller pod sends TCP traffic to target service as usual.
@@ -65,7 +70,12 @@ helper) or, on Linux,
 On re-enable, the helper deletes the previous manager session before replacing
 its stream. If deletion fails, the existing local session stays intact.
 Dependency forwards remain available for reuse. Later failures roll back completed
-steps; failed cleanup leaves a `cleanup-pending` session for `disable` to retry.
+steps; a failed manager-session deletion leaves a `cleanup-pending` session
+for `disable` to retry. Local forward cleanup has no error return.
+
+Dependency forwards require a running pod and a port exposed by the Kubernetes
+Service. Numeric and named target ports are supported; an unmatched service
+port is an error rather than being treated as a pod port.
 
 ### Disable
 

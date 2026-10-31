@@ -3,12 +3,12 @@ package session
 
 import (
 	"crypto/rand"
-	"errors"
 	"fmt"
 	"slices"
 	"strings"
 	"sync"
 
+	"github.com/ftechmax/krun/internal/config"
 	"github.com/ftechmax/krun/internal/contracts"
 )
 
@@ -23,20 +23,20 @@ type StreamAttacher func(sessionID string, sessionToken string, interceptPort in
 // PortForwarder owns the dependency port-forwards, keyed by session.
 type PortForwarder interface {
 	Upsert(sessionKey string, forwards []contracts.PortForward) error
-	Remove(sessionKey string) error
-	Clear() error
+	Remove(sessionKey string)
+	Clear()
 }
 
 // ManagerAPI is the traffic-manager's session REST surface.
 type ManagerAPI interface {
-	CreateSession(serviceContext contracts.DebugServiceContext) (contracts.DebugSession, error)
+	CreateSession(serviceContext config.Service) (contracts.DebugSession, error)
 	DeleteSession(sessionID string) error
 }
 
 // Session is one active debug session.
 type Session struct {
 	Key       string
-	Context   contracts.DebugServiceContext
+	Context   config.Service
 	ManagerID string
 	State     string
 
@@ -84,11 +84,8 @@ func NewManager(options Options) *Manager {
 
 // Enable brings up a debug session and rolls completed steps back on failure.
 // If cleanup fails, the session remains visible so Disable can retry it.
-func (m *Manager) Enable(sessionKey string, serviceContext contracts.DebugServiceContext) error {
-	key := resolveKey(sessionKey, serviceContext.Project, serviceContext.ServiceName)
-	if key == "" {
-		return errors.New("session key or context.service_name is required")
-	}
+func (m *Manager) Enable(serviceContext config.Service) (err error) {
+	key := serviceContext.Project + "/" + serviceContext.Name
 
 	m.ops.Lock()
 	defer m.ops.Unlock()
@@ -106,63 +103,30 @@ func (m *Manager) Enable(sessionKey string, serviceContext contracts.DebugServic
 		State:   contracts.HelperSessionStateActive,
 	}
 
-	type rollback struct {
-		step string
-		run  func() error
-	}
-	var undo []rollback
-	if replacing {
-		// Keep dependency forwards available for Upsert to reuse, but register
-		// cleanup first in case replacement fails.
-		undo = append(undo, rollback{
-			step: "remove preserved replacement local state",
-			run:  func() error { return m.forwards.Remove(key) },
-		})
-	}
-	fail := func(step string, err error) error {
-		var rollbackFailures []string
-		for i := len(undo) - 1; i >= 0; i-- {
-			if rollbackErr := undo[i].run(); rollbackErr != nil {
-				rollbackFailures = append(rollbackFailures, fmt.Sprintf("%s: %v", undo[i].step, rollbackErr))
-			}
+	defer func() {
+		if err == nil {
+			return
 		}
-		if len(rollbackFailures) > 0 {
+		if cleanupErr := m.teardown(session); cleanupErr != nil {
 			session.State = contracts.HelperSessionStateCleanupPending
 			m.storeSession(session)
-			return fmt.Errorf("%s: %w (rollback failed: %s)", step, err, strings.Join(rollbackFailures, "; "))
+			err = fmt.Errorf("%w (rollback failed: %v)", err, cleanupErr)
 		}
-		return fmt.Errorf("%s: %w", step, err)
-	}
+	}()
 
 	if err := m.forwards.Upsert(key, portForwardsFor(serviceContext)); err != nil {
-		return fail("port-forward update failed", err)
-	}
-	if !replacing {
-		undo = append(undo, rollback{
-			step: "remove port-forwards",
-			run:  func() error { return m.forwards.Remove(key) },
-		})
+		return fmt.Errorf("port-forward update failed: %w", err)
 	}
 
 	managerSession, err := m.api.CreateSession(serviceContext)
 	if err != nil {
-		return fail("manager session create failed", err)
+		return fmt.Errorf("manager session create failed: %w", err)
 	}
 	session.ManagerID = managerSession.SessionID
-	undo = append(undo, rollback{
-		step: "delete manager session",
-		run: func() error {
-			if err := m.api.DeleteSession(managerSession.SessionID); err != nil {
-				return err
-			}
-			session.ManagerID = ""
-			return nil
-		},
-	})
 
 	stream, err := m.attach(managerSession.SessionID, managerSession.SessionToken, serviceContext.InterceptPort)
 	if err != nil {
-		return fail("manager stream attach failed", err)
+		return fmt.Errorf("manager stream attach failed: %w", err)
 	}
 	session.stream = stream
 
@@ -172,11 +136,8 @@ func (m *Manager) Enable(sessionKey string, serviceContext contracts.DebugServic
 
 // Disable tears a session down. The bool reports whether there was a session
 // to remove, so the caller can tell "removed" from "nothing to do".
-func (m *Manager) Disable(sessionKey string, serviceContext contracts.DebugServiceContext) (bool, error) {
-	key := resolveKey(sessionKey, serviceContext.Project, serviceContext.ServiceName)
-	if key == "" {
-		return false, errors.New("session key or context.service_name is required")
-	}
+func (m *Manager) Disable(serviceContext config.Service) (bool, error) {
+	key := serviceContext.Project + "/" + serviceContext.Name
 
 	m.ops.Lock()
 	defer m.ops.Unlock()
@@ -186,10 +147,10 @@ func (m *Manager) Disable(sessionKey string, serviceContext contracts.DebugServi
 		return false, nil
 	}
 
-	if failures := m.teardown(session); len(failures) > 0 {
+	if err := m.teardown(session); err != nil {
 		session.State = contracts.HelperSessionStateCleanupPending
 		m.storeSession(session)
-		return true, errors.New(strings.Join(failures, "; "))
+		return true, err
 	}
 	return true, nil
 }
@@ -214,7 +175,7 @@ func (m *Manager) List() []contracts.HelperDebugSession {
 
 // Close releases local resources. Manager-side sessions remain until a later
 // enable replaces them or manager startup cleanup removes their sidecars.
-func (m *Manager) Close() error {
+func (m *Manager) Close() {
 	m.ops.Lock()
 	defer m.ops.Unlock()
 
@@ -227,10 +188,7 @@ func (m *Manager) Close() error {
 	for _, session := range sessions {
 		session.closeStream()
 	}
-	if err := m.forwards.Clear(); err != nil {
-		return fmt.Errorf("clear port-forwards: %w", err)
-	}
-	return nil
+	m.forwards.Clear()
 }
 
 func (m *Manager) removeForReplacement(previous *Session) error {
@@ -251,22 +209,16 @@ func (m *Manager) removeForReplacement(previous *Session) error {
 	return nil
 }
 
-func (m *Manager) teardown(session *Session) []string {
-	var failures []string
-
+func (m *Manager) teardown(session *Session) error {
 	session.closeStream()
-
+	defer m.forwards.Remove(session.Key)
 	if session.ManagerID != "" {
 		if err := m.api.DeleteSession(session.ManagerID); err != nil {
-			failures = append(failures, fmt.Sprintf("manager session delete failed: %v", err))
-		} else {
-			session.ManagerID = ""
+			return fmt.Errorf("delete manager session: %w", err)
 		}
+		session.ManagerID = ""
 	}
-	if err := m.forwards.Remove(session.Key); err != nil {
-		failures = append(failures, fmt.Sprintf("port-forward remove failed: %v", err))
-	}
-	return failures
+	return nil
 }
 
 // DesiredHosts returns the full hosts block for all stored sessions.
@@ -280,7 +232,7 @@ func (m *Manager) HostsSnapshot() contracts.HostsSnapshot {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	contexts := make([]contracts.DebugServiceContext, 0, len(m.sessions))
+	contexts := make([]config.Service, 0, len(m.sessions))
 	for _, session := range m.sessions {
 		contexts = append(contexts, session.Context)
 	}

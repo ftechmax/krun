@@ -27,15 +27,9 @@ func applyHostsEntries(entries []contracts.HostsEntry, revision contracts.HostsR
 		return err
 	}
 
-	response, err := hostsCall[contracts.HelperResponse](
+	_, err := hostsCall[contracts.HelperResponse](
 		http.MethodPost, "/v1/hosts", contracts.ApplyHostsRequest{Entries: entries, Revision: revision}, listTimeout)
-	if err != nil {
-		return err
-	}
-	if !response.Success {
-		return fmt.Errorf("hosts writer refused the update: %s", response.Message)
-	}
-	return nil
+	return err
 }
 
 // ensureHostsDaemon starts the privileged writer if it is not already up. The

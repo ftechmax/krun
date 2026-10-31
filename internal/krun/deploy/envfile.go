@@ -2,7 +2,6 @@ package deploy
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -45,9 +44,6 @@ func CreateEnvFile(service cfg.Service, config cfg.Config, containerName string)
 	}
 
 	namespace := service.Namespace
-	if strings.TrimSpace(namespace) == "" {
-		namespace = "default"
-	}
 
 	client, err := kube.NewClient(config.KubeConfig)
 	if err != nil {
@@ -137,24 +133,14 @@ func writeDotEnv(dir string, vars []envVar) error {
 	if err != nil {
 		return fmt.Errorf("open %s: %w", path, err)
 	}
+	defer file.Close()
 	if err := file.Chmod(0o600); err != nil {
-		closeErr := file.Close()
-		if closeErr != nil {
-			closeErr = fmt.Errorf("close %s: %w", path, closeErr)
-		}
-		return errors.Join(fmt.Errorf("set %s permissions: %w", path, err), closeErr)
+		return fmt.Errorf("set %s permissions: %w", path, err)
 	}
 	if _, err := file.WriteString(buf.String()); err != nil {
-		closeErr := file.Close()
-		if closeErr != nil {
-			closeErr = fmt.Errorf("close %s: %w", path, closeErr)
-		}
-		return errors.Join(fmt.Errorf("write %s: %w", path, err), closeErr)
+		return fmt.Errorf("write %s: %w", path, err)
 	}
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("close %s: %w", path, err)
-	}
-	return nil
+	return file.Close()
 }
 
 func serviceDir(service cfg.Service, config cfg.Config) (string, error) {

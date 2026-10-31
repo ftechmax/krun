@@ -277,6 +277,7 @@ func streamTarUpload(ctx context.Context, client *kube.Client, projectName strin
 	_, stderr, execErr := execInBuildPod(ctx, client, []string{
 		"tar", "xzf", "-", "-C", workspacePath,
 	}, pr)
+	_ = pr.CloseWithError(execErr)
 	streamErr := <-errCh
 
 	if streamErr != nil {
@@ -288,16 +289,17 @@ func streamTarUpload(ctx context.Context, client *kube.Client, projectName strin
 	return nil
 }
 
-func writeTarStream(pw *io.PipeWriter, projectName string, files []localFile) error {
+func writeTarStream(pw *io.PipeWriter, projectName string, files []localFile) (err error) {
 	gzw := gzip.NewWriter(pw)
 	tw := tar.NewWriter(gzw)
+	defer func() {
+		err = errors.Join(err, tw.Close(), gzw.Close())
+		_ = pw.CloseWithError(err)
+	}()
 
 	for _, f := range files {
 		fi, err := os.Lstat(f.localPath)
 		if err != nil {
-			_ = tw.Close()
-			_ = gzw.Close()
-			_ = pw.CloseWithError(err)
 			return fmt.Errorf("stat upload file %s: %w", f.relPath, err)
 		}
 
@@ -305,59 +307,31 @@ func writeTarStream(pw *io.PipeWriter, projectName string, files []localFile) er
 		if fi.Mode()&os.ModeSymlink != 0 {
 			linkTarget, err = os.Readlink(f.localPath)
 			if err != nil {
-				_ = tw.Close()
-				_ = gzw.Close()
-				_ = pw.CloseWithError(err)
 				return fmt.Errorf("read symlink %s: %w", f.relPath, err)
 			}
 		}
 
 		hdr, err := tar.FileInfoHeader(fi, linkTarget)
 		if err != nil {
-			_ = tw.Close()
-			_ = gzw.Close()
-			_ = pw.CloseWithError(err)
 			return fmt.Errorf("create tar header %s: %w", f.relPath, err)
 		}
 		hdr.Name = path.Join(projectName, f.relPath)
 		hdr.Mode = int64(fi.Mode().Perm())
 		if err := tw.WriteHeader(hdr); err != nil {
-			_ = tw.Close()
-			_ = gzw.Close()
-			_ = pw.CloseWithError(err)
 			return fmt.Errorf("write tar header %s: %w", f.relPath, err)
 		}
 
 		if fi.Mode().IsRegular() {
 			r, err := os.Open(f.localPath)
 			if err != nil {
-				_ = tw.Close()
-				_ = gzw.Close()
-				_ = pw.CloseWithError(err)
 				return fmt.Errorf("open upload file %s: %w", f.relPath, err)
 			}
 			if _, err := io.Copy(tw, r); err != nil {
 				_ = r.Close()
-				_ = tw.Close()
-				_ = gzw.Close()
-				_ = pw.CloseWithError(err)
 				return fmt.Errorf("write tar payload %s: %w", f.relPath, err)
 			}
 			_ = r.Close()
 		}
-	}
-
-	if err := tw.Close(); err != nil {
-		_ = gzw.Close()
-		_ = pw.CloseWithError(err)
-		return fmt.Errorf("close tar writer: %w", err)
-	}
-	if err := gzw.Close(); err != nil {
-		_ = pw.CloseWithError(err)
-		return fmt.Errorf("close gzip writer: %w", err)
-	}
-	if err := pw.Close(); err != nil {
-		return fmt.Errorf("close pipe writer: %w", err)
 	}
 
 	return nil

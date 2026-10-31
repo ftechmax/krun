@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ftechmax/krun/internal/config"
 	"github.com/ftechmax/krun/internal/contracts"
 	"github.com/ftechmax/krun/internal/helperipc"
 	managerclient "github.com/ftechmax/krun/internal/krun-helper/manager-client"
@@ -81,7 +82,7 @@ func main() {
 	}
 }
 
-func startHelperDaemon(socketEndpoint string, kubeConfigPath string, managerTokenFile string) (returnErr error) {
+func startHelperDaemon(socketEndpoint string, kubeConfigPath string, managerTokenFile string) error {
 	endpoint := strings.TrimSpace(socketEndpoint)
 	if endpoint == "" {
 		endpoint = helperipc.DefaultEndpoint()
@@ -95,23 +96,7 @@ func startHelperDaemon(socketEndpoint string, kubeConfigPath string, managerToke
 	if err != nil {
 		return fmt.Errorf("failed to initialize port-forward registry: %w", err)
 	}
-	var sessions *session.Manager
-	ownsEndpoint := false
-	cleanupTransferred := false
-	cleanup := func() error {
-		if ownsEndpoint {
-			helperipc.Cleanup(endpoint)
-		}
-		if sessions != nil {
-			return sessions.Close()
-		}
-		return forwards.Clear()
-	}
-	defer func() {
-		if !cleanupTransferred {
-			returnErr = errors.Join(returnErr, cleanup())
-		}
-	}()
+	defer forwards.Clear()
 
 	managerAddress, err := startManagerForward(forwards)
 	if err != nil {
@@ -119,13 +104,10 @@ func startHelperDaemon(socketEndpoint string, kubeConfigPath string, managerToke
 	}
 	fmt.Printf("manager api forwarded to %s\n", managerAddress)
 
-	api, err := managerclient.NewSessionClient(managerAddress, authToken)
-	if err != nil {
-		return fmt.Errorf("failed to initialize manager session client: %w", err)
-	}
+	api := managerclient.NewSessionClient(managerAddress, authToken)
 	warnOnManagerSkew(api)
 
-	sessions = session.NewManager(session.Options{
+	sessions := session.NewManager(session.Options{
 		Forwards: forwards,
 		API:      api,
 		Attach: func(sessionID string, sessionToken string, interceptPort int) (session.Stream, error) {
@@ -133,13 +115,15 @@ func startHelperDaemon(socketEndpoint string, kubeConfigPath string, managerToke
 		},
 	})
 
+	defer sessions.Close()
+
 	shutdownCh := make(chan struct{}, 1)
 
 	listener, err := helperipc.Listen(endpoint)
 	if err != nil {
 		return fmt.Errorf("failed to listen on helper endpoint: %w", err)
 	}
-	ownsEndpoint = true
+	defer helperipc.Cleanup(endpoint)
 
 	server := &http.Server{
 		Handler:           newHandler(&daemon{sessions: sessions, shutdownCh: shutdownCh}),
@@ -156,15 +140,10 @@ func startHelperDaemon(socketEndpoint string, kubeConfigPath string, managerToke
 	signal.Notify(signalCh, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signalCh)
 
-	cleanupTransferred = true
-	return runHelperServer(server, serverErrCh, signalCh, shutdownCh, cleanup)
+	return runHelperServer(server, serverErrCh, signalCh, shutdownCh)
 }
 
-func runHelperServer(server serverControl, serverErrCh <-chan error, signalCh <-chan os.Signal, shutdownCh <-chan struct{}, cleanup func() error) (returnErr error) {
-	defer func() {
-		returnErr = errors.Join(returnErr, cleanup())
-	}()
-
+func runHelperServer(server serverControl, serverErrCh <-chan error, signalCh <-chan os.Signal, shutdownCh <-chan struct{}) error {
 	doShutdown := func(reason string) error {
 		fmt.Printf("%s, shutting down krun-helper\n", reason)
 
@@ -266,7 +245,7 @@ func (d *daemon) handleEnable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := d.sessions.Enable(request.SessionKey, request.Context); err != nil {
+	if err := d.sessions.Enable(request); err != nil {
 		writeJSON(w, http.StatusInternalServerError, contracts.HelperResponse{Success: false, Message: err.Error()})
 		return
 	}
@@ -287,7 +266,7 @@ func (d *daemon) handleDisable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	found, err := d.sessions.Disable(request.SessionKey, request.Context)
+	found, err := d.sessions.Disable(request)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, contracts.HelperResponse{Success: false, Message: err.Error()})
 		return
@@ -306,17 +285,17 @@ func (d *daemon) handleDisable(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func parseDebugCommandRequest(r *http.Request) (contracts.DebugSessionCommandRequest, error) {
+func parseDebugCommandRequest(r *http.Request) (config.Service, error) {
 	defer r.Body.Close()
 
-	var request contracts.DebugSessionCommandRequest
+	var request config.Service
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {
-		return contracts.DebugSessionCommandRequest{}, fmt.Errorf("invalid payload: %w", err)
+		return config.Service{}, fmt.Errorf("invalid payload: %w", err)
 	}
-	if strings.TrimSpace(request.SessionKey) == "" && strings.TrimSpace(request.Context.ServiceName) == "" {
-		return contracts.DebugSessionCommandRequest{}, fmt.Errorf("invalid payload: session key or context.service_name is required")
+	if request.Name == "" {
+		return config.Service{}, fmt.Errorf("invalid payload: name is required")
 	}
 	return request, nil
 }

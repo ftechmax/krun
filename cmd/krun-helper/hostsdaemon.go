@@ -130,9 +130,9 @@ func (h *hostsWriter) apply(entries []contracts.HostsEntry, revision contracts.H
 
 	var err error
 	if len(entries) == 0 {
-		err = hostfile.File{}.Remove()
+		err = hostfile.Remove()
 	} else {
-		err = hostfile.File{}.Write(entries)
+		err = hostfile.Write(entries)
 	}
 	if err != nil {
 		return err
@@ -146,7 +146,7 @@ func (h *hostsWriter) closeAndRemove() error {
 	defer h.mu.Unlock()
 
 	h.closed = true
-	return hostfile.File{}.Remove()
+	return hostfile.Remove()
 }
 
 func newHostsHandler(writer *hostsWriter, shutdownCh chan<- struct{}) http.Handler {

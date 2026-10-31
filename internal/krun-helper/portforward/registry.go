@@ -2,13 +2,11 @@ package portforward
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -24,7 +22,6 @@ import (
 )
 
 const (
-	defaultNamespace       = "default"
 	readyTimeout           = 10 * time.Second
 	forwardShutdownTimeout = 2 * time.Second
 	reconnectInitialDelay  = 1 * time.Second
@@ -35,8 +32,8 @@ type SessionRegistry struct {
 	mu             sync.Mutex
 	client         *kube.Client
 	startForwardFn func(contracts.PortForward) (*forwardHandle, error)
-	sessions       map[string]map[string]*forwardHandle
-	shared         map[string]*sharedForward
+	sessions       map[string]map[contracts.PortForward]*forwardHandle
+	shared         map[contracts.PortForward]*sharedForward
 }
 
 type sharedForward struct {
@@ -47,10 +44,9 @@ type sharedForward struct {
 type forwardHandle struct {
 	spec contracts.PortForward
 
-	boundLocalPort int
-	cancel         context.CancelFunc
-	doneChan       chan struct{}
-	stopOnce       sync.Once
+	cancel   context.CancelFunc
+	doneChan chan struct{}
+	stopOnce sync.Once
 }
 
 func NewSessionRegistry(kubeConfigPath string) (*SessionRegistry, error) {
@@ -60,8 +56,8 @@ func NewSessionRegistry(kubeConfigPath string) (*SessionRegistry, error) {
 	}
 	registry := &SessionRegistry{
 		client:   client,
-		sessions: map[string]map[string]*forwardHandle{},
-		shared:   map[string]*sharedForward{},
+		sessions: map[string]map[contracts.PortForward]*forwardHandle{},
+		shared:   map[contracts.PortForward]*sharedForward{},
 	}
 	registry.startForwardFn = registry.startForward
 	return registry, nil
@@ -71,30 +67,23 @@ func (r *SessionRegistry) Upsert(sessionKey string, forwards []contracts.PortFor
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	key := normalizeSessionKey(sessionKey)
-	normalized := normalizePortForwards(forwards)
-	if len(normalized) == 0 {
-		return r.removeLocked(key)
-	}
+	existing := r.sessions[sessionKey]
 
-	existing := r.sessions[key]
-	if existing == nil {
-		existing = map[string]*forwardHandle{}
-	}
-
-	next := make(map[string]*forwardHandle, len(normalized))
-	acquiredKeys := make([]string, 0, len(normalized))
-	for _, forward := range normalized {
-		forwardKey := portForwardKey(forward)
-		if existingHandle, ok := existing[forwardKey]; ok {
-			next[forwardKey] = existingHandle
+	next := make(map[contracts.PortForward]*forwardHandle, len(forwards))
+	acquiredKeys := make([]contracts.PortForward, 0, len(forwards))
+	for _, forward := range forwards {
+		if _, ok := next[forward]; ok {
+			continue
+		}
+		if existingHandle, ok := existing[forward]; ok {
+			next[forward] = existingHandle
 			continue
 		}
 
-		if sf, ok := r.shared[forwardKey]; ok {
+		if sf, ok := r.shared[forward]; ok {
 			sf.refCount++
-			next[forwardKey] = sf.handle
-			acquiredKeys = append(acquiredKeys, forwardKey)
+			next[forward] = sf.handle
+			acquiredKeys = append(acquiredKeys, forward)
 			continue
 		}
 
@@ -102,15 +91,14 @@ func (r *SessionRegistry) Upsert(sessionKey string, forwards []contracts.PortFor
 		if err != nil {
 			for _, acquiredKey := range acquiredKeys {
 				r.releaseSharedLocked(acquiredKey)
-				delete(next, acquiredKey)
 			}
 			return err
 		}
 
 		fmt.Printf("Started port-forward %s/%s:%d -> 127.0.0.1:%d\n", handle.spec.Namespace, handle.spec.Service, handle.spec.RemotePort, handle.spec.LocalPort)
-		r.shared[forwardKey] = &sharedForward{handle: handle, refCount: 1}
-		next[forwardKey] = handle
-		acquiredKeys = append(acquiredKeys, forwardKey)
+		r.shared[forward] = &sharedForward{handle: handle, refCount: 1}
+		next[forward] = handle
+		acquiredKeys = append(acquiredKeys, forward)
 	}
 
 	for existingKey, existingHandle := range existing {
@@ -121,7 +109,7 @@ func (r *SessionRegistry) Upsert(sessionKey string, forwards []contracts.PortFor
 		r.releaseSharedLocked(existingKey)
 	}
 
-	r.sessions[key] = next
+	r.sessions[sessionKey] = next
 	return nil
 }
 
@@ -129,76 +117,45 @@ func (r *SessionRegistry) Upsert(sessionKey string, forwards []contracts.PortFor
 // requested via Upsert. For requests with LocalPort 0 this is the
 // OS-allocated port; the lookup key is the forward spec as requested.
 func (r *SessionRegistry) BoundLocalPort(sessionKey string, forward contracts.PortForward) (int, bool) {
-	normalized := normalizePortForwards([]contracts.PortForward{forward})
-	if len(normalized) != 1 {
-		return 0, false
-	}
-
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	handles, ok := r.sessions[normalizeSessionKey(sessionKey)]
+	handles, ok := r.sessions[sessionKey]
 	if !ok {
 		return 0, false
 	}
-	handle, ok := handles[portForwardKey(normalized[0])]
+	handle, ok := handles[forward]
 	if !ok {
 		return 0, false
-	}
-	if handle.boundLocalPort > 0 {
-		return handle.boundLocalPort, true
 	}
 	return handle.spec.LocalPort, true
 }
 
-func (r *SessionRegistry) Remove(sessionKey string) error {
+func (r *SessionRegistry) Remove(sessionKey string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.removeLocked(sessionKey)
+	for forward := range r.sessions[sessionKey] {
+		r.releaseSharedLocked(forward)
+	}
+	delete(r.sessions, sessionKey)
 }
 
-func (r *SessionRegistry) Clear() error {
+func (r *SessionRegistry) Clear() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.removeLocked("")
+	for _, forward := range r.shared {
+		forward.handle.stop()
+	}
+	clear(r.sessions)
+	clear(r.shared)
 }
 
-func (r *SessionRegistry) removeLocked(sessionKey string) error {
-	if strings.TrimSpace(sessionKey) == "" {
-		for _, handles := range r.sessions {
-			for forwardKey, handle := range handles {
-				fmt.Printf("Stopping port-forward %s/%s:%d -> 127.0.0.1:%d\n", handle.spec.Namespace, handle.spec.Service, handle.spec.RemotePort, handle.spec.LocalPort)
-				r.releaseSharedLocked(forwardKey)
-			}
-		}
-		r.sessions = map[string]map[string]*forwardHandle{}
-		return nil
-	}
-
-	key := normalizeSessionKey(sessionKey)
-	handles, ok := r.sessions[key]
-	if !ok {
-		return nil
-	}
-	for forwardKey, handle := range handles {
-		fmt.Printf("Stopping port-forward %s/%s:%d -> 127.0.0.1:%d\n", handle.spec.Namespace, handle.spec.Service, handle.spec.RemotePort, handle.spec.LocalPort)
-		r.releaseSharedLocked(forwardKey)
-	}
-	delete(r.sessions, key)
-	return nil
-}
-
-// releaseSharedLocked decrements the reference count for a shared forward
-// and stops it only when no sessions reference it anymore.
-func (r *SessionRegistry) releaseSharedLocked(forwardKey string) {
-	sf, ok := r.shared[forwardKey]
-	if !ok {
-		return
-	}
-	sf.refCount--
-	if sf.refCount <= 0 {
-		sf.handle.stop()
-		delete(r.shared, forwardKey)
+func (r *SessionRegistry) releaseSharedLocked(forward contracts.PortForward) {
+	shared := r.shared[forward]
+	shared.refCount--
+	if shared.refCount == 0 {
+		shared.handle.stop()
+		delete(r.shared, forward)
 	}
 }
 
@@ -219,10 +176,9 @@ func (r *SessionRegistry) startForward(forward contracts.PortForward) (*forwardH
 	supervisedDone := make(chan struct{})
 
 	h := &forwardHandle{
-		spec:           forward,
-		boundLocalPort: boundLocalPort,
-		cancel:         cancel,
-		doneChan:       supervisedDone,
+		spec:     forward,
+		cancel:   cancel,
+		doneChan: supervisedDone,
 	}
 
 	// Supervision goroutine: watches the active forward and re-dials on failure.
@@ -373,42 +329,21 @@ func (r *SessionRegistry) resolvePodForwardTarget(forward contracts.PortForward)
 }
 
 func selectPodForPortForward(pods []corev1.Pod) (corev1.Pod, error) {
-	if len(pods) == 0 {
-		return corev1.Pod{}, fmt.Errorf("no pods found for service selector")
-	}
-
-	readyRunning := make([]corev1.Pod, 0, len(pods))
-	running := make([]corev1.Pod, 0, len(pods))
-	pending := make([]corev1.Pod, 0, len(pods))
-
-	for _, pod := range pods {
-		if pod.DeletionTimestamp != nil {
+	var selected *corev1.Pod
+	for idx := range pods {
+		pod := &pods[idx]
+		if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
 			continue
 		}
-
-		switch pod.Status.Phase {
-		case corev1.PodRunning:
-			if isPodReady(pod) {
-				readyRunning = append(readyRunning, pod)
-			} else {
-				running = append(running, pod)
-			}
-		case corev1.PodPending:
-			pending = append(pending, pod)
+		if selected == nil || (isPodReady(*pod) && !isPodReady(*selected)) ||
+			(isPodReady(*pod) == isPodReady(*selected) && pod.Name < selected.Name) {
+			selected = pod
 		}
 	}
-
-	for _, group := range [][]corev1.Pod{readyRunning, running, pending} {
-		if len(group) == 0 {
-			continue
-		}
-		slices.SortFunc(group, func(a, b corev1.Pod) int {
-			return strings.Compare(a.Name, b.Name)
-		})
-		return group[0], nil
+	if selected == nil {
+		return corev1.Pod{}, fmt.Errorf("no running pods available for service selector")
 	}
-
-	return corev1.Pod{}, fmt.Errorf("no running or pending pods available for service selector")
+	return *selected, nil
 }
 
 func isPodReady(pod corev1.Pod) bool {
@@ -452,8 +387,7 @@ func resolveServiceTargetPort(service corev1.Service, pod corev1.Pod, requestedR
 		}
 	}
 
-	// Fallback for cases where the request already provided a pod port.
-	return requestedRemotePort, nil
+	return 0, fmt.Errorf("service %s has no port %d", service.Name, requestedRemotePort)
 }
 
 func (h *forwardHandle) stop() {
@@ -465,62 +399,4 @@ func (h *forwardHandle) stop() {
 	case <-h.doneChan:
 	case <-time.After(forwardShutdownTimeout):
 	}
-}
-
-func normalizePortForwards(forwards []contracts.PortForward) []contracts.PortForward {
-	if len(forwards) == 0 {
-		return nil
-	}
-
-	normalized := make([]contracts.PortForward, 0, len(forwards))
-	seen := map[string]bool{}
-
-	for _, forward := range forwards {
-		namespace := strings.TrimSpace(forward.Namespace)
-		service := strings.TrimSpace(forward.Service)
-		if namespace == "" {
-			namespace = defaultNamespace
-		}
-		// LocalPort 0 is allowed: the OS allocates a free port at dial time.
-		if service == "" || forward.LocalPort < 0 || forward.RemotePort <= 0 {
-			continue
-		}
-
-		normalizedForward := contracts.PortForward{
-			Namespace:  namespace,
-			Service:    service,
-			LocalPort:  forward.LocalPort,
-			RemotePort: forward.RemotePort,
-		}
-		key := portForwardKey(normalizedForward)
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		normalized = append(normalized, normalizedForward)
-	}
-
-	slices.SortFunc(normalized, func(a, b contracts.PortForward) int {
-		return cmp.Or(
-			strings.Compare(a.Namespace, b.Namespace),
-			strings.Compare(a.Service, b.Service),
-			cmp.Compare(a.LocalPort, b.LocalPort),
-			cmp.Compare(a.RemotePort, b.RemotePort),
-		)
-	})
-
-	return normalized
-}
-
-func portForwardKey(forward contracts.PortForward) string {
-	return fmt.Sprintf("%s|%s|%d|%d", forward.Namespace, forward.Service, forward.LocalPort, forward.RemotePort)
-}
-
-// normalizeSessionKey gives unkeyed forwards a stable bucket of their own so
-// they cannot collide with a real session.
-func normalizeSessionKey(sessionKey string) string {
-	if trimmed := strings.TrimSpace(sessionKey); trimmed != "" {
-		return trimmed
-	}
-	return "__default__"
 }
