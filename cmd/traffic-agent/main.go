@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log"
@@ -18,12 +19,11 @@ import (
 
 	"github.com/ftechmax/krun/internal/contracts"
 	"github.com/ftechmax/krun/internal/streamlink"
-	"github.com/google/uuid"
 )
 
 var (
 	version = "debug" // will be set by the build system
-	agentID = uuid.NewString()
+	agentID = rand.Text()
 )
 
 const (
@@ -84,7 +84,6 @@ func run() error {
 	link := streamlink.New(ctx, streamlink.Config{
 		URL:       cfg.StreamURL,
 		Headers:   cfg.streamHeaders(),
-		SessionID: cfg.SessionID,
 		LogPrefix: "manager stream",
 	})
 	// The manager drops connection routing for this session when the agent
@@ -248,12 +247,7 @@ func captureConnection(ctx context.Context, conn net.Conn, connectionID string, 
 
 	conns.Set(connectionID, conn)
 
-	openEnvelope := link.Envelope(connectionID, contracts.StreamTypeOpen)
-	openEnvelope.Metadata = map[string]string{
-		"remote_addr": conn.RemoteAddr().String(),
-		"local_addr":  conn.LocalAddr().String(),
-	}
-	if err := link.Send(openEnvelope); err != nil {
+	if err := link.Send(link.Envelope(connectionID, contracts.StreamTypeOpen)); err != nil {
 		log.Printf("send open envelope failed (connection_id=%s): %v", connectionID, err)
 		conns.CloseAndDelete(connectionID)
 		return

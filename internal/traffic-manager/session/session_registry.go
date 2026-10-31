@@ -1,27 +1,23 @@
 package session
 
 import (
+	"crypto/rand"
 	"errors"
-	"fmt"
 	"slices"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/ftechmax/krun/internal/contracts"
-	"github.com/ftechmax/krun/internal/securetoken"
 )
 
 type DebugSessionRegistry struct {
-	mu        sync.RWMutex
-	sessions  map[string]contracts.DebugSession
-	randomHex func(int) (string, error)
+	mu       sync.RWMutex
+	sessions map[string]contracts.DebugSession
 }
 
 func NewDebugSessionRegistry() *DebugSessionRegistry {
 	return &DebugSessionRegistry{
-		sessions:  map[string]contracts.DebugSession{},
-		randomHex: securetoken.Hex,
+		sessions: map[string]contracts.DebugSession{},
 	}
 }
 
@@ -36,50 +32,25 @@ func (s *DebugSessionRegistry) Create(req contracts.CreateDebugSessionRequest) (
 	if req.ServicePort <= 0 {
 		return contracts.DebugSession{}, errors.New("invalid payload: service_port must be greater than 0")
 	}
-	if req.LocalPort <= 0 {
-		return contracts.DebugSession{}, errors.New("invalid payload: local_port must be greater than 0")
-	}
-
 	namespace := strings.TrimSpace(req.Namespace)
 	if namespace == "" {
 		namespace = "default"
 	}
-	workload := strings.TrimSpace(req.Workload)
-	if workload == "" {
-		workload = serviceName
-	}
-
-	sessionID, err := s.randomHex(8)
-	if err != nil {
-		return contracts.DebugSession{}, fmt.Errorf("generate session id: %w", err)
-	}
-	sessionToken, err := s.randomHex(16)
-	if err != nil {
-		return contracts.DebugSession{}, fmt.Errorf("generate session token: %w", err)
-	}
-
 	// Supersede any earlier session for the same workload: the new sidecar
 	// injection overwrites the old one in place, so the old registry entry
 	// can only go stale (e.g. after a helper restart skipped the delete).
 	for sessionID, existing := range s.sessions {
-		if existing.Namespace == namespace && existing.Workload == workload {
+		if existing.Namespace == namespace && existing.ServiceName == serviceName {
 			delete(s.sessions, sessionID)
 		}
 	}
 
 	session := contracts.DebugSession{
-		SessionID:    "sess_" + sessionID,
-		SessionToken: sessionToken,
+		SessionID:    "sess_" + rand.Text(),
+		SessionToken: rand.Text(),
 		Namespace:    namespace,
 		ServiceName:  serviceName,
-		Workload:     workload,
 		ServicePort:  req.ServicePort,
-		LocalPort:    req.LocalPort,
-		ClientID:     strings.TrimSpace(req.ClientID),
-		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
-	}
-	if session.ClientID == "" {
-		session.ClientID = "unknown"
 	}
 
 	s.sessions[session.SessionID] = session
@@ -95,9 +66,6 @@ func (s *DebugSessionRegistry) List() []contracts.DebugSession {
 		list = append(list, debugSession)
 	}
 	slices.SortFunc(list, func(a, b contracts.DebugSession) int {
-		if cmp := strings.Compare(a.CreatedAt, b.CreatedAt); cmp != 0 {
-			return cmp
-		}
 		return strings.Compare(a.SessionID, b.SessionID)
 	})
 	return list
@@ -107,28 +75,12 @@ func (s *DebugSessionRegistry) Get(sessionID string) (contracts.DebugSession, bo
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	key := strings.TrimSpace(sessionID)
-	if key == "" {
-		return contracts.DebugSession{}, false
-	}
-	debugSession, ok := s.sessions[key]
-	if !ok {
-		return contracts.DebugSession{}, false
-	}
-	return debugSession, true
+	debugSession, ok := s.sessions[sessionID]
+	return debugSession, ok
 }
 
-func (s *DebugSessionRegistry) Delete(sessionID string) bool {
+func (s *DebugSessionRegistry) Delete(sessionID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	key := strings.TrimSpace(sessionID)
-	if key == "" {
-		return false
-	}
-	if _, ok := s.sessions[key]; !ok {
-		return false
-	}
-	delete(s.sessions, key)
-	return true
+	delete(s.sessions, sessionID)
 }

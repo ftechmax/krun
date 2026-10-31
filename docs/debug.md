@@ -42,8 +42,9 @@ helper) or, on Linux,
 
 Enable and disable send the discovered `config.Service` directly as JSON.
 The helper keys sessions by `project/name`; namespace and application port
-defaults are applied during discovery. Restart a running helper with
-`krun debug helper stop` when upgrading from the older context-based payload.
+defaults are applied during discovery. The CLI, helper, manager, and agent share
+an internal protocol and should be rebuilt and upgraded together. Stop a running helper with
+`krun debug helper stop` before replacing its binary.
 
 ## Traffic Flow (Breakpoint Path)
 
@@ -101,6 +102,10 @@ The helper reaches these over the same port-forward that carries the traffic
 streams, so there is one transport to the manager and one failure mode to
 diagnose.
 
+Session creation sends only the namespace, service name, and container port.
+The manager uses the service name to find the workload; the local intercept port
+and dependency settings stay in the helper.
+
 Session CRUD requires the bearer token in `~/.krun/manager-token`, sent in the
 `X-Krun-Auth-Token` header. `krun debug runtime install` creates the token with
 private permissions when absent and reuses it on upgrades. Only its SHA-256
@@ -130,7 +135,8 @@ Streaming (same port, upgraded protocol):
 1. Helper attaches as session client.
 2. Agent attaches as session agent.
 3. Messages are typed envelopes (`open`, `data`, `close-write`, `close`,
-   `error`).
+   `error`), keyed by connection ID. The authenticated websocket identifies
+   the session, so envelopes do not repeat it.
 4. `close-write` half-closes one direction (sender saw EOF on its read
    side); the connection is torn down on `close`/`error` or once both
    directions are closed. Protocols that half-close and then await the

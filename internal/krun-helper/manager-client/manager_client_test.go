@@ -47,14 +47,8 @@ func TestManagerClientCreateSession(t *testing.T) {
 	if createReq.ServiceName != "orders-api" {
 		t.Fatalf("expected service name, got %q", createReq.ServiceName)
 	}
-	if createReq.Workload != "orders-api" {
-		t.Fatalf("expected workload to match service name, got %q", createReq.Workload)
-	}
-	if createReq.ServicePort != 8080 || createReq.LocalPort != 5000 {
-		t.Fatalf("unexpected ports in create request: %+v", createReq)
-	}
-	if createReq.ClientID != managerClientID {
-		t.Fatalf("expected client_id %q, got %q", managerClientID, createReq.ClientID)
+	if createReq.ServicePort != 8080 {
+		t.Fatalf("unexpected service port: %d", createReq.ServicePort)
 	}
 }
 

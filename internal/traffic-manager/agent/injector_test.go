@@ -38,7 +38,6 @@ func TestWorkloadInjectorInjectAndRemove(t *testing.T) {
 				SessionToken: "token-1",
 				Namespace:    "default",
 				ServiceName:  "orders-api",
-				Workload:     "orders-api",
 				ServicePort:  8080,
 			}
 
@@ -51,8 +50,8 @@ func TestWorkloadInjectorInjectAndRemove(t *testing.T) {
 				t.Fatalf("expected 2 containers, got %d", len(containers))
 			}
 			sidecar := containers[1]
-			if sidecar.Name != defaultContainerName {
-				t.Fatalf("expected sidecar name %q, got %q", defaultContainerName, sidecar.Name)
+			if sidecar.Name != contracts.AgentContainerName {
+				t.Fatalf("expected sidecar name %q, got %q", contracts.AgentContainerName, sidecar.Name)
 			}
 			if sidecar.Image != "registry.local/krun-traffic-agent:latest" {
 				t.Fatalf("unexpected sidecar image: %q", sidecar.Image)
@@ -94,14 +93,14 @@ func TestWorkloadInjectorCleanupRemovesAnnotatedAgents(t *testing.T) {
 	deployment := newTestDeployment("default", "orders-api")
 	deployment.Labels[injectedLabelKey] = "true"
 	deployment.Spec.Template.Spec.Containers = append(deployment.Spec.Template.Spec.Containers, corev1.Container{
-		Name:  defaultContainerName,
+		Name:  contracts.AgentContainerName,
 		Image: "agent:latest",
 	})
 
 	statefulSet := newTestStatefulSet("team-a", "billing-api")
 	statefulSet.Labels[injectedLabelKey] = "true"
 	statefulSet.Spec.Template.Spec.Containers = append(statefulSet.Spec.Template.Spec.Containers, corev1.Container{
-		Name:  defaultContainerName,
+		Name:  contracts.AgentContainerName,
 		Image: "agent:latest",
 	})
 
@@ -110,7 +109,7 @@ func TestWorkloadInjectorCleanupRemovesAnnotatedAgents(t *testing.T) {
 
 	unannotatedDeployment := newTestDeployment("default", "legacy-api")
 	unannotatedDeployment.Spec.Template.Spec.Containers = append(unannotatedDeployment.Spec.Template.Spec.Containers, corev1.Container{
-		Name:  defaultContainerName,
+		Name:  contracts.AgentContainerName,
 		Image: "agent:latest",
 	})
 
@@ -166,7 +165,6 @@ func TestWorkloadInjectorLookupOrder(t *testing.T) {
 		SessionToken: "token-1",
 		Namespace:    "default",
 		ServiceName:  "orders-api",
-		Workload:     "orders-api",
 		ServicePort:  8080,
 	}
 
@@ -194,7 +192,6 @@ func TestWorkloadInjectorInjectMissingWorkload(t *testing.T) {
 	err := injector.Inject(context.Background(), contracts.DebugSession{
 		Namespace:   "default",
 		ServiceName: "missing",
-		Workload:    "missing",
 		ServicePort: 8080,
 	})
 	if !errors.Is(err, ErrWorkloadNotFound) {
@@ -210,7 +207,6 @@ func TestWorkloadInjectorDefaults(t *testing.T) {
 		SessionToken: "token-1",
 		Namespace:    "default",
 		ServiceName:  "orders-api",
-		Workload:     "orders-api",
 		ServicePort:  8080,
 	}
 	if err := injector.Inject(context.Background(), session); err != nil {
@@ -405,9 +401,7 @@ func TestWorkloadInjectorRewritesAndRestoresProbes(t *testing.T) {
 		SessionID:   "sess_1",
 		Namespace:   "default",
 		ServiceName: "orders-api",
-		Workload:    "orders-api",
 		ServicePort: 8080,
-		LocalPort:   5005,
 	}
 
 	if err := injector.Inject(context.Background(), session); err != nil {

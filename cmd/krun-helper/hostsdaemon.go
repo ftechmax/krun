@@ -151,17 +151,17 @@ func (h *hostsWriter) closeAndRemove() error {
 
 func newHostsHandler(writer *hostsWriter, shutdownCh chan<- struct{}) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", only(http.MethodGet, func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, contracts.HelperResponse{Success: true, Message: "ok", Version: version})
-	}))
-	mux.HandleFunc("/v1/hosts", only(http.MethodPost, writer.handleApply))
-	mux.HandleFunc("/v1/shutdown", only(http.MethodPost, func(w http.ResponseWriter, _ *http.Request) {
+	})
+	mux.HandleFunc("POST /v1/hosts", writer.handleApply)
+	mux.HandleFunc("POST /v1/shutdown", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, contracts.HelperResponse{Success: true, Message: "shutting down"})
 		select {
 		case shutdownCh <- struct{}{}:
 		default:
 		}
-	}))
+	})
 	return mux
 }
 

@@ -88,8 +88,43 @@ func TestUnregisterActiveClientNotifiesAgents(t *testing.T) {
 	if envelope := drainOne(t, agent); envelope.Type != contracts.StreamTypeError {
 		t.Fatalf("expected error envelope, got %+v", envelope)
 	}
-	if envelope := drainOne(t, agent); envelope.Type != contracts.StreamTypeClose {
-		t.Fatalf("expected close envelope, got %+v", envelope)
+	assertNoEnvelope(t, agent)
+}
+
+func TestAgentDisconnectOnlyClosesItsOwnConnections(t *testing.T) {
+	registry := NewSessionRelayRegistry()
+	client := newTestPeer(contracts.StreamRoleClient, "session")
+	first := newTestPeer(contracts.StreamRoleAgent, "session")
+	second := newTestPeer(contracts.StreamRoleAgent, "session")
+	registry.register(client)
+	registry.register(first)
+	registry.register(second)
+	registry.routeFromPeer(first, contracts.StreamEnvelope{Type: contracts.StreamTypeOpen, ConnectionID: "first"})
+	registry.routeFromPeer(second, contracts.StreamEnvelope{Type: contracts.StreamTypeOpen, ConnectionID: "second"})
+	drainOne(t, client)
+	drainOne(t, client)
+
+	registry.unregister(first)
+	if envelope := drainOne(t, client); envelope.Type != contracts.StreamTypeError || envelope.ConnectionID != "first" {
+		t.Fatalf("unexpected disconnect notification: %+v", envelope)
+	}
+	assertNoEnvelope(t, client)
+	registry.routeFromPeer(client, contracts.StreamEnvelope{Type: contracts.StreamTypeData, ConnectionID: "second", Data: []byte("response")})
+	if envelope := drainOne(t, second); string(envelope.Data) != "response" {
+		t.Fatalf("surviving agent lost its connection: %+v", envelope)
+	}
+}
+
+func TestOpenWithoutHelperReturnsError(t *testing.T) {
+	registry := NewSessionRelayRegistry()
+	agent := newTestPeer(contracts.StreamRoleAgent, "session")
+	registry.register(agent)
+	registry.routeFromPeer(agent, contracts.StreamEnvelope{Type: contracts.StreamTypeOpen, ConnectionID: "connection"})
+	if envelope := drainOne(t, agent); envelope.Type != contracts.StreamTypeError || envelope.ConnectionID != "connection" {
+		t.Fatalf("unexpected rejection: %+v", envelope)
+	}
+	if len(registry.sessions["session"].connectionPeer) != 0 {
+		t.Fatal("rejected connection retained routing state")
 	}
 }
 

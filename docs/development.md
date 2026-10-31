@@ -8,6 +8,10 @@ Build the CLI binaries for Windows and Linux:
 make build-all VERSION=<version> GOARCH=amd64
 ```
 
+Keep `krun` and `krun-helper` in the same directory; the CLI starts the helper
+from beside its own binary. Manager addresses must include the scheme (for
+example, `http://krun-traffic-manager.krun-system.svc:8080`).
+
 Individual targets:
 
 ```sh

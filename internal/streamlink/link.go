@@ -106,8 +106,6 @@ type Config struct {
 	// URL is the websocket endpoint, normally built with URL().
 	URL     string
 	Headers http.Header
-	// SessionID is stamped onto every outbound envelope.
-	SessionID string
 	// LogPrefix identifies this peer in connect/disconnect logs.
 	LogPrefix string
 	// QueueSize bounds the outbound envelope queue; zero picks the default.
@@ -170,11 +168,10 @@ func (l *Link) Send(envelope contracts.StreamEnvelope) error {
 	}
 }
 
-// Envelope builds an outbound envelope carrying this link's session identity.
+// Envelope builds an outbound message for a bridged connection.
 func (l *Link) Envelope(connectionID string, envelopeType string) contracts.StreamEnvelope {
 	return contracts.StreamEnvelope{
 		Type:         envelopeType,
-		SessionID:    l.cfg.SessionID,
 		ConnectionID: connectionID,
 	}
 }

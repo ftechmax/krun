@@ -47,7 +47,7 @@ func PumpConn(link *Link, conns *Conns, connectionID string, conn net.Conn) {
 			return
 		}
 
-		SendErrorClose(link, connectionID, readErr)
+		SendError(link, connectionID, readErr)
 		conns.CloseAndDelete(connectionID)
 		return
 	}
@@ -76,7 +76,7 @@ func ApplyInbound(link *Link, conns *Conns, envelope contracts.StreamEnvelope) b
 		_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 		if _, err := conn.Write(envelope.Data); err != nil {
 			conns.CloseAndDelete(connectionID)
-			SendErrorClose(link, connectionID, err)
+			SendError(link, connectionID, err)
 		}
 		return true
 	case contracts.StreamTypeCloseWrite:
@@ -91,11 +91,9 @@ func ApplyInbound(link *Link, conns *Conns, envelope contracts.StreamEnvelope) b
 	return false
 }
 
-// SendErrorClose reports a per-connection failure to the peer and tears the
-// connection down: an error envelope carrying the cause, then a close.
-func SendErrorClose(link *Link, connectionID string, cause error) {
+// SendError reports a per-connection failure. The peer closes the connection.
+func SendError(link *Link, connectionID string, cause error) {
 	envelope := link.Envelope(connectionID, contracts.StreamTypeError)
 	envelope.Message = cause.Error()
 	_ = link.Send(envelope)
-	_ = link.Send(link.Envelope(connectionID, contracts.StreamTypeClose))
 }

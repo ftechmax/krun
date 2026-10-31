@@ -21,7 +21,6 @@ const (
 	ManagerNamespace   = "krun-system"
 	ManagerServiceName = "krun-traffic-manager"
 	ManagerServicePort = 8080
-	managerClientID    = "krun-helper"
 
 	requestTimeout = 10 * time.Second
 
@@ -50,10 +49,7 @@ func (c *Client) CreateSession(serviceContext config.Service) (contracts.DebugSe
 	request := contracts.CreateDebugSessionRequest{
 		Namespace:   serviceContext.Namespace,
 		ServiceName: serviceContext.Name,
-		Workload:    serviceContext.Name,
 		ServicePort: serviceContext.ContainerPort,
-		LocalPort:   serviceContext.InterceptPort,
-		ClientID:    managerClientID,
 	}
 
 	session, err := do[contracts.DebugSession](c, http.MethodPost, "/v1/sessions", request)

@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -318,10 +317,6 @@ func resolveManagerTokenPath() (string, error) {
 }
 
 func configureManagerAuth(objects []*unstructured.Unstructured, digest string) error {
-	if _, err := managerauth.ParseDigest(digest); err != nil {
-		return err
-	}
-
 	for _, object := range objects {
 		if object.GetAPIVersion() != "apps/v1" || object.GetKind() != "Deployment" ||
 			object.GetNamespace() != "krun-system" || object.GetName() != "krun-traffic-manager" {
@@ -440,11 +435,7 @@ func startHelperProcess(config cfg.Config) error {
 		return fmt.Errorf("load manager token (run `krun debug runtime install` first): %w", err)
 	}
 
-	args := make([]string, 0, 4)
-	args = append(args, "--manager-token-file", managerTokenPath)
-	if trimmedKubeConfig := strings.TrimSpace(config.KubeConfig); trimmedKubeConfig != "" {
-		args = append(args, "--kubeconfig", trimmedKubeConfig)
-	}
+	args := []string{"--manager-token-file", managerTokenPath, "--kubeconfig", config.KubeConfig}
 
 	if err := startBackgroundProcess(helperBinaryPath, args); err != nil {
 		return fmt.Errorf("failed to start helper: %w", err)
@@ -458,28 +449,11 @@ func resolveHelperBinaryPath() (string, error) {
 		helperBinaryName = "krun-helper.exe"
 	}
 
-	krunBinaryPath, err := os.Executable()
-	if err == nil {
-		candidate := filepath.Join(filepath.Dir(krunBinaryPath), helperBinaryName)
-		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
-			return candidate, nil
-		}
+	krunBinaryPath, err := utils.GetExecutablePath()
+	if err != nil {
+		return "", err
 	}
-
-	workingDirectoryPath, err := os.Getwd()
-	if err == nil {
-		candidate := filepath.Join(workingDirectoryPath, helperBinaryName)
-		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
-			return candidate, nil
-		}
-	}
-
-	helperBinaryPath, err := exec.LookPath(helperBinaryName)
-	if err == nil {
-		return helperBinaryPath, nil
-	}
-
-	return "", fmt.Errorf("%s not found next to krun executable, in current directory, or in PATH", helperBinaryName)
+	return filepath.Join(filepath.Dir(krunBinaryPath), helperBinaryName), nil
 }
 
 // helperCheckHealth probes the running helper and reports the version it is

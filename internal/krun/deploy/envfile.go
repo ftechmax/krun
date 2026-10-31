@@ -32,11 +32,6 @@ var excludedVars = map[string]bool{
 	"DOTNET_SYSTEM_GLOBALIZATION_INVARIANT": true,
 }
 
-type envVar struct {
-	Key   string
-	Value string
-}
-
 func CreateEnvFile(service cfg.Service, config cfg.Config, containerName string) error {
 	dir, err := serviceDir(service, config)
 	if err != nil {
@@ -65,8 +60,7 @@ func CreateEnvFile(service cfg.Service, config cfg.Config, containerName string)
 		return fmt.Errorf("read environment from pod %s: %w", pod.Name, err)
 	}
 
-	vars := filterEnvVars(parseEnvVars(envOutput))
-	return writeDotEnv(dir, vars)
+	return writeDotEnv(dir, filterEnvVars(envOutput))
 }
 
 func RemoveEnvFile(service cfg.Service, config cfg.Config) error {
@@ -81,53 +75,31 @@ func RemoveEnvFile(service cfg.Service, config cfg.Config) error {
 	return nil
 }
 
-func parseEnvVars(raw string) []envVar {
-	var vars []envVar
+// filterEnvVars keeps app settings as dotenv lines.
+func filterEnvVars(raw string) string {
+	var filtered strings.Builder
 	for line := range strings.SplitSeq(raw, "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" {
+		key, value, ok := strings.Cut(line, "=")
+		if !ok || key == "" || excludedVars[key] {
 			continue
 		}
-		idx := strings.IndexByte(line, '=')
-		if idx <= 0 {
+		if strings.HasPrefix(key, "KUBERNETES_") || strings.HasPrefix(value, "tcp://") {
 			continue
 		}
-		vars = append(vars, envVar{Key: line[:idx], Value: line[idx+1:]})
+		if strings.HasSuffix(key, "_SERVICE_HOST") || strings.Contains(key, "_SERVICE_PORT") {
+			continue
+		}
+		if strings.Contains(key, "_PORT_") && strings.Contains(key, "_TCP") {
+			continue
+		}
+		filtered.WriteString(line)
+		filtered.WriteByte('\n')
 	}
-	return vars
+	return filtered.String()
 }
 
-func filterEnvVars(vars []envVar) []envVar {
-	var filtered []envVar
-	for _, v := range vars {
-		if excludedVars[v.Key] {
-			continue
-		}
-		if strings.HasPrefix(v.Key, "KUBERNETES_") {
-			continue
-		}
-		// Kubernetes service discovery: value is a tcp:// address
-		if strings.HasPrefix(v.Value, "tcp://") {
-			continue
-		}
-		// Kubernetes service discovery: *_SERVICE_HOST, *_SERVICE_PORT*
-		if strings.HasSuffix(v.Key, "_SERVICE_HOST") || strings.Contains(v.Key, "_SERVICE_PORT") {
-			continue
-		}
-		// Kubernetes service discovery: *_PORT_*_TCP* (e.g. SVC_PORT_8080_TCP_ADDR)
-		if strings.Contains(v.Key, "_PORT_") && strings.Contains(v.Key, "_TCP") {
-			continue
-		}
-		filtered = append(filtered, v)
-	}
-	return filtered
-}
-
-func writeDotEnv(dir string, vars []envVar) error {
-	var buf strings.Builder
-	for _, v := range vars {
-		fmt.Fprintf(&buf, "%s=%s\n", v.Key, v.Value)
-	}
+func writeDotEnv(dir, contents string) error {
 	path := filepath.Join(dir, ".env")
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
@@ -137,7 +109,7 @@ func writeDotEnv(dir string, vars []envVar) error {
 	if err := file.Chmod(0o600); err != nil {
 		return fmt.Errorf("set %s permissions: %w", path, err)
 	}
-	if _, err := file.WriteString(buf.String()); err != nil {
+	if _, err := file.WriteString(contents); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return file.Close()

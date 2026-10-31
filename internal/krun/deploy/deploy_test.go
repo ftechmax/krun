@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -331,7 +330,7 @@ data:
 	}
 }
 
-func TestEnsureNamespacesCreatesMissingInSortedOrder(t *testing.T) {
+func TestEnsureNamespacesCreatesEachTargetOnce(t *testing.T) {
 	clientset := kubefake.NewSimpleClientset()
 	client := &kube.Client{Clientset: clientset}
 	objects := []*unstructured.Unstructured{
@@ -350,8 +349,8 @@ func TestEnsureNamespacesCreatesMissingInSortedOrder(t *testing.T) {
 		}
 		created = append(created, action.(k8stesting.CreateAction).GetObject().(*corev1.Namespace).Name)
 	}
-	if !slices.Equal(created, []string{"alpha", "zeta"}) {
-		t.Fatalf("created namespaces = %v, want [alpha zeta]", created)
+	if !slices.Equal(created, []string{"zeta", "alpha"}) {
+		t.Fatalf("created namespaces = %v, want [zeta alpha]", created)
 	}
 }
 
@@ -373,11 +372,11 @@ func TestEnsureNamespacesIgnoresExistingAndManifestNamespaces(t *testing.T) {
 		t.Fatalf("ensureNamespaces: %v", err)
 	}
 	for _, action := range clientset.Actions() {
-		if action.GetVerb() == "create" {
-			t.Fatalf("unexpected create action: %+v", action)
+		if action.GetVerb() != "create" {
+			t.Fatalf("unexpected namespace preflight: %+v", action)
 		}
-		if action.GetVerb() == "get" && action.(k8stesting.GetAction).GetName() == "supplied" {
-			t.Fatal("manifest-supplied namespace was queried")
+		if action.(k8stesting.CreateAction).GetObject().(*corev1.Namespace).Name != "existing" {
+			t.Fatalf("manifest-supplied namespace was created: %+v", action)
 		}
 	}
 }
@@ -394,27 +393,15 @@ func TestEnsureNamespacesIgnoresAlreadyExistsRace(t *testing.T) {
 	}
 }
 
-func TestEnsureNamespacesReturnsActionableForbiddenErrors(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		verb     string
-		resource string
-		want     string
-	}{
-		{name: "get", verb: "get", resource: "namespaces", want: "grant get access to namespaces"},
-		{name: "create", verb: "create", resource: "namespaces", want: "kubectl create namespace locked"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			clientset := kubefake.NewSimpleClientset()
-			clientset.PrependReactor(tc.verb, tc.resource, func(k8stesting.Action) (bool, runtime.Object, error) {
-				return true, nil, k8serrors.NewForbidden(schema.GroupResource{Resource: "namespaces"}, "locked", errors.New("denied"))
-			})
-			client := &kube.Client{Clientset: clientset}
-			err := ensureNamespaces(context.Background(), client, []*unstructured.Unstructured{newConfigMap("locked", "cfg", nil)})
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("ensureNamespaces error = %v, want text %q", err, tc.want)
-			}
-		})
+func TestEnsureNamespacesReturnsCreateError(t *testing.T) {
+	clientset := kubefake.NewSimpleClientset()
+	denied := k8serrors.NewForbidden(schema.GroupResource{Resource: "namespaces"}, "locked", errors.New("denied"))
+	clientset.PrependReactor("create", "namespaces", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, denied
+	})
+	err := ensureNamespaces(context.Background(), &kube.Client{Clientset: clientset}, []*unstructured.Unstructured{newConfigMap("locked", "cfg", nil)})
+	if !errors.Is(err, denied) {
+		t.Fatalf("ensureNamespaces error = %v, want %v", err, denied)
 	}
 }
 

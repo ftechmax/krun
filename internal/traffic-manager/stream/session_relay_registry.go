@@ -81,94 +81,51 @@ func (h *SessionRelayRegistry) register(peer *relayPeer) {
 }
 
 func (h *SessionRelayRegistry) unregister(peer *relayPeer) {
-	var toClient []contracts.StreamEnvelope
-	var toAgent map[*relayPeer][]contracts.StreamEnvelope
-	var targetClient *relayPeer
-
 	h.mu.Lock()
-	session, ok := h.sessions[peer.sessionID]
-	if !ok {
+	session := h.sessions[peer.sessionID]
+	if session == nil || (peer.role == contracts.StreamRoleClient && session.client != peer) {
 		h.mu.Unlock()
 		return
 	}
 
-	switch peer.role {
-	case contracts.StreamRoleClient:
-		if session.client != peer {
-			// A newer client replaced this peer; the live routing state
-			// belongs to the replacement and must stay untouched.
-			break
-		}
+	message := "agent stream disconnected"
+	if peer.role == contracts.StreamRoleClient {
 		session.client = nil
-		if len(session.connectionPeer) > 0 {
-			toAgent = map[*relayPeer][]contracts.StreamEnvelope{}
-			for connectionID, owner := range session.connectionPeer {
-				delete(session.connectionPeer, connectionID)
-				if owner == nil {
-					continue
-				}
-				toAgent[owner] = append(toAgent[owner],
-					contracts.StreamEnvelope{
-						Type:         contracts.StreamTypeError,
-						SessionID:    peer.sessionID,
-						ConnectionID: connectionID,
-						Message:      "helper stream disconnected",
-					},
-					contracts.StreamEnvelope{
-						Type:         contracts.StreamTypeClose,
-						SessionID:    peer.sessionID,
-						ConnectionID: connectionID,
-					},
-				)
-			}
-		}
-	default:
+		message = "helper stream disconnected"
+	} else {
 		delete(session.agents, peer)
-		if len(session.connectionPeer) > 0 {
-			for connectionID, owner := range session.connectionPeer {
-				if owner != peer {
-					continue
-				}
-				delete(session.connectionPeer, connectionID)
-				if session.client != nil {
-					toClient = append(toClient,
-						contracts.StreamEnvelope{
-							Type:         contracts.StreamTypeError,
-							SessionID:    peer.sessionID,
-							ConnectionID: connectionID,
-							Message:      "agent stream disconnected",
-						},
-						contracts.StreamEnvelope{
-							Type:         contracts.StreamTypeClose,
-							SessionID:    peer.sessionID,
-							ConnectionID: connectionID,
-						},
-					)
-				}
-			}
+	}
+
+	notify := map[string]*relayPeer{}
+	for connectionID, owner := range session.connectionPeer {
+		if peer.role != contracts.StreamRoleClient && owner != peer {
+			continue
+		}
+		delete(session.connectionPeer, connectionID)
+		target := session.client
+		if peer.role == contracts.StreamRoleClient {
+			target = owner
+		}
+		if target != nil {
+			notify[connectionID] = target
 		}
 	}
-	targetClient = session.client
 
-	if session.client == nil && len(session.agents) == 0 && len(session.connectionPeer) == 0 {
+	if session.client == nil && len(session.agents) == 0 {
 		delete(h.sessions, peer.sessionID)
 	}
 	h.mu.Unlock()
 
-	if len(toClient) > 0 && targetClient != nil {
-		for _, envelope := range toClient {
-			sendEnvelope(targetClient, envelope)
-		}
-	}
-	for agentPeer, envelopes := range toAgent {
-		for _, envelope := range envelopes {
-			sendEnvelope(agentPeer, envelope)
-		}
+	for connectionID, target := range notify {
+		sendEnvelope(target, contracts.StreamEnvelope{
+			Type:         contracts.StreamTypeError,
+			ConnectionID: connectionID,
+			Message:      message,
+		})
 	}
 }
 
 func (h *SessionRelayRegistry) routeFromPeer(peer *relayPeer, envelope contracts.StreamEnvelope) {
-	envelope.SessionID = peer.sessionID
 	connectionID := strings.TrimSpace(envelope.ConnectionID)
 	envelope.ConnectionID = connectionID
 
@@ -181,43 +138,25 @@ func (h *SessionRelayRegistry) routeFromPeer(peer *relayPeer, envelope contracts
 }
 
 func (h *SessionRelayRegistry) routeFromAgent(peer *relayPeer, envelope contracts.StreamEnvelope) {
-	var target *relayPeer
-	var toAgent []contracts.StreamEnvelope
-
 	h.mu.Lock()
-	session := h.ensureSessionLocked(peer.sessionID)
-	if envelope.Type == contracts.StreamTypeOpen && envelope.ConnectionID != "" {
+	session := h.sessions[peer.sessionID]
+	target := session.client
+	if envelope.Type == contracts.StreamTypeOpen && envelope.ConnectionID != "" && target != nil {
 		session.connectionPeer[envelope.ConnectionID] = peer
 	}
 	if envelope.Type == contracts.StreamTypeClose || envelope.Type == contracts.StreamTypeError {
 		delete(session.connectionPeer, envelope.ConnectionID)
 	}
-
-	target = session.client
-	if target == nil && envelope.Type == contracts.StreamTypeOpen && envelope.ConnectionID != "" {
-		delete(session.connectionPeer, envelope.ConnectionID)
-		toAgent = []contracts.StreamEnvelope{
-			{
-				Type:         contracts.StreamTypeError,
-				SessionID:    peer.sessionID,
-				ConnectionID: envelope.ConnectionID,
-				Message:      "no helper client stream attached",
-			},
-			{
-				Type:         contracts.StreamTypeClose,
-				SessionID:    peer.sessionID,
-				ConnectionID: envelope.ConnectionID,
-			},
-		}
-	}
 	h.mu.Unlock()
 
 	if target != nil {
 		sendEnvelope(target, envelope)
-		return
-	}
-	for _, response := range toAgent {
-		sendEnvelope(peer, response)
+	} else if envelope.Type == contracts.StreamTypeOpen {
+		sendEnvelope(peer, contracts.StreamEnvelope{
+			Type:         contracts.StreamTypeError,
+			ConnectionID: envelope.ConnectionID,
+			Message:      "no helper client stream attached",
+		})
 	}
 }
 
@@ -255,9 +194,6 @@ func (h *SessionRelayRegistry) ensureSessionLocked(sessionID string) *sessionRel
 }
 
 func sendEnvelope(peer *relayPeer, envelope contracts.StreamEnvelope) {
-	if peer == nil {
-		return
-	}
 	select {
 	case peer.sendCh <- envelope:
 		return

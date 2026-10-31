@@ -2,7 +2,6 @@ package streamlink
 
 import (
 	"net"
-	"strings"
 	"sync"
 )
 
@@ -97,9 +96,6 @@ func (r *Conns) CloseWriteHalf(connectionID string) bool {
 }
 
 func (r *Conns) CloseAndDelete(connectionID string) {
-	if strings.TrimSpace(connectionID) == "" {
-		return
-	}
 	r.mu.Lock()
 	e, ok := r.conns[connectionID]
 	if ok {
@@ -113,10 +109,7 @@ func (r *Conns) CloseAndDelete(connectionID string) {
 
 func (r *Conns) CloseAll() {
 	r.mu.Lock()
-	entries := make([]*entry, 0, len(r.conns))
-	for _, e := range r.conns {
-		entries = append(entries, e)
-	}
+	entries := r.conns
 	r.conns = map[string]*entry{}
 	r.mu.Unlock()
 

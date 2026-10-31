@@ -32,13 +32,12 @@ type SessionRegistry struct {
 	mu             sync.Mutex
 	client         *kube.Client
 	startForwardFn func(contracts.PortForward) (*forwardHandle, error)
-	sessions       map[string]map[contracts.PortForward]*forwardHandle
 	shared         map[contracts.PortForward]*sharedForward
 }
 
 type sharedForward struct {
-	handle   *forwardHandle
-	refCount int
+	handle *forwardHandle
+	users  map[string]bool
 }
 
 type forwardHandle struct {
@@ -55,9 +54,8 @@ func NewSessionRegistry(kubeConfigPath string) (*SessionRegistry, error) {
 		return nil, err
 	}
 	registry := &SessionRegistry{
-		client:   client,
-		sessions: map[string]map[contracts.PortForward]*forwardHandle{},
-		shared:   map[contracts.PortForward]*sharedForward{},
+		client: client,
+		shared: map[contracts.PortForward]*sharedForward{},
 	}
 	registry.startForwardFn = registry.startForward
 	return registry, nil
@@ -67,77 +65,55 @@ func (r *SessionRegistry) Upsert(sessionKey string, forwards []contracts.PortFor
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	existing := r.sessions[sessionKey]
-
-	next := make(map[contracts.PortForward]*forwardHandle, len(forwards))
-	acquiredKeys := make([]contracts.PortForward, 0, len(forwards))
+	wanted := make(map[contracts.PortForward]bool, len(forwards))
+	var acquired []contracts.PortForward
 	for _, forward := range forwards {
-		if _, ok := next[forward]; ok {
-			continue
-		}
-		if existingHandle, ok := existing[forward]; ok {
-			next[forward] = existingHandle
-			continue
-		}
-
-		if sf, ok := r.shared[forward]; ok {
-			sf.refCount++
-			next[forward] = sf.handle
-			acquiredKeys = append(acquiredKeys, forward)
-			continue
-		}
-
-		handle, err := r.startForwardFn(forward)
-		if err != nil {
-			for _, acquiredKey := range acquiredKeys {
-				r.releaseSharedLocked(acquiredKey)
+		wanted[forward] = true
+		shared := r.shared[forward]
+		if shared == nil {
+			handle, err := r.startForwardFn(forward)
+			if err != nil {
+				for _, spec := range acquired {
+					r.release(spec, sessionKey)
+				}
+				return err
 			}
-			return err
+			shared = &sharedForward{handle: handle, users: map[string]bool{}}
+			r.shared[forward] = shared
+			fmt.Printf("Started port-forward %s/%s:%d -> 127.0.0.1:%d\n", forward.Namespace, forward.Service, forward.RemotePort, handle.spec.LocalPort)
 		}
-
-		fmt.Printf("Started port-forward %s/%s:%d -> 127.0.0.1:%d\n", handle.spec.Namespace, handle.spec.Service, handle.spec.RemotePort, handle.spec.LocalPort)
-		r.shared[forward] = &sharedForward{handle: handle, refCount: 1}
-		next[forward] = handle
-		acquiredKeys = append(acquiredKeys, forward)
+		if !shared.users[sessionKey] {
+			shared.users[sessionKey] = true
+			acquired = append(acquired, forward)
+		}
 	}
 
-	for existingKey, existingHandle := range existing {
-		if _, ok := next[existingKey]; ok {
-			continue
+	for forward, shared := range r.shared {
+		if shared.users[sessionKey] && !wanted[forward] {
+			r.release(forward, sessionKey)
 		}
-		fmt.Printf("Stopping port-forward %s/%s:%d -> 127.0.0.1:%d\n", existingHandle.spec.Namespace, existingHandle.spec.Service, existingHandle.spec.RemotePort, existingHandle.spec.LocalPort)
-		r.releaseSharedLocked(existingKey)
 	}
-
-	r.sessions[sessionKey] = next
 	return nil
 }
 
-// BoundLocalPort reports the actual local port of a forward previously
-// requested via Upsert. For requests with LocalPort 0 this is the
-// OS-allocated port; the lookup key is the forward spec as requested.
+// BoundLocalPort reports the local port allocated for a session's forward.
 func (r *SessionRegistry) BoundLocalPort(sessionKey string, forward contracts.PortForward) (int, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	handles, ok := r.sessions[sessionKey]
-	if !ok {
+	shared := r.shared[forward]
+	if shared == nil || !shared.users[sessionKey] {
 		return 0, false
 	}
-	handle, ok := handles[forward]
-	if !ok {
-		return 0, false
-	}
-	return handle.spec.LocalPort, true
+	return shared.handle.spec.LocalPort, true
 }
 
 func (r *SessionRegistry) Remove(sessionKey string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for forward := range r.sessions[sessionKey] {
-		r.releaseSharedLocked(forward)
+	for forward := range r.shared {
+		r.release(forward, sessionKey)
 	}
-	delete(r.sessions, sessionKey)
 }
 
 func (r *SessionRegistry) Clear() {
@@ -146,14 +122,14 @@ func (r *SessionRegistry) Clear() {
 	for _, forward := range r.shared {
 		forward.handle.stop()
 	}
-	clear(r.sessions)
 	clear(r.shared)
 }
 
-func (r *SessionRegistry) releaseSharedLocked(forward contracts.PortForward) {
+// release is called with mu held. The last user owns forward shutdown.
+func (r *SessionRegistry) release(forward contracts.PortForward, sessionKey string) {
 	shared := r.shared[forward]
-	shared.refCount--
-	if shared.refCount == 0 {
+	delete(shared.users, sessionKey)
+	if len(shared.users) == 0 {
 		shared.handle.stop()
 		delete(r.shared, forward)
 	}
@@ -368,13 +344,10 @@ func resolveServiceTargetPort(service corev1.Service, pod corev1.Pod, requestedR
 				return int(target), nil
 			}
 		case intstr.String:
-			targetName := strings.TrimSpace(servicePort.TargetPort.StrVal)
-			if targetName == "" {
-				break
-			}
+			targetName := servicePort.TargetPort.StrVal
 			for _, container := range pod.Spec.Containers {
 				for _, containerPort := range container.Ports {
-					if strings.TrimSpace(containerPort.Name) == targetName && containerPort.ContainerPort > 0 {
+					if containerPort.Name == targetName {
 						return int(containerPort.ContainerPort), nil
 					}
 				}
@@ -382,9 +355,7 @@ func resolveServiceTargetPort(service corev1.Service, pod corev1.Pod, requestedR
 			return 0, fmt.Errorf("service port %d targets named port %q that was not found on pod %s", requestedRemotePort, targetName, pod.Name)
 		}
 
-		if servicePort.Port > 0 {
-			return int(servicePort.Port), nil
-		}
+		return int(servicePort.Port), nil
 	}
 
 	return 0, fmt.Errorf("service %s has no port %d", service.Name, requestedRemotePort)

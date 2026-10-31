@@ -1,10 +1,8 @@
 package streamlink
 
 import (
-	"errors"
 	"fmt"
 	"net/url"
-	"strings"
 )
 
 // Stream endpoints on the traffic-manager, one per peer role.
@@ -13,20 +11,10 @@ const (
 	ClientPath = "/v1/stream/client"
 )
 
-// URL turns a manager address into a websocket stream URL for one session.
-// The address may omit the scheme (http is assumed) and may carry a base path,
-// which the stream path is appended to. Authentication belongs in request
-// headers and is never placed in the URL.
+// URL builds a websocket endpoint from the manager's HTTP address.
+// Authentication stays in request headers.
 func URL(managerAddress string, path string, sessionID string) (string, error) {
-	rawAddress := strings.TrimSpace(managerAddress)
-	if rawAddress == "" {
-		return "", errors.New("manager address is required")
-	}
-	if !strings.Contains(rawAddress, "://") {
-		rawAddress = "http://" + rawAddress
-	}
-
-	parsed, err := url.Parse(rawAddress)
+	parsed, err := url.Parse(managerAddress)
 	if err != nil {
 		return "", fmt.Errorf("invalid manager address %q: %w", managerAddress, err)
 	}
@@ -44,9 +32,7 @@ func URL(managerAddress string, path string, sessionID string) (string, error) {
 		return "", fmt.Errorf("unsupported manager address scheme %q", parsed.Scheme)
 	}
 
-	parsed.Path = strings.TrimRight(parsed.Path, "/") + path
-	query := parsed.Query()
-	query.Set("session_id", strings.TrimSpace(sessionID))
-	parsed.RawQuery = query.Encode()
+	parsed.Path = path
+	parsed.RawQuery = url.Values{"session_id": {sessionID}}.Encode()
 	return parsed.String(), nil
 }

@@ -38,7 +38,7 @@ func TestPumpConnDataThenEOF(t *testing.T) {
 	}
 }
 
-func TestPumpConnPreservesDataErrorCloseOrdering(t *testing.T) {
+func TestPumpConnPreservesDataBeforeError(t *testing.T) {
 	link := testQueueLink(t)
 	conns := NewConns()
 	readErr := errors.New("read failed")
@@ -46,7 +46,7 @@ func TestPumpConnPreservesDataErrorCloseOrdering(t *testing.T) {
 	conns.Set("c1", conn)
 
 	PumpConn(link, conns, "c1", conn)
-	assertEnvelopeTypes(t, link.sendCh, contracts.StreamTypeData, contracts.StreamTypeError, contracts.StreamTypeClose)
+	assertEnvelopeTypes(t, link.sendCh, contracts.StreamTypeData, contracts.StreamTypeError)
 	if conns.Get("c1") != nil {
 		t.Fatal("failed connection remained registered")
 	}
@@ -84,7 +84,7 @@ func TestApplyInboundDataAndLifecycle(t *testing.T) {
 	}
 }
 
-func TestApplyInboundWriteErrorSendsErrorThenClose(t *testing.T) {
+func TestApplyInboundWriteErrorReportsFailure(t *testing.T) {
 	link := testQueueLink(t)
 	conns := NewConns()
 	conn := &recordingConn{writeErr: errors.New("write failed")}
@@ -93,7 +93,7 @@ func TestApplyInboundWriteErrorSendsErrorThenClose(t *testing.T) {
 	ApplyInbound(link, conns, contracts.StreamEnvelope{
 		Type: contracts.StreamTypeData, ConnectionID: "c1", Data: []byte("hello"),
 	})
-	assertEnvelopeTypes(t, link.sendCh, contracts.StreamTypeError, contracts.StreamTypeClose)
+	assertEnvelopeTypes(t, link.sendCh, contracts.StreamTypeError)
 	if !conn.closed || conns.Get("c1") != nil {
 		t.Fatal("write failure did not remove and close the connection")
 	}
@@ -117,7 +117,7 @@ func TestApplyInboundErrorClosesConnection(t *testing.T) {
 
 func testQueueLink(t *testing.T) *Link {
 	t.Helper()
-	link := New(context.Background(), Config{SessionID: "session", QueueSize: 8})
+	link := New(context.Background(), Config{QueueSize: 8})
 	t.Cleanup(link.cancel)
 	return link
 }

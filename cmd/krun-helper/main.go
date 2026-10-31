@@ -201,25 +201,12 @@ func startManagerForward(forwards *helperportforward.SessionRegistry) (string, e
 
 func newHandler(d *daemon) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", only(http.MethodGet, d.handleHealthz))
-	mux.HandleFunc("/v1/debug/sessions", only(http.MethodGet, d.handleSessionsList))
-	mux.HandleFunc("/v1/debug/enable", only(http.MethodPost, d.handleEnable))
-	mux.HandleFunc("/v1/debug/disable", only(http.MethodPost, d.handleDisable))
-	mux.HandleFunc("/v1/shutdown", only(http.MethodPost, d.handleShutdown))
+	mux.HandleFunc("GET /healthz", d.handleHealthz)
+	mux.HandleFunc("GET /v1/debug/sessions", d.handleSessionsList)
+	mux.HandleFunc("POST /v1/debug/enable", d.handleEnable)
+	mux.HandleFunc("POST /v1/debug/disable", d.handleDisable)
+	mux.HandleFunc("POST /v1/shutdown", d.handleShutdown)
 	return mux
-}
-
-func only(method string, next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != method {
-			writeJSON(w, http.StatusMethodNotAllowed, contracts.HelperResponse{
-				Success: false,
-				Message: "method not allowed",
-			})
-			return
-		}
-		next(w, r)
-	}
 }
 
 func (d *daemon) handleHealthz(w http.ResponseWriter, _ *http.Request) {

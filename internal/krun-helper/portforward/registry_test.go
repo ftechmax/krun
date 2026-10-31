@@ -15,8 +15,7 @@ import (
 func newTestRegistry() (*SessionRegistry, *startTracker) {
 	tracker := &startTracker{}
 	r := &SessionRegistry{
-		sessions: map[string]map[contracts.PortForward]*forwardHandle{},
-		shared:   map[contracts.PortForward]*sharedForward{},
+		shared: map[contracts.PortForward]*sharedForward{},
 	}
 	r.startForwardFn = tracker.start
 	return r, tracker
@@ -140,8 +139,8 @@ func TestUpsertSharesForwardAcrossSessions(t *testing.T) {
 	if tracker.count() != 1 {
 		t.Fatalf("expected 1 startForward call, got %d", tracker.count())
 	}
-	if r.shared[redis[0]].refCount != 2 {
-		t.Fatalf("expected refCount 2, got %d", r.shared[redis[0]].refCount)
+	if len(r.shared[redis[0]].users) != 2 {
+		t.Fatalf("expected user count 2, got %d", len(r.shared[redis[0]].users))
 	}
 }
 
@@ -151,7 +150,7 @@ func TestUpsertDeduplicatesWithinSession(t *testing.T) {
 	if err := r.Upsert("session-a", []contracts.PortForward{redis, redis}); err != nil {
 		t.Fatal(err)
 	}
-	if tracker.count() != 1 || r.shared[redis].refCount != 1 {
+	if tracker.count() != 1 || len(r.shared[redis].users) != 1 {
 		t.Fatal("duplicate dependency acquired the forward twice")
 	}
 	r.Remove("session-a")
@@ -190,8 +189,8 @@ func TestRemoveOneSessionKeepsSharedForward(t *testing.T) {
 	if !ok {
 		t.Fatal("shared forward was removed while session-b still uses it")
 	}
-	if sf.refCount != 1 {
-		t.Fatalf("expected refCount 1, got %d", sf.refCount)
+	if len(sf.users) != 1 {
+		t.Fatalf("expected user count 1, got %d", len(sf.users))
 	}
 }
 
@@ -225,12 +224,9 @@ func TestClearStopsAllSharedForwards(t *testing.T) {
 	if len(r.shared) != 0 {
 		t.Fatalf("expected shared map to be empty, got %d entries", len(r.shared))
 	}
-	if len(r.sessions) != 0 {
-		t.Fatalf("expected sessions map to be empty, got %d entries", len(r.sessions))
-	}
 }
 
-func TestUpsertRollsBackSharedRefsOnStartFailure(t *testing.T) {
+func TestUpsertRollsBackOwnershipOnStartFailure(t *testing.T) {
 	r, _ := newTestRegistry()
 	redis := makeForward("default", "redis", 6379)
 	bad := makeForward("default", "badservice", 9999)
@@ -254,15 +250,15 @@ func TestUpsertRollsBackSharedRefsOnStartFailure(t *testing.T) {
 		t.Fatal("expected error from upsert, got nil")
 	}
 
-	// Redis shared refCount should remain 1 (rolled back).
+	// Only session-a should still own redis after rollback.
 	key := redis
-	if r.shared[key].refCount != 1 {
-		t.Fatalf("expected refCount 1 after rollback, got %d", r.shared[key].refCount)
+	if len(r.shared[key].users) != 1 {
+		t.Fatalf("expected user count 1 after rollback, got %d", len(r.shared[key].users))
 	}
 
 	// Session B should not exist.
-	if _, ok := r.sessions["session-b"]; ok {
-		t.Fatal("session-b should not exist after failed upsert")
+	if r.shared[redis].users["session-b"] {
+		t.Fatal("session-b retained ownership after failed upsert")
 	}
 }
 
@@ -296,7 +292,7 @@ func TestUpsertReplacingForwardsKeepsOverlappingHandle(t *testing.T) {
 		t.Fatalf("initial upsert: %v", err)
 	}
 	redisKey := redis
-	originalRedis := r.sessions["session-a"][redisKey]
+	originalRedis := r.shared[redisKey].handle
 
 	if err := r.Upsert("session-a", []contracts.PortForward{redis, postgres}); err != nil {
 		t.Fatalf("replacement upsert: %v", err)
@@ -304,7 +300,7 @@ func TestUpsertReplacingForwardsKeepsOverlappingHandle(t *testing.T) {
 	if tracker.count() != 3 {
 		t.Fatalf("expected only the new postgres forward to start, total starts = %d", tracker.count())
 	}
-	if got := r.sessions["session-a"][redisKey]; got != originalRedis {
+	if got := r.shared[redisKey].handle; got != originalRedis {
 		t.Fatal("replacement restarted the overlapping redis forward")
 	}
 	if _, ok := r.shared[rabbit]; ok {
@@ -312,6 +308,38 @@ func TestUpsertReplacingForwardsKeepsOverlappingHandle(t *testing.T) {
 	}
 	if _, ok := r.shared[postgres]; !ok {
 		t.Fatal("new postgres forward was not registered")
+	}
+}
+
+func TestFailedReplacementKeepsExistingForwardAndStopsNewOne(t *testing.T) {
+	r, tracker := newTestRegistry()
+	redis := makeForward("default", "redis", 6379)
+	postgres := makeForward("default", "postgres", 5432)
+	bad := makeForward("default", "missing", 9999)
+	stopped := false
+	r.startForwardFn = func(spec contracts.PortForward) (*forwardHandle, error) {
+		if spec == bad {
+			return nil, fmt.Errorf("service unavailable")
+		}
+		handle, err := tracker.start(spec)
+		if spec == postgres {
+			handle.cancel = func() { stopped = true }
+		}
+		return handle, err
+	}
+	if err := r.Upsert("session", []contracts.PortForward{redis}); err != nil {
+		t.Fatal(err)
+	}
+	original := r.shared[redis].handle
+	if err := r.Upsert("session", []contracts.PortForward{redis, postgres, bad}); err == nil {
+		t.Fatal("expected replacement to fail")
+	}
+	if !stopped || len(r.shared) != 1 || r.shared[redis].handle != original || !r.shared[redis].users["session"] {
+		t.Fatal("failed replacement did not roll back only its new forward")
+	}
+	r.Remove("unknown-session")
+	if len(r.shared) != 1 {
+		t.Fatal("removing an unknown session stopped an active forward")
 	}
 }
 

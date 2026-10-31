@@ -4,6 +4,7 @@
 package managerauth
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -11,8 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/ftechmax/krun/internal/securetoken"
 )
 
 const (
@@ -51,10 +50,9 @@ func EnsureLocalToken(path string) (string, error) {
 		return "", err
 	}
 
-	token, err := securetoken.Hex(32)
-	if err != nil {
-		return "", fmt.Errorf("generate manager token: %w", err)
-	}
+	var random [32]byte
+	rand.Read(random[:])
+	token := hex.EncodeToString(random[:])
 	temp, err := os.CreateTemp(dir, ".manager-token-*")
 	if err != nil {
 		return "", fmt.Errorf("create temporary manager token: %w", err)

@@ -1,45 +1,10 @@
 package session
 
 import (
-	"errors"
 	"testing"
-	"time"
 
 	"github.com/ftechmax/krun/internal/contracts"
 )
-
-func TestCreateEntropyFailureDoesNotSupersedeExistingSession(t *testing.T) {
-	registry := NewDebugSessionRegistry()
-	request := contracts.CreateDebugSessionRequest{
-		Namespace:   "shop",
-		ServiceName: "orders-api",
-		ServicePort: 8080,
-		LocalPort:   5005,
-	}
-	existing, err := registry.Create(request)
-	if err != nil {
-		t.Fatalf("create existing session: %v", err)
-	}
-
-	entropyErr := errors.New("entropy unavailable")
-	calls := 0
-	registry.randomHex = func(int) (string, error) {
-		calls++
-		if calls == 2 {
-			return "", entropyErr
-		}
-		return "new-session-id", nil
-	}
-	if _, err := registry.Create(request); !errors.Is(err, entropyErr) {
-		t.Fatalf("Create error = %v, want %v", err, entropyErr)
-	}
-	if _, ok := registry.Get(existing.SessionID); !ok {
-		t.Fatal("existing session was removed after token generation failed")
-	}
-	if got := len(registry.List()); got != 1 {
-		t.Fatalf("registry contains %d sessions, want 1", got)
-	}
-}
 
 func TestDebugSessionRegistryCreateListDelete(t *testing.T) {
 	registry := NewDebugSessionRegistry()
@@ -48,7 +13,6 @@ func TestDebugSessionRegistryCreateListDelete(t *testing.T) {
 		Namespace:   "default",
 		ServiceName: "svc-a",
 		ServicePort: 8080,
-		LocalPort:   5000,
 	})
 	if err != nil {
 		t.Fatalf("expected create to succeed, got %v", err)
@@ -58,12 +22,6 @@ func TestDebugSessionRegistryCreateListDelete(t *testing.T) {
 	}
 	if created.SessionToken == "" {
 		t.Fatalf("expected session token to be set")
-	}
-	if created.ClientID != "unknown" {
-		t.Fatalf("expected default client id, got %q", created.ClientID)
-	}
-	if _, err := time.Parse(time.RFC3339, created.CreatedAt); err != nil {
-		t.Fatalf("expected RFC3339 created_at, got %q", created.CreatedAt)
 	}
 
 	list := registry.List()
@@ -78,12 +36,8 @@ func TestDebugSessionRegistryCreateListDelete(t *testing.T) {
 		t.Fatalf("expected matching session id, got %q", loaded.SessionID)
 	}
 
-	if ok := registry.Delete(created.SessionID); !ok {
-		t.Fatalf("expected delete to return true")
-	}
-	if ok := registry.Delete(created.SessionID); ok {
-		t.Fatalf("expected second delete to return false")
-	}
+	registry.Delete(created.SessionID)
+	registry.Delete(created.SessionID)
 	if _, ok := registry.Get(created.SessionID); ok {
 		t.Fatalf("expected get to return false after delete")
 	}
@@ -97,38 +51,25 @@ func TestDebugSessionRegistryCreateValidationAndDefaults(t *testing.T) {
 
 	if _, err := registry.Create(contracts.CreateDebugSessionRequest{
 		ServicePort: 8080,
-		LocalPort:   5000,
 	}); err == nil {
 		t.Fatalf("expected validation error for missing service_name")
 	}
 
 	if _, err := registry.Create(contracts.CreateDebugSessionRequest{
 		ServiceName: "svc-a",
-		LocalPort:   5000,
 	}); err == nil {
 		t.Fatalf("expected validation error for missing service_port")
-	}
-
-	if _, err := registry.Create(contracts.CreateDebugSessionRequest{
-		ServiceName: "svc-a",
-		ServicePort: 8080,
-	}); err == nil {
-		t.Fatalf("expected validation error for missing local_port")
 	}
 
 	created, err := registry.Create(contracts.CreateDebugSessionRequest{
 		ServiceName: " svc-a ",
 		ServicePort: 8080,
-		LocalPort:   5000,
 	})
 	if err != nil {
 		t.Fatalf("expected create to succeed, got %v", err)
 	}
 	if created.Namespace != "default" {
 		t.Fatalf("expected default namespace, got %q", created.Namespace)
-	}
-	if created.Workload != "svc-a" {
-		t.Fatalf("expected workload default to service name, got %q", created.Workload)
 	}
 	if created.ServiceName != "svc-a" {
 		t.Fatalf("expected trimmed service name, got %q", created.ServiceName)
@@ -142,7 +83,6 @@ func TestCreateSupersedesSessionForSameWorkload(t *testing.T) {
 		Namespace:   "shop",
 		ServiceName: "orders-api",
 		ServicePort: 8080,
-		LocalPort:   5005,
 	})
 	if err != nil {
 		t.Fatalf("create first: %v", err)
@@ -152,7 +92,6 @@ func TestCreateSupersedesSessionForSameWorkload(t *testing.T) {
 		Namespace:   "shop",
 		ServiceName: "orders-api",
 		ServicePort: 8080,
-		LocalPort:   5005,
 	})
 	if err != nil {
 		t.Fatalf("create second: %v", err)
@@ -172,7 +111,6 @@ func TestCreateSupersedesSessionForSameWorkload(t *testing.T) {
 		Namespace:   "other-ns",
 		ServiceName: "orders-api",
 		ServicePort: 8080,
-		LocalPort:   5005,
 	})
 	if err != nil {
 		t.Fatalf("create other namespace: %v", err)

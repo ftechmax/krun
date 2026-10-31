@@ -7,20 +7,13 @@ type DebugSession struct {
 	SessionToken string `json:"session_token,omitempty"`
 	Namespace    string `json:"namespace"`
 	ServiceName  string `json:"service_name"`
-	Workload     string `json:"workload"`
 	ServicePort  int    `json:"service_port"`
-	LocalPort    int    `json:"local_port"`
-	ClientID     string `json:"client_id"`
-	CreatedAt    string `json:"created_at"`
 }
 
 type CreateDebugSessionRequest struct {
 	Namespace   string `json:"namespace,omitempty"`
 	ServiceName string `json:"service_name"`
-	Workload    string `json:"workload,omitempty"`
 	ServicePort int    `json:"service_port"`
-	LocalPort   int    `json:"local_port"`
-	ClientID    string `json:"client_id,omitempty"`
 }
 
 type ListDebugSessionsResponse struct {
@@ -117,10 +110,8 @@ const (
 )
 
 type StreamEnvelope struct {
-	Type         string            `json:"type"`
-	SessionID    string            `json:"session_id"`
-	ConnectionID string            `json:"connection_id,omitempty"`
-	Data         []byte            `json:"data,omitempty"`
-	Message      string            `json:"message,omitempty"`
-	Metadata     map[string]string `json:"metadata,omitempty"`
+	Type         string `json:"type"`
+	ConnectionID string `json:"connection_id,omitempty"`
+	Data         []byte `json:"data,omitempty"`
+	Message      string `json:"message,omitempty"`
 }

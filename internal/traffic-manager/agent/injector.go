@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -20,13 +21,11 @@ import (
 )
 
 const (
-	defaultContainerName   = contracts.AgentContainerName
-	defaultImage           = "docker.io/ftechmax/krun-traffic-agent:latest"
-	defaultImagePullPolicy = "IfNotPresent"
-	defaultManagerAddress  = "http://krun-traffic-manager.krun-system.svc:8080"
-	defaultProbePort       = 8082
-	injectedLabelKey       = "krun.ftechmax.net/traffic-agent-injected"
-	injectedLabelValue     = "true"
+	defaultImage          = "docker.io/ftechmax/krun-traffic-agent:latest"
+	defaultManagerAddress = "http://krun-traffic-manager.krun-system.svc:8080"
+	defaultProbePort      = 8082
+	injectedLabelKey      = "krun.ftechmax.net/traffic-agent-injected"
+	injectedLabelValue    = "true"
 	// originalProbesAnnotation stores the pre-rewrite probe specs so
 	// Remove/Cleanup can restore them when the sidecar is taken out.
 	originalProbesAnnotation = "krun.ftechmax.net/original-probes"
@@ -41,7 +40,6 @@ type Injector interface {
 }
 
 type Options struct {
-	ContainerName   string
 	Image           string
 	ImagePullPolicy string
 	ManagerAddress  string
@@ -89,17 +87,14 @@ func NewWorkloadInjector(client kubernetes.Interface, options Options) *Workload
 }
 
 func (i *WorkloadInjector) Inject(ctx context.Context, session contracts.DebugSession) error {
-	namespace, workload, err := resolveTarget(session)
-	if err != nil {
-		return err
-	}
+	namespace, workload := session.Namespace, session.ServiceName
 
 	desiredContainer := i.buildContainer(session)
 	return i.mutateWorkload(ctx, namespace, workload, i.findWorkloadTarget, "with traffic-agent sidecar", func(target *workloadTarget) bool {
 		changed := false
 
-		updated := append([]corev1.Container(nil), target.template.Spec.Containers...)
-		index := findContainerIndex(updated, i.options.ContainerName)
+		updated := target.template.Spec.Containers
+		index := findContainerIndex(updated, contracts.AgentContainerName)
 		if index >= 0 {
 			if !reflect.DeepEqual(updated[index], desiredContainer) {
 				updated[index] = desiredContainer
@@ -124,10 +119,7 @@ func (i *WorkloadInjector) Inject(ctx context.Context, session contracts.DebugSe
 }
 
 func (i *WorkloadInjector) Remove(ctx context.Context, session contracts.DebugSession) error {
-	namespace, workload, err := resolveTarget(session)
-	if err != nil {
-		return err
-	}
+	namespace, workload := session.Namespace, session.ServiceName
 
 	return i.mutateWorkload(ctx, namespace, workload, i.findWorkloadTarget, "removing traffic-agent sidecar", i.removeInjectedSidecar)
 }
@@ -143,7 +135,7 @@ func (i *WorkloadInjector) Cleanup(ctx context.Context) error {
 }
 
 func (i *WorkloadInjector) cleanupLabeledByKind(ctx context.Context, kind workloadKind) error {
-	targets, err := i.listLabeledWorkloadsByKind(ctx, kind)
+	targets, err := i.operations[kind].list(ctx)
 	if err != nil {
 		return err
 	}
@@ -155,7 +147,7 @@ func (i *WorkloadInjector) cleanupLabeledByKind(ctx context.Context, kind worklo
 			target.namespace,
 			target.workload,
 			func(ctx context.Context, namespace string, workload string) (*workloadTarget, error) {
-				return i.findWorkloadTargetByKind(ctx, kind, namespace, workload)
+				return i.operations[kind].find(ctx, namespace, workload)
 			},
 			"removing traffic-agent sidecar during startup cleanup",
 			i.removeInjectedSidecar,
@@ -170,21 +162,11 @@ func (i *WorkloadInjector) cleanupLabeledByKind(ctx context.Context, kind worklo
 // removeInjectedSidecar drops the agent container, the injected label and the
 // probe rewrites, reporting whether anything changed.
 func (i *WorkloadInjector) removeInjectedSidecar(target *workloadTarget) bool {
-	filtered := make([]corev1.Container, 0, len(target.template.Spec.Containers))
-	removed := false
-	for _, container := range target.template.Spec.Containers {
-		if container.Name == i.options.ContainerName {
-			removed = true
-			continue
-		}
-		filtered = append(filtered, container)
-	}
-
-	changed := false
-	if removed {
-		target.template.Spec.Containers = filtered
-		changed = true
-	}
+	containers := target.template.Spec.Containers
+	target.template.Spec.Containers = slices.DeleteFunc(containers, func(container corev1.Container) bool {
+		return container.Name == contracts.AgentContainerName
+	})
+	changed := len(containers) != len(target.template.Spec.Containers)
 	if removeInjectedLabel(target.object) {
 		changed = true
 	}
@@ -197,18 +179,6 @@ func (i *WorkloadInjector) removeInjectedSidecar(target *workloadTarget) bool {
 type workloadIdentifier struct {
 	namespace string
 	workload  string
-}
-
-func (i *WorkloadInjector) listLabeledWorkloadsByKind(ctx context.Context, kind workloadKind) ([]workloadIdentifier, error) {
-	operation, ok := i.operations[kind]
-	if !ok {
-		return nil, fmt.Errorf("unsupported workload kind: %s", kind)
-	}
-	workloads, err := operation.list(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("list %ss for startup cleanup: %w", kind, err)
-	}
-	return workloads, nil
 }
 
 func identifiers[T any, PT interface {
@@ -257,7 +227,7 @@ func (i *WorkloadInjector) mutateWorkload(
 
 func (i *WorkloadInjector) findWorkloadTarget(ctx context.Context, namespace string, workload string) (*workloadTarget, error) {
 	for _, kind := range workloadKinds {
-		target, err := i.findWorkloadTargetByKind(ctx, kind, namespace, workload)
+		target, err := i.operations[kind].find(ctx, namespace, workload)
 		if err == nil {
 			return target, nil
 		}
@@ -266,14 +236,6 @@ func (i *WorkloadInjector) findWorkloadTarget(ctx context.Context, namespace str
 		}
 	}
 	return nil, fmt.Errorf("%w: %s/%s", ErrWorkloadNotFound, namespace, workload)
-}
-
-func (i *WorkloadInjector) findWorkloadTargetByKind(ctx context.Context, kind workloadKind, namespace string, workload string) (*workloadTarget, error) {
-	operation, ok := i.operations[kind]
-	if !ok {
-		return nil, fmt.Errorf("unsupported workload kind: %s", kind)
-	}
-	return operation.find(ctx, namespace, workload)
 }
 
 func newWorkloadOperations(client kubernetes.Interface) map[workloadKind]workloadOperation {
@@ -338,7 +300,6 @@ func newWorkloadOperations(client kubernetes.Interface) map[workloadKind]workloa
 
 func fetchWorkload[T interface {
 	metav1.Object
-	DeepCopy() T
 }](
 	ctx context.Context,
 	kind workloadKind,
@@ -356,20 +317,19 @@ func fetchWorkload[T interface {
 		return nil, fmt.Errorf("get %s %s/%s: %w", kind, namespace, workload, err)
 	}
 
-	updated := found.DeepCopy()
 	return &workloadTarget{
 		kind:     kind,
-		object:   updated,
-		template: template(updated),
-		update:   func(ctx context.Context) error { return update(ctx, updated) },
+		object:   found,
+		template: template(found),
+		update:   func(ctx context.Context) error { return update(ctx, found) },
 	}, nil
 }
 
 func (i *WorkloadInjector) buildContainer(session contracts.DebugSession) corev1.Container {
 	return corev1.Container{
-		Name:            i.options.ContainerName,
+		Name:            contracts.AgentContainerName,
 		Image:           i.options.Image,
-		ImagePullPolicy: parsePullPolicy(i.options.ImagePullPolicy),
+		ImagePullPolicy: corev1.PullPolicy(i.options.ImagePullPolicy),
 		Env: []corev1.EnvVar{
 			{Name: "KRUN_SESSION_ID", Value: session.SessionID},
 			{Name: "KRUN_SESSION_TOKEN", Value: session.SessionToken},
@@ -407,7 +367,7 @@ func (i *WorkloadInjector) rewriteProbes(target *workloadTarget, targetPort int)
 
 	for idx := range target.template.Spec.Containers {
 		container := &target.template.Spec.Containers[idx]
-		if container.Name == i.options.ContainerName {
+		if container.Name == contracts.AgentContainerName {
 			continue
 		}
 
@@ -484,11 +444,7 @@ func restoreProbes(target *workloadTarget) bool {
 	}
 
 	delete(annotations, originalProbesAnnotation)
-	if len(annotations) == 0 {
-		target.object.SetAnnotations(nil)
-	} else {
-		target.object.SetAnnotations(annotations)
-	}
+	target.object.SetAnnotations(annotations)
 	return true
 }
 
@@ -528,21 +484,6 @@ func rewriteProbePort(probe *corev1.Probe, probePort int) {
 	}
 }
 
-func resolveTarget(session contracts.DebugSession) (string, string, error) {
-	namespace := strings.TrimSpace(session.Namespace)
-	if namespace == "" {
-		namespace = "default"
-	}
-	workload := strings.TrimSpace(session.Workload)
-	if workload == "" {
-		workload = strings.TrimSpace(session.ServiceName)
-	}
-	if workload == "" {
-		return "", "", errors.New("target workload is required")
-	}
-	return namespace, workload, nil
-}
-
 func findContainerIndex(containers []corev1.Container, name string) int {
 	for idx, container := range containers {
 		if container.Name == name {
@@ -553,11 +494,6 @@ func findContainerIndex(containers []corev1.Container, name string) int {
 }
 
 func normalizeOptions(options Options) Options {
-	options.ContainerName = strings.TrimSpace(options.ContainerName)
-	if options.ContainerName == "" {
-		options.ContainerName = defaultContainerName
-	}
-
 	options.Image = strings.TrimSpace(options.Image)
 	if options.Image == "" {
 		options.Image = defaultImage
@@ -565,7 +501,7 @@ func normalizeOptions(options Options) Options {
 
 	options.ImagePullPolicy = strings.TrimSpace(options.ImagePullPolicy)
 	if options.ImagePullPolicy == "" {
-		options.ImagePullPolicy = defaultImagePullPolicy
+		options.ImagePullPolicy = string(corev1.PullIfNotPresent)
 	}
 
 	options.ManagerAddress = strings.TrimSpace(options.ManagerAddress)
@@ -596,26 +532,8 @@ func ensureInjectedLabel(obj metav1.Object) bool {
 
 func removeInjectedLabel(obj metav1.Object) bool {
 	labels := obj.GetLabels()
-	if len(labels) == 0 {
-		return false
-	}
-	if _, found := labels[injectedLabelKey]; !found {
-		return false
-	}
+	_, found := labels[injectedLabelKey]
 	delete(labels, injectedLabelKey)
-	if len(labels) == 0 {
-		obj.SetLabels(nil)
-		return true
-	}
 	obj.SetLabels(labels)
-	return true
-}
-
-func parsePullPolicy(value string) corev1.PullPolicy {
-	switch corev1.PullPolicy(value) {
-	case corev1.PullAlways, corev1.PullNever, corev1.PullIfNotPresent:
-		return corev1.PullPolicy(value)
-	default:
-		return corev1.PullIfNotPresent
-	}
+	return found
 }

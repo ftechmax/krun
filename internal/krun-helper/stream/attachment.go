@@ -6,7 +6,6 @@ package stream
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -24,7 +23,6 @@ const localDialTimeout = 2 * time.Second
 // own for as long as it is open; Close tears it and every bridged connection
 // down.
 type Attachment struct {
-	sessionID     string
 	interceptAddr string
 	link          *streamlink.Link
 	conns         *streamlink.Conns
@@ -34,25 +32,15 @@ type Attachment struct {
 // running; connecting to the manager happens in the background with retries,
 // so a manager that is briefly unreachable does not fail debug enable.
 func Attach(managerAddress string, sessionID string, sessionToken string, interceptPort int) (*Attachment, error) {
-	trimmedSessionID := strings.TrimSpace(sessionID)
-	if trimmedSessionID == "" {
-		return nil, errors.New("stream session id is required")
-	}
 	if interceptPort < 1 || interceptPort > 65535 {
 		return nil, fmt.Errorf("invalid intercept port %d", interceptPort)
 	}
-	trimmedSessionToken := strings.TrimSpace(sessionToken)
-	if trimmedSessionToken == "" {
-		return nil, errors.New("stream session token is required")
-	}
-
-	streamURL, err := streamlink.URL(managerAddress, streamlink.ClientPath, trimmedSessionID)
+	streamURL, err := streamlink.URL(managerAddress, streamlink.ClientPath, sessionID)
 	if err != nil {
 		return nil, err
 	}
 
 	attachment := &Attachment{
-		sessionID:     trimmedSessionID,
 		interceptAddr: net.JoinHostPort("127.0.0.1", strconv.Itoa(interceptPort)),
 		conns:         streamlink.NewConns(),
 	}
@@ -60,9 +48,8 @@ func Attach(managerAddress string, sessionID string, sessionToken string, interc
 	// of the URL and data envelopes prevents it from reaching access logs.
 	attachment.link = streamlink.New(context.Background(), streamlink.Config{
 		URL:       streamURL,
-		Headers:   streamHeaders(trimmedSessionToken),
-		SessionID: trimmedSessionID,
-		LogPrefix: fmt.Sprintf("helper stream (session_id=%s)", trimmedSessionID),
+		Headers:   streamHeaders(sessionToken),
+		LogPrefix: fmt.Sprintf("helper stream (session_id=%s)", sessionID),
 	})
 	// The manager drops all connection routing for this session when the
 	// client stream detaches, so any local conns from this epoch are dead.
@@ -102,7 +89,7 @@ func (a *Attachment) handleOpen(connectionID string) {
 
 	localConn, err := net.DialTimeout("tcp", a.interceptAddr, localDialTimeout)
 	if err != nil {
-		streamlink.SendErrorClose(a.link, connectionID, err)
+		streamlink.SendError(a.link, connectionID, err)
 		return
 	}
 

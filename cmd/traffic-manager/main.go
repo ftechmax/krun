@@ -10,7 +10,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -57,13 +56,11 @@ func newServer(injector agent.Injector, authTokenHash []byte) *server {
 const (
 	defaultListenAddress = ":8080"
 
-	envAgentContainerName    = "KRUN_AGENT_CONTAINER_NAME"
 	envAgentImage            = "KRUN_AGENT_IMAGE"
 	envAgentImagePullPolicy  = "KRUN_AGENT_IMAGE_PULL_POLICY"
 	envAgentProbePort        = "KRUN_AGENT_PROBE_PORT"
 	envManagerAddress        = "KRUN_MANAGER_ADDRESS"
 	streamSessionIDQuery     = "session_id"
-	streamSessionIDHeader    = "X-Krun-Session-ID"
 	streamSessionTokenHeader = "X-Krun-Session-Token"
 	streamAgentVersionHeader = "X-Krun-Agent-Version"
 
@@ -142,51 +139,27 @@ func configuredAuthTokenHash() ([]byte, error) {
 
 func newHandler(s *server) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", handleHealthz)
-	mux.HandleFunc("/v1/sessions", s.requireAuthToken(s.handleSessions))
-	mux.HandleFunc("/v1/sessions/", s.requireAuthToken(s.handleSessionByID))
-	mux.HandleFunc("/v1/stream/agent", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /healthz", handleHealthz)
+	mux.HandleFunc("POST /v1/sessions", s.requireAuthToken(s.handleCreateSession))
+	mux.HandleFunc("GET /v1/sessions", s.requireAuthToken(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, contracts.ListDebugSessionsResponse{Sessions: s.sessions.List()})
+	}))
+	mux.HandleFunc("DELETE /v1/sessions/{id}", s.requireAuthToken(s.handleSessionByID))
+	mux.HandleFunc("GET /v1/stream/agent", func(w http.ResponseWriter, r *http.Request) {
 		s.handleStreamAttach(w, r, contracts.StreamRoleAgent)
 	})
-	mux.HandleFunc("/v1/stream/client", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /v1/stream/client", func(w http.ResponseWriter, r *http.Request) {
 		s.handleStreamAttach(w, r, contracts.StreamRoleClient)
 	})
 	return mux
 }
 
 func handleHealthz(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": version})
 }
 
-func (s *server) handleSessions(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodPost:
-		s.handleCreateSession(w, r)
-	case http.MethodGet:
-		writeJSON(w, http.StatusOK, contracts.ListDebugSessionsResponse{
-			Sessions: s.sessions.List(),
-		})
-	default:
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-	}
-}
-
 func (s *server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	id, err := parseSessionID(r.URL.Path)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "session id not found")
-		return
-	}
-
+	id := r.PathValue("id")
 	debugSession, ok := s.sessions.Get(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
@@ -237,11 +210,6 @@ func (s *server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleStreamAttach(w http.ResponseWriter, r *http.Request, role string) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
 	debugSession, err := s.resolveStreamSession(r)
 	if err != nil {
 		statusCode := http.StatusBadRequest
@@ -273,27 +241,8 @@ func (s *server) handleStreamAttach(w http.ResponseWriter, r *http.Request, role
 	s.relay.ServePeer(role, debugSession.SessionID, conn)
 }
 
-func parseSessionID(path string) (string, error) {
-	id := strings.TrimPrefix(path, "/v1/sessions/")
-	if id == "" || strings.Contains(id, "/") {
-		return "", errors.New("missing id")
-	}
-	unescaped, err := url.PathUnescape(id)
-	if err != nil {
-		return "", errors.New("invalid id")
-	}
-	trimmed := strings.TrimSpace(unescaped)
-	if trimmed == "" {
-		return "", errors.New("invalid id")
-	}
-	return trimmed, nil
-}
-
 func (s *server) resolveStreamSession(r *http.Request) (contracts.DebugSession, error) {
 	sessionID := strings.TrimSpace(r.URL.Query().Get(streamSessionIDQuery))
-	if sessionID == "" {
-		sessionID = strings.TrimSpace(r.Header.Get(streamSessionIDHeader))
-	}
 	if sessionID == "" {
 		return contracts.DebugSession{}, errors.New("session id is required")
 	}
@@ -304,8 +253,7 @@ func (s *server) resolveStreamSession(r *http.Request) (contracts.DebugSession, 
 	}
 
 	presented := strings.TrimSpace(r.Header.Get(streamSessionTokenHeader))
-	expected := strings.TrimSpace(debugSession.SessionToken)
-	if expected == "" || !constantTimeTokenEqual(presented, expected) {
+	if !constantTimeTokenEqual(presented, debugSession.SessionToken) {
 		return contracts.DebugSession{}, errStreamUnauthorized
 	}
 
@@ -329,7 +277,6 @@ func newInjector(clientset kubernetes.Interface) agent.Injector {
 	probePort, _ := strconv.Atoi(strings.TrimSpace(os.Getenv(envAgentProbePort)))
 
 	return agent.NewWorkloadInjector(clientset, agent.Options{
-		ContainerName:   strings.TrimSpace(os.Getenv(envAgentContainerName)),
 		Image:           strings.TrimSpace(os.Getenv(envAgentImage)),
 		ImagePullPolicy: strings.TrimSpace(os.Getenv(envAgentImagePullPolicy)),
 		ManagerAddress:  strings.TrimSpace(os.Getenv(envManagerAddress)),

@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -107,10 +106,8 @@ func handle(ctx context.Context, client *kube.Client, config cfg.Config, project
 
 func resolveOverlayPaths(config cfg.Config, projectName string) ([]string, error) {
 	projectRelPath := projectName
-	if config.ProjectPaths != nil {
-		if p, ok := config.ProjectPaths[projectName]; ok && p != "" {
-			projectRelPath = p
-		}
+	if p, ok := config.ProjectPaths[projectName]; ok {
+		projectRelPath = p
 	}
 
 	servicePath := filepath.Join(config.KrunSourceConfig.Path, projectRelPath)
@@ -236,45 +233,17 @@ func ensureNamespaces(ctx context.Context, client *kube.Client, objs []*unstruct
 		}
 	}
 
-	seen := map[string]bool{}
-	var required []string
 	for _, obj := range objs {
-		namespace := strings.TrimSpace(obj.GetNamespace())
-		if namespace == "" || provided[namespace] || seen[namespace] {
+		namespace := obj.GetNamespace()
+		if namespace == "" || provided[namespace] {
 			continue
 		}
-		seen[namespace] = true
-		required = append(required, namespace)
-	}
-	sort.Strings(required)
-
-	var missing []string
-	for _, namespace := range required {
-		_, err := client.Clientset.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
-		if err == nil {
-			continue
-		}
-		if !k8serrors.IsNotFound(err) {
-			if k8serrors.IsForbidden(err) {
-				return fmt.Errorf("check namespace %s: access forbidden; grant get access to namespaces or create it before deploying: %w", namespace, err)
-			}
-			return fmt.Errorf("check namespace %s: %w", namespace, err)
-		}
-		missing = append(missing, namespace)
-	}
-	if len(missing) == 0 {
-		return nil
-	}
-
-	for _, namespace := range missing {
+		provided[namespace] = true
 		_, err := client.Clientset.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{Name: namespace},
 		}, metav1.CreateOptions{})
 		if k8serrors.IsAlreadyExists(err) {
 			continue
-		}
-		if k8serrors.IsForbidden(err) {
-			return fmt.Errorf("create namespace %s: access forbidden; grant create access to namespaces or run kubectl create namespace %s: %w", namespace, namespace, err)
 		}
 		if err != nil {
 			return fmt.Errorf("create namespace %s: %w", namespace, err)
@@ -389,14 +358,8 @@ func restartWorkloads(ctx context.Context, client *kube.Client, targets []restar
 		}
 
 		ri := resourceInterface(client.DynamicClient, mapping, target.namespace)
-		if _, err := ri.Get(ctx, target.name, metav1.GetOptions{}); err != nil {
-			if k8serrors.IsNotFound(err) {
-				continue
-			}
-			return fmt.Errorf("check %s %s exists: %w", target.gvk.Kind, target.name, err)
-		}
 
-		if _, err := ri.Patch(ctx, target.name, types.MergePatchType, patchData, metav1.PatchOptions{}); err != nil {
+		if _, err := ri.Patch(ctx, target.name, types.MergePatchType, patchData, metav1.PatchOptions{}); err != nil && !k8serrors.IsNotFound(err) {
 			return fmt.Errorf("restart %s %s: %w", target.gvk.Kind, target.name, err)
 		}
 	}

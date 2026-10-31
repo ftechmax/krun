@@ -23,8 +23,6 @@ func TestSessionsLifecycle(t *testing.T) {
 	createPayload, _ := json.Marshal(contracts.CreateDebugSessionRequest{
 		ServiceName: "orders-api",
 		ServicePort: 8080,
-		LocalPort:   5000,
-		ClientID:    "dev-1",
 	})
 	createReq := newAuthedRequest(http.MethodPost, "/v1/sessions", bytes.NewReader(createPayload))
 	createRec := httptest.NewRecorder()
@@ -45,9 +43,6 @@ func TestSessionsLifecycle(t *testing.T) {
 	}
 	if created.Namespace != "default" {
 		t.Fatalf("expected default namespace, got %q", created.Namespace)
-	}
-	if created.Workload != "orders-api" {
-		t.Fatalf("expected workload default to service_name, got %q", created.Workload)
 	}
 
 	listReq := newAuthedRequest(http.MethodGet, "/v1/sessions", nil)
@@ -106,7 +101,7 @@ func TestManagerAuthenticationFailsClosedWithoutVerifier(t *testing.T) {
 func TestCreateSessionValidation(t *testing.T) {
 	handler := newHandler(newTestServer(&fakeInjector{}))
 
-	payload := []byte(`{"service_name":"orders-api","service_port":8080}`)
+	payload := []byte(`{"service_name":"orders-api"}`)
 	req := newAuthedRequest(http.MethodPost, "/v1/sessions", bytes.NewReader(payload))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -143,8 +138,6 @@ func TestCreateSessionRollsBackWhenInjectFails(t *testing.T) {
 	createPayload, _ := json.Marshal(contracts.CreateDebugSessionRequest{
 		ServiceName: "orders-api",
 		ServicePort: 8080,
-		LocalPort:   5000,
-		ClientID:    "dev-1",
 	})
 	createReq := newAuthedRequest(http.MethodPost, "/v1/sessions", bytes.NewReader(createPayload))
 	createRec := httptest.NewRecorder()
@@ -174,8 +167,6 @@ func TestDeleteSessionReturnsServerErrorWhenRemoveFails(t *testing.T) {
 	createPayload, _ := json.Marshal(contracts.CreateDebugSessionRequest{
 		ServiceName: "orders-api",
 		ServicePort: 8080,
-		LocalPort:   5000,
-		ClientID:    "dev-1",
 	})
 	createReq := newAuthedRequest(http.MethodPost, "/v1/sessions", bytes.NewReader(createPayload))
 	createRec := httptest.NewRecorder()
@@ -216,8 +207,6 @@ func TestDeleteSessionIgnoresMissingWorkloadOnRemove(t *testing.T) {
 	createPayload, _ := json.Marshal(contracts.CreateDebugSessionRequest{
 		ServiceName: "orders-api",
 		ServicePort: 8080,
-		LocalPort:   5000,
-		ClientID:    "dev-1",
 	})
 	createReq := newAuthedRequest(http.MethodPost, "/v1/sessions", bytes.NewReader(createPayload))
 	createRec := httptest.NewRecorder()
@@ -255,8 +244,6 @@ func TestStreamAttachRequiresValidSessionAndToken(t *testing.T) {
 	created, err := s.sessions.Create(contracts.CreateDebugSessionRequest{
 		ServiceName: "orders-api",
 		ServicePort: 8080,
-		LocalPort:   5000,
-		ClientID:    "dev-1",
 	})
 	if err != nil {
 		t.Fatalf("create session: %v", err)

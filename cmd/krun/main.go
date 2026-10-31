@@ -2,9 +2,10 @@ package main
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 
 	cfg "github.com/ftechmax/krun/internal/config"
 	"github.com/ftechmax/krun/internal/krun/build"
@@ -16,8 +17,8 @@ import (
 
 var (
 	config   = cfg.Config{}
-	version  = "debug"         // will be set by the build system
-	services = []cfg.Service{} // map of service name to service struct
+	version  = "debug" // will be set by the build system
+	services = []cfg.Service{}
 )
 
 var kubeConfigPath string
@@ -41,7 +42,7 @@ func main() {
 		&cobra.Command{
 			Use:     "list",
 			Short:   "List all services or projects",
-			PreRun:  preRunInit,
+			PreRun:  initialize,
 			Run:     handleList,
 			Example: "krun list",
 		},
@@ -51,7 +52,7 @@ func main() {
 		Use:    "build <project|service>",
 		Short:  "Build a project or specific service",
 		Args:   cobra.MinimumNArgs(1),
-		PreRun: preRunInit,
+		PreRun: initialize,
 		Run:    handleBuild,
 	}
 	buildCmd.Flags().Bool("skip-web", false, "Skip building the web component")
@@ -63,7 +64,7 @@ func main() {
 		Use:    "deploy <project>",
 		Short:  "Deploy a project",
 		Args:   cobra.MinimumNArgs(1),
-		PreRun: preRunInit,
+		PreRun: initialize,
 		Run:    handleDeploy,
 	}
 	deployCmd.Flags().Bool("use-remote-registry", false, "Use remote registry for deploy")
@@ -75,7 +76,7 @@ func main() {
 		Use:     "delete <project>",
 		Short:   "Delete a project",
 		Args:    cobra.MinimumNArgs(1),
-		PreRun:  preRunInit,
+		PreRun:  initialize,
 		Run:     handleDelete,
 		Example: "krun delete myproject",
 	}
@@ -84,12 +85,12 @@ func main() {
 	debugCmd := &cobra.Command{
 		Use:              "debug",
 		Short:            "Debug commands",
-		PersistentPreRun: preRunInit,
+		PersistentPreRun: initialize,
 	}
 	debugListCmd := &cobra.Command{
 		Use:   "list",
 		Short: "List active debug sessions",
-		Run:   handleDebugList,
+		Run:   func(*cobra.Command, []string) { debug.List(config) },
 	}
 	debugEnableCmd := &cobra.Command{
 		Use:   "enable <service>",
@@ -112,7 +113,7 @@ func main() {
 		Use:   "status",
 		Short: "Check local debug helper daemon status",
 		Args:  cobra.NoArgs,
-		Run:   handleDebugHelperStatus,
+		Run:   func(*cobra.Command, []string) { debug.HelperStatus(config) },
 	}
 	debugRuntimeCmd := &cobra.Command{
 		Use:   "runtime",
@@ -122,19 +123,19 @@ func main() {
 		Use:   "install",
 		Short: "Install or upgrade debug runtime in the cluster",
 		Args:  cobra.NoArgs,
-		Run:   handleDebugRuntimeInstall,
+		Run:   func(*cobra.Command, []string) { debug.RuntimeInstall(config, version) },
 	}
 	debugRuntimeStatusCmd := &cobra.Command{
 		Use:   "status",
 		Short: "Check debug runtime status in the cluster",
 		Args:  cobra.NoArgs,
-		Run:   handleDebugRuntimeStatus,
+		Run:   func(*cobra.Command, []string) { debug.RuntimeStatus(config) },
 	}
 	debugRuntimeUninstallCmd := &cobra.Command{
 		Use:   "uninstall",
 		Short: "Uninstall debug runtime from the cluster",
 		Args:  cobra.NoArgs,
-		Run:   handleDebugRuntimeUninstall,
+		Run:   func(*cobra.Command, []string) { debug.RuntimeUninstall(config, version) },
 	}
 	debugRuntimeCmd.AddCommand(debugRuntimeInstallCmd, debugRuntimeStatusCmd, debugRuntimeUninstallCmd)
 	debugHelperStopCmd := &cobra.Command{
@@ -142,7 +143,7 @@ func main() {
 		Short:            "Stop the local debug helper daemon",
 		Args:             cobra.NoArgs,
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {},
-		Run:              handleDebugHelperStop,
+		Run:              func(*cobra.Command, []string) { debug.HelperStop() },
 	}
 	debugHelperCmd.AddCommand(debugHelperStatusCmd, debugHelperStopCmd)
 	debugCmd.AddCommand(debugListCmd, debugEnableCmd, debugDisableCmd, debugHelperCmd, debugRuntimeCmd)
@@ -154,11 +155,7 @@ func main() {
 	}
 }
 
-func preRunInit(cmd *cobra.Command, args []string) {
-	initialize(cmd, kubeConfigPath)
-}
-
-func initialize(_ *cobra.Command, optKubeConfig string) {
+func initialize(_ *cobra.Command, _ []string) {
 	krunConfig, err := cfg.ParseKrunConfig()
 	if err != nil {
 		utils.Errf("Error parsing krun-config.json: %s", err)
@@ -170,8 +167,8 @@ func initialize(_ *cobra.Command, optKubeConfig string) {
 		Version:    version,
 	}
 
-	if optKubeConfig != "" {
-		config.KubeConfig = filepath.ToSlash(optKubeConfig)
+	if kubeConfigPath != "" {
+		config.KubeConfig = filepath.ToSlash(kubeConfigPath)
 	} else {
 		dirname, err := os.UserHomeDir()
 		if err != nil {
@@ -206,22 +203,9 @@ func handleList(cmd *cobra.Command, args []string) {
 	}
 	fmt.Println("")
 
-	projects := make(map[string]bool)
-	for _, service := range services {
-		if service.Project != "" {
-			projects[service.Project] = true
-		}
-	}
-
-	projectNames := make([]string, 0, len(projects))
-	for project := range projects {
-		projectNames = append(projectNames, project)
-	}
-	sort.Strings(projectNames)
-
 	fmt.Println("Projects")
 	fmt.Println("--------")
-	for _, project := range projectNames {
+	for _, project := range slices.Sorted(maps.Keys(config.ProjectPaths)) {
 		fmt.Println(project)
 	}
 	fmt.Println("")
@@ -239,15 +223,8 @@ func handleBuild(cmd *cobra.Command, args []string) {
 	}
 	servicesToBuild := []cfg.Service{}
 	for _, s := range services {
-		if serviceName != "" {
-			if s.Name == serviceName {
-				servicesToBuild = append(servicesToBuild, s)
-				break
-			}
-		} else if projectName != "" {
-			if s.Project == projectName {
-				servicesToBuild = append(servicesToBuild, s)
-			}
+		if s.Project == projectName && (serviceName == "" || s.Name == serviceName) {
+			servicesToBuild = append(servicesToBuild, s)
 		}
 	}
 	if err := build.Build(projectName, servicesToBuild, skipWeb, forceBuild, flush, config); err != nil {
@@ -282,10 +259,6 @@ func handleDelete(cmd *cobra.Command, args []string) {
 	deploy.Delete(projectName, config)
 }
 
-func handleDebugList(cmd *cobra.Command, args []string) {
-	debug.List(config)
-}
-
 func handleDebugEnable(cmd *cobra.Command, args []string) {
 	containerName, _ := cmd.Flags().GetString("container")
 
@@ -316,44 +289,14 @@ func findService(name string) (cfg.Service, bool) {
 	return cfg.Service{}, false
 }
 
-func handleDebugHelperStatus(cmd *cobra.Command, args []string) {
-	debug.HelperStatus(config)
-}
-
-func handleDebugHelperStop(cmd *cobra.Command, args []string) {
-	debug.HelperStop()
-}
-
-func handleDebugRuntimeInstall(cmd *cobra.Command, args []string) {
-	debug.RuntimeInstall(config, version)
-}
-
-func handleDebugRuntimeStatus(cmd *cobra.Command, args []string) {
-	debug.RuntimeStatus(config)
-}
-
-func handleDebugRuntimeUninstall(cmd *cobra.Command, args []string) {
-	debug.RuntimeUninstall(config, version)
-}
-
 func getServiceNameAndProject(name string) (string, string, error) {
-	serviceName := ""
-	projectName := ""
-	for _, s := range services {
-		if s.Name == name {
-			serviceName = s.Name
-			projectName = s.Project
-			break
+	for _, service := range services {
+		if service.Name == name {
+			return service.Name, service.Project, nil
 		}
-		if s.Project == name {
-			projectName = s.Project
-			break
+		if service.Project == name {
+			return "", service.Project, nil
 		}
 	}
-
-	if serviceName == "" && projectName == "" {
-		return "", "", fmt.Errorf("Service or project '%s' not found.\nRun krun list to show available options", name)
-	}
-
-	return serviceName, projectName, nil
+	return "", "", fmt.Errorf("Service or project '%s' not found.\nRun krun list to show available options", name)
 }
