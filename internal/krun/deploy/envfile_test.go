@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	cfg "github.com/ftechmax/krun/internal/config"
@@ -117,23 +118,36 @@ func TestSelectContainer(t *testing.T) {
 		wantErr    bool
 	}{
 		{
-			name:       "explicit container wins",
-			containers: []corev1.Container{container("api", 8080), agent},
-			service:    cfg.Service{Name: "uma-api", ContainerPort: 8080},
-			override:   "other",
+			name:       "CLI override wins over configured container",
+			containers: []corev1.Container{container("api", 8080), container("other"), agent},
+			service:    cfg.Service{Name: "uma-api", Container: "api", ContainerPort: 8080},
+			override:   " other ",
 			want:       "other",
 		},
 		{
-			name:       "container named after the service",
-			containers: []corev1.Container{container("sidecar", 8080), container("uma-api"), agent},
-			service:    cfg.Service{Name: "uma-api", ContainerPort: 8080},
-			want:       "uma-api",
+			name:       "configured container resolves ambiguity",
+			containers: []corev1.Container{container("sidecar"), container("api"), agent},
+			service:    cfg.Service{Name: "uma-api", Container: " api "},
+			want:       "api",
 		},
 		{
-			name:       "container exposing the service port",
+			name:       "blank override uses configured container",
+			containers: []corev1.Container{container("sidecar"), container("api"), agent},
+			service:    cfg.Service{Name: "uma-api", Container: "api"},
+			override:   " ",
+			want:       "api",
+		},
+		{
+			name:       "service name does not resolve ambiguity",
+			containers: []corev1.Container{container("sidecar", 8080), container("uma-api"), agent},
+			service:    cfg.Service{Name: "uma-api", ContainerPort: 8080},
+			wantErr:    true,
+		},
+		{
+			name:       "service port does not resolve ambiguity",
 			containers: []corev1.Container{container("metrics", 9090), container("api", 8080), agent},
 			service:    cfg.Service{Name: "uma-api", ContainerPort: 8080},
-			want:       "api",
+			wantErr:    true,
 		},
 		{
 			name:       "only container besides the agent",
@@ -142,10 +156,25 @@ func TestSelectContainer(t *testing.T) {
 			want:       "api",
 		},
 		{
+			name:       "single container without agent or configuration",
+			containers: []corev1.Container{container("api")},
+			service:    cfg.Service{Name: "uma-api", Container: " "},
+			want:       "api",
+		},
+		{
 			name:       "ambiguous containers are an error",
 			containers: []corev1.Container{container("a"), container("b"), agent},
 			service:    cfg.Service{Name: "uma-api"},
 			wantErr:    true,
+		},
+		{
+			name:       "agent is never selected automatically",
+			containers: []corev1.Container{agent},
+			wantErr:    true,
+		},
+		{
+			name:    "no containers is an error",
+			wantErr: true,
 		},
 	}
 
@@ -159,6 +188,19 @@ func TestSelectContainer(t *testing.T) {
 			if testCase.wantErr {
 				if err == nil {
 					t.Fatalf("expected an error, got %q", got)
+				}
+				for _, hint := range []string{pod.Name, "krun.json", "--container"} {
+					if !strings.Contains(err.Error(), hint) {
+						t.Errorf("error %q is missing %q", err, hint)
+					}
+				}
+				for _, container := range testCase.containers {
+					if container.Name != contracts.AgentContainerName && !strings.Contains(err.Error(), container.Name) {
+						t.Errorf("error %q is missing candidate %q", err, container.Name)
+					}
+				}
+				if strings.Contains(err.Error(), contracts.AgentContainerName) {
+					t.Errorf("error %q includes the agent as a candidate", err)
 				}
 				return
 			}

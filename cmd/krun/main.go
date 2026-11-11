@@ -101,7 +101,7 @@ func main() {
 		Args:  cobra.MinimumNArgs(1),
 		Run:   handleDebugEnable,
 	}
-	debugEnableCmd.Flags().String("container", "", "Name of the target container in the workload")
+	debugEnableCmd.Flags().String("container", "", "Container to export the environment from (overrides krun.json)")
 	debugDisableCmd := &cobra.Command{
 		Use:   "disable <service>",
 		Short: "Disable debug mode for a service",

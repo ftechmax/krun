@@ -434,11 +434,27 @@ func startHelperProcess(config cfg.Config) error {
 	if _, err := managerauth.ReadLocalToken(managerTokenPath); err != nil {
 		return fmt.Errorf("load manager token (run `krun debug runtime install` first): %w", err)
 	}
+	if err := checkKubernetesAPI(config.KubeConfig); err != nil {
+		return err
+	}
 
 	args := []string{"--manager-token-file", managerTokenPath, "--kubeconfig", config.KubeConfig}
 
 	if err := startBackgroundProcess(helperBinaryPath, args); err != nil {
 		return fmt.Errorf("failed to start helper: %w", err)
+	}
+	return nil
+}
+
+func checkKubernetesAPI(kubeConfigPath string) error {
+	client, err := kube.NewClient(kubeConfigPath)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), healthTimeout)
+	defer cancel()
+	if err := client.Clientset.Discovery().RESTClient().Get().AbsPath("/version").Do(ctx).Error(); err != nil {
+		return fmt.Errorf("Kubernetes API check failed at %s: %w", client.RestConfig.Host, err)
 	}
 	return nil
 }

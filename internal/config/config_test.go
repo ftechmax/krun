@@ -12,7 +12,7 @@ func TestDiscoverServicesDepthAndDefaults(t *testing.T) {
 	rootProject := filepath.Base(root)
 	for dir, contents := range map[string]string{
 		".":           `{"services":[{"name":"root-service","project":"ignored"}]}`,
-		"app":         `{"services":[{"name":" api ","namespace":" dev ","container_port":9000,"intercept_port":9001},{"name":"worker"}]}`,
+		"app":         `{"services":[{"name":" api ","namespace":" dev ","container":"app","container_port":9000,"intercept_port":9001},{"name":"worker"}]}`,
 		"team/nested": `{"services":[{"name":"nested-service"}]}`,
 		"empty":       `{"services":[]}`,
 		"invalid":     `{"services":[`,
@@ -29,7 +29,7 @@ func TestDiscoverServicesDepthAndDefaults(t *testing.T) {
 	}
 
 	rootService := Service{Namespace: "default", Name: "root-service", Project: rootProject, ContainerPort: 8080, InterceptPort: 5000}
-	api := Service{Namespace: "dev", Name: "api", Project: "app", ContainerPort: 9000, InterceptPort: 9001}
+	api := Service{Namespace: "dev", Name: "api", Project: "app", Container: "app", ContainerPort: 9000, InterceptPort: 9001}
 	worker := Service{Namespace: "default", Name: "worker", Project: "app", ContainerPort: 8080, InterceptPort: 5000}
 	nested := Service{Namespace: "default", Name: "nested-service", Project: "nested", ContainerPort: 8080, InterceptPort: 5000}
 	for _, tt := range []struct {

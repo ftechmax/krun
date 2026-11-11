@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sync"
 	"testing"
 )
 
@@ -24,6 +23,13 @@ func TestEnsureLocalTokenCreatesAndReusesPrivateToken(t *testing.T) {
 	if len(first) != 64 {
 		t.Fatalf("token length = %d, want 64 hex characters", len(first))
 	}
+	stored, err := ReadLocalToken(path)
+	if err != nil {
+		t.Fatalf("read private token: %v", err)
+	}
+	if stored != first {
+		t.Fatal("stored token differs from created token")
+	}
 	if runtime.GOOS != "windows" {
 		info, err := os.Stat(path)
 		if err != nil {
@@ -32,40 +38,12 @@ func TestEnsureLocalTokenCreatesAndReusesPrivateToken(t *testing.T) {
 		if got := info.Mode().Perm(); got != 0o600 {
 			t.Fatalf("token permissions = %04o, want 0600", got)
 		}
-	}
-}
-
-func TestEnsureLocalTokenConcurrentInstallersReuseWinner(t *testing.T) {
-	path := filepath.Join(t.TempDir(), dirName, tokenFileName)
-	const installers = 12
-	tokens := make(chan string, installers)
-	errors := make(chan error, installers)
-	var wait sync.WaitGroup
-	for range installers {
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
-			token, err := EnsureLocalToken(path)
-			if err != nil {
-				errors <- err
-				return
-			}
-			tokens <- token
-		}()
-	}
-	wait.Wait()
-	close(tokens)
-	close(errors)
-	for err := range errors {
-		t.Fatalf("concurrent installer: %v", err)
-	}
-	winner, err := ReadLocalToken(path)
-	if err != nil {
-		t.Fatalf("read installed token: %v", err)
-	}
-	for token := range tokens {
-		if token != winner {
-			t.Fatalf("installer returned losing token %q, winner is %q", token, winner)
+		info, err = os.Stat(filepath.Dir(path))
+		if err != nil {
+			t.Fatalf("stat token directory: %v", err)
+		}
+		if got := info.Mode().Perm(); got != 0o700 {
+			t.Fatalf("token directory permissions = %04o, want 0700", got)
 		}
 	}
 }
@@ -77,6 +55,16 @@ func TestReadLocalTokenRejectsMalformedToken(t *testing.T) {
 	}
 	if _, err := ReadLocalToken(path); err == nil {
 		t.Fatal("expected malformed token error")
+	}
+	if _, err := EnsureLocalToken(path); err == nil {
+		t.Fatal("expected install to reject an existing malformed token")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read malformed token after install: %v", err)
+	}
+	if string(data) != "not-a-token" {
+		t.Fatal("install overwrote an existing malformed token")
 	}
 }
 

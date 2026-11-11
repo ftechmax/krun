@@ -68,6 +68,13 @@ an internal protocol and should be rebuilt and upgraded together. Stop a running
 5. Helper applies the combined hosts entries through the privileged writer.
    CLI exports the running container's environment to `.env`.
 
+For `.env` export, `--container <name>` overrides the service's optional
+`container` field in `krun.json`. Without either, the CLI selects a container
+only when exactly one remains after excluding the injected traffic-agent.
+Multiple candidates produce an error listing their names; service-name and
+port matches do not resolve ambiguity. An export failure is reported as a
+warning after session creation; the debug session remains active.
+
 On re-enable, the helper deletes the previous manager session before replacing
 its stream. If deletion fails, the existing local session stays intact.
 Dependency forwards remain available for reuse. Later failures roll back completed
@@ -199,11 +206,17 @@ being asked again. Elevation is requested by the `krun` CLI, never by the
 helper daemon: a detached daemon has no controlling terminal, so `sudo` would
 refuse to prompt it.
 
+On Linux, `sudo` must be on `PATH` and allow the user to run the hosts writer
+as root. The CLI runs `sudo -b -- krun-helper hosts-daemon`: sudo authenticates
+in the terminal and starts the writer in the background. Run the CLI as your
+regular user so the main helper and cluster credentials stay unprivileged.
+Windows uses the UAC `runas` prompt.
+
 Because the writer takes requests off a socket while running as root, it
 treats them as untrusted:
 
 1. The socket is mode `0600`, chowned to the user who authorised the
-   elevation (`SUDO_UID`/`PKEXEC_UID`); on Windows the pipe DACL admits the
+   elevation (`SUDO_UID`); on Windows the pipe DACL admits the
    interactive user alongside SYSTEM/Administrators.
 2. Addresses must be loopback. krun only ever points dependency names at
    `127.0.0.1`, so refusing anything else means a request can at worst

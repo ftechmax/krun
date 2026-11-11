@@ -28,8 +28,9 @@ func DefaultTokenPath() (string, error) {
 	return filepath.Join(home, dirName, tokenFileName), nil
 }
 
-// EnsureLocalToken returns the existing token or atomically creates a new one.
+// EnsureLocalToken returns the existing token or creates a new one.
 // Reusing it on runtime upgrades keeps an already-running helper in sync.
+// Runtime installations must run one at a time.
 func EnsureLocalToken(path string) (string, error) {
 	cleanPath := filepath.Clean(strings.TrimSpace(path))
 	if cleanPath == "." || cleanPath == "" {
@@ -53,42 +54,27 @@ func EnsureLocalToken(path string) (string, error) {
 	var random [32]byte
 	rand.Read(random[:])
 	token := hex.EncodeToString(random[:])
-	temp, err := os.CreateTemp(dir, ".manager-token-*")
+	file, err := os.OpenFile(cleanPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return "", fmt.Errorf("create temporary manager token: %w", err)
+		return "", fmt.Errorf("create manager token %s: %w", cleanPath, err)
 	}
-	tempName := temp.Name()
-	committed := false
+	written := false
 	defer func() {
-		_ = temp.Close()
-		if !committed {
-			_ = os.Remove(tempName)
+		if !written {
+			_ = file.Close()
+			_ = os.Remove(cleanPath)
 		}
 	}()
-	if err := temp.Chmod(0o600); err != nil {
-		return "", fmt.Errorf("secure temporary manager token: %w", err)
-	}
-	if _, err := temp.WriteString(token + "\n"); err != nil {
+	if _, err := file.WriteString(token + "\n"); err != nil {
 		return "", fmt.Errorf("write manager token: %w", err)
 	}
-	if err := temp.Sync(); err != nil {
+	if err := file.Sync(); err != nil {
 		return "", fmt.Errorf("sync manager token: %w", err)
 	}
-	if err := temp.Close(); err != nil {
+	if err := file.Close(); err != nil {
 		return "", fmt.Errorf("close manager token: %w", err)
 	}
-	// Linking a complete temporary file into place is atomic and, unlike
-	// Rename on Unix, never overwrites a token won by a concurrent installer.
-	if err := os.Link(tempName, cleanPath); err != nil {
-		if os.IsExist(err) {
-			return ReadLocalToken(cleanPath)
-		}
-		return "", fmt.Errorf("install manager token %s: %w", cleanPath, err)
-	}
-	if err := os.Remove(tempName); err != nil {
-		return "", fmt.Errorf("remove temporary manager token %s: %w", tempName, err)
-	}
-	committed = true
+	written = true
 	return token, nil
 }
 

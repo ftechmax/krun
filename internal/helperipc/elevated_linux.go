@@ -62,29 +62,16 @@ func secureSocket(endpoint string) error {
 	return nil
 }
 
-// invokingUser resolves the pre-elevation user from the variables sudo and
-// pkexec set. A gid of -1 leaves the group unchanged (pkexec exports no group
-// variable).
+// invokingUser resolves the pre-elevation user from sudo's environment.
+// A gid of -1 leaves the group unchanged when SUDO_GID is unavailable.
 func invokingUser(getenv func(string) string) (int, int, bool) {
-	for _, uidVar := range []string{"SUDO_UID", "PKEXEC_UID"} {
-		uidValue := strings.TrimSpace(getenv(uidVar))
-		if uidValue == "" {
-			continue
-		}
-		uid, err := strconv.Atoi(uidValue)
-		if err != nil || uid < 0 {
-			continue
-		}
-
-		gid := -1
-		if uidVar == "SUDO_UID" {
-			if gidValue := strings.TrimSpace(getenv("SUDO_GID")); gidValue != "" {
-				if parsed, err := strconv.Atoi(gidValue); err == nil && parsed >= 0 {
-					gid = parsed
-				}
-			}
-		}
-		return uid, gid, true
+	uid, err := strconv.Atoi(strings.TrimSpace(getenv("SUDO_UID")))
+	if err != nil || uid < 0 {
+		return 0, 0, false
 	}
-	return 0, 0, false
+	gid, err := strconv.Atoi(strings.TrimSpace(getenv("SUDO_GID")))
+	if err != nil || gid < 0 {
+		gid = -1
+	}
+	return uid, gid, true
 }

@@ -17,8 +17,9 @@ type Service struct {
 	Path                string              `json:"path"`
 	Dockerfile          string              `json:"dockerfile"`
 	Context             string              `json:"context"`
-	ContainerPort       int                 `json:"container_port"` // Defaults to 8080.
-	InterceptPort       int                 `json:"intercept_port"` // Defaults to 5000.
+	Container           string              `json:"container,omitempty"` // Container used for debug environment export.
+	ContainerPort       int                 `json:"container_port"`      // Defaults to 8080.
+	InterceptPort       int                 `json:"intercept_port"`      // Defaults to 5000.
 	ServiceDependencies []ServiceDependency `json:"service_dependencies"`
 }
 

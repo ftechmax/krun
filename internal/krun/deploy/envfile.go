@@ -139,46 +139,27 @@ func findRunningPod(ctx context.Context, client *kube.Client, namespace, service
 	return found, nil
 }
 
-// Prefer an explicit override, then the service name, then its port.
-// The injected agent is excluded from automatic selection.
+// Prefer the CLI override, then the configured container. Without either,
+// select only a sole container besides the injected agent.
 func selectContainer(pod *corev1.Pod, service cfg.Service, override string) (string, error) {
 	if name := strings.TrimSpace(override); name != "" {
 		return name, nil
 	}
+	if name := strings.TrimSpace(service.Container); name != "" {
+		return name, nil
+	}
 
 	var names []string
-	var portMatch string
 	for _, container := range pod.Spec.Containers {
 		if container.Name == contracts.AgentContainerName {
 			continue
 		}
-		if container.Name == service.Name {
-			return container.Name, nil
-		}
 		names = append(names, container.Name)
-		if portMatch == "" && exposesPort(container, service.ContainerPort) {
-			portMatch = container.Name
-		}
-	}
-	if portMatch != "" {
-		return portMatch, nil
 	}
 	if len(names) == 1 {
 		return names[0], nil
 	}
-	return "", fmt.Errorf("cannot pick a container in pod %s (candidates: %s); pass --container", pod.Name, strings.Join(names, ", "))
-}
-
-func exposesPort(container corev1.Container, port int) bool {
-	if port <= 0 {
-		return false
-	}
-	for _, p := range container.Ports {
-		if int(p.ContainerPort) == port {
-			return true
-		}
-	}
-	return false
+	return "", fmt.Errorf("cannot pick a container in pod %s (candidates: %s); set container in krun.json or pass --container", pod.Name, strings.Join(names, ", "))
 }
 
 func execEnv(ctx context.Context, client *kube.Client, namespace, podName, containerName string) (string, error) {

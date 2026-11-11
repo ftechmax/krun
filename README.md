@@ -49,6 +49,7 @@ name: `~/git/my-app/krun.json` defines the project `my-app`.
       "path": "src/api",
       "dockerfile": ".",
       "context": ".",
+      "container": "api",
       "container_port": 8080,
       "intercept_port": 5000,
       "service_dependencies": [
@@ -72,6 +73,7 @@ Each entry in `services` configures one service:
 | `path` | Service directory, relative to the project root. |
 | `dockerfile` | Directory containing `Dockerfile`, relative to `path`. |
 | `context` | Build context, relative to the project root. |
+| `container` | Container for debug `.env` export. Required when multiple containers remain after excluding the traffic-agent, unless `--container` is passed. The flag overrides this field. |
 | `container_port` | Port intercepted in the pod. Default: `8080`. |
 | `intercept_port` | Local app port. Default: `5000`; use a different port for each service you debug together. |
 | `service_dependencies` | Cluster services to forward locally while debugging. |
@@ -117,9 +119,12 @@ Configure your app to load that file, then run it locally in your IDE. Cluster
 traffic now reaches your local app; `service_dependencies` are forwarded from
 the cluster and their hostnames resolve locally.
 
-Use `--container <name>` with `debug enable` to select a container in a
-multi-container pod. The first enable prompts for elevation (Windows UAC or
-Linux sudo) so the hosts writer can update your hosts file.
+For pods with multiple application containers, set `"container": "api"` on the
+service in `krun.json` or pass `--container <name>` to `debug enable`. The flag
+overrides the configured name. Without either, `.env` export automatically
+selects a sole application container, excluding the injected traffic-agent.
+The first enable prompts for elevation (Windows UAC or Linux sudo) so the hosts
+writer can update your hosts file.
 
 ```sh
 krun debug list
