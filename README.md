@@ -98,22 +98,23 @@ krun [global options] <command> [command options] <service>
   krun build --flush awesome-app
   ```
 
-- `deploy [--environment local|development|production] [--use-remote-registry, --no-restart, --create-namespace] <project>`
-  Deploy a project from `k8s/overlays/<environment>`. The environment defaults to `local`; use `development` for a dev/test server or `production` for production. Select the target cluster with `--kubeconfig`.
+- `deploy [--overlay <name>] [--use-remote-registry, --no-restart, --create-namespace] <project>`
+  Deploy a project using the named overlay (default: `local`). The overlays directory is configured by `overlays_dir` in `krun.json` and defaults to `k8s/overlays/`. Select the target cluster with `--kubeconfig`.
   Use `--use-remote-registry` to deploy using the remote Docker registry defined in `krun-config.json`. If not specified, it will use the local Docker registry. Use `--no-restart` to skip the rollout restart after applying manifests. Use `--create-namespace` to discover and create missing target namespaces; without the flag, deploy does not require cluster-scoped Namespace access.
 
   ```sh
   krun deploy awesome-app
   krun deploy --use-remote-registry awesome-app
   krun deploy --no-restart awesome-app
-  krun deploy --environment production --use-remote-registry awesome-app
+  krun deploy --overlay production --use-remote-registry awesome-app
+  krun deploy --overlay staging awesome-app
   ```
 
-- `delete [--environment local|development|production] <project>`
-  Delete a deployed project using the selected environment overlay (default: `local`).
+- `remove [--overlay <name>] <project>` (alias: `delete`)
+  Delete a deployed project using the named overlay (default: `local`) from the same configured overlays directory.
 
   ```sh
-  krun delete awesome-app
+  krun remove awesome-app --overlay staging
   ```
 
 - `debug list`  
@@ -218,45 +219,52 @@ The [krun-config.json](https://github.com/ftechmax/krun/blob/main/krun-config.js
 
 ## krun.json
 
-The `krun.json` file is used by `krun` to detect available services in your defined source folder. It should be placed in the root of your project repository and contains an array of service definitions.
+The `krun.json` file is used by `krun` to detect available services in your defined source folder. Place it in the root of your project repository, with service definitions under `services` and an optional `overlays_dir` setting.
 
 The **project name** is derived from the directory that contains the `krun.json` file. For example, if the file is located at `c:/git/awesome-app/krun.json`, the project name will be `awesome-app`. This is the name you use in commands like `krun build awesome-app` and `krun deploy awesome-app`.
 
 ### Example
 
 ```json
-[
-  {
-    "name": "awesome-app-worker",
-    "path": "src/worker",
-    "dockerfile": "AwesomeApp.Worker",
-    "context": "src/",
-    "service_dependencies": [
-      { "host": "awesome-app-cache", "port": 6379 },
-      { "host": "rabbitmq.default.svc", "port": 5672 },
-      { "host": "ferretdb.ferretdb-system.svc", "port": 27017 }
-    ]
-  },
-  {
-    "name": "awesome-app-api",
-    "path": "src/api",
-    "dockerfile": "AwesomeApp.Api",
-    "context": "src/",
-    "service_dependencies": [
-      { "host": "awesome-app-cache", "port": 6379 },
-      { "host": "rabbitmq.default.svc", "port": 5672 }
-    ]
-  },
-  {
-    "name": "awesome-app-web",
-    "path": "src/web",
-    "dockerfile": ".",
-    "context": "src/web"
-  }
-]
+{
+  "overlays_dir": "k8s/overlays/",
+  "services": [
+    {
+      "name": "awesome-app-worker",
+      "path": "src/worker",
+      "dockerfile": "AwesomeApp.Worker",
+      "context": "src/",
+      "service_dependencies": [
+        { "host": "awesome-app-cache", "port": 6379 },
+        { "host": "rabbitmq.default.svc", "port": 5672 },
+        { "host": "ferretdb.ferretdb-system.svc", "port": 27017 }
+      ]
+    },
+    {
+      "name": "awesome-app-api",
+      "path": "src/api",
+      "dockerfile": "AwesomeApp.Api",
+      "context": "src/",
+      "service_dependencies": [
+        { "host": "awesome-app-cache", "port": 6379 },
+        { "host": "rabbitmq.default.svc", "port": 5672 }
+      ]
+    },
+    {
+      "name": "awesome-app-web",
+      "path": "src/web",
+      "dockerfile": ".",
+      "context": "src/web"
+    }
+  ]
+}
 ```
 
 ### Field Reference
+
+- **`overlays_dir`** (optional): Directory containing the project's Kustomize overlays. Defaults to `k8s/overlays/`. Relative paths are resolved from the directory containing `krun.json`; absolute paths are also accepted. `--overlay staging` selects the `staging` subdirectory.
+
+- **`services`**: Array of service definitions, using the fields below.
 
 - **`name`**: The name of the service as it will be referenced in commands. Make sure this matches the name in your `deployment.yaml` files.
 

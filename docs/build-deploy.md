@@ -56,12 +56,29 @@ selected service is built from its configured Dockerfile and context and pushed
 to the configured registry with the `latest` tag in one step. If any service
 fails, `krun build` exits with status 1.
 
-## Deploy and delete
+## Deploy and remove
 
-The project path comes from service discovery. Deploy and delete use exactly
-`k8s/overlays/<environment>`, selected with `--environment`:
+The project path comes from service discovery. Deploy and remove use
+`<overlays_dir>/<name>`, selected with `--overlay`. The name defaults to `local`
+and can be any single directory name, such as `staging` or `preview-123`.
 
-| Environment | Target |
+Set `overlays_dir` in the project's `krun.json` to change the directory:
+
+```json
+{
+  "overlays_dir": "deploy/overlays",
+  "services": [
+    { "name": "my-app-api", "path": "src/api", "dockerfile": ".", "context": "." }
+  ]
+}
+```
+
+The directory defaults to `k8s/overlays/`. Relative paths are resolved from the
+directory containing `krun.json`; absolute paths are also accepted.
+
+Common overlay names:
+
+| Overlay | Target |
 | --- | --- |
 | `local` (default) | Local machine development |
 | `development` | Dev/test server |
@@ -69,14 +86,14 @@ The project path comes from service discovery. Deploy and delete use exactly
 
 ```sh
 krun deploy my-app
-krun deploy my-app --environment development --use-remote-registry
-krun deploy my-app --environment production --use-remote-registry
-krun delete my-app --environment development
+krun deploy my-app --overlay development --use-remote-registry
+krun deploy my-app --overlay production --use-remote-registry
+krun remove my-app --overlay development
 ```
 
-Environment selection is independent of registry selection and kubeconfig.
-Select the target cluster with `--kubeconfig`. The old cloud/edge and root
-Kustomization discovery paths are no longer supported.
+Overlay selection is independent of registry selection and kubeconfig.
+Select the target cluster with `--kubeconfig`. `delete` remains an alias for
+removal. The `--environment` flag has been replaced by `--overlay`.
 
 krun renders the selected overlay, replaces local-registry references
 with the selected registry, and applies or deletes the objects through the

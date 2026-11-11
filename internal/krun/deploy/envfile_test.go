@@ -15,11 +15,11 @@ import (
 func TestServiceDir(t *testing.T) {
 	root := t.TempDir()
 	cases := []struct {
-		name         string
-		base         string
-		projectPaths map[string]string
-		service      cfg.Service
-		want         string
+		name     string
+		base     string
+		projects map[string]cfg.Project
+		service  cfg.Service
+		want     string
 	}{
 		{
 			name:    "base directory when the service has no project or path",
@@ -28,11 +28,11 @@ func TestServiceDir(t *testing.T) {
 			want:    root,
 		},
 		{
-			name:         "project resolves through the project map",
-			base:         root,
-			projectPaths: map[string]string{"myproject": "apps/myproject"},
-			service:      cfg.Service{Name: "api", Project: "myproject"},
-			want:         filepath.Join(root, "apps", "myproject"),
+			name:     "project resolves through the project map",
+			base:     root,
+			projects: map[string]cfg.Project{"myproject": {Path: "apps/myproject"}},
+			service:  cfg.Service{Name: "api", Project: "myproject"},
+			want:     filepath.Join(root, "apps", "myproject"),
 		},
 		{
 			name:    "service path appends to the base",
@@ -41,19 +41,19 @@ func TestServiceDir(t *testing.T) {
 			want:    filepath.Join(root, "src", "api"),
 		},
 		{
-			name:         "project and service path compose",
-			base:         root,
-			projectPaths: map[string]string{"myproject": "apps/myproject"},
-			service:      cfg.Service{Name: "api", Project: "myproject", Path: "src/api"},
-			want:         filepath.Join(root, "apps", "myproject", "src", "api"),
+			name:     "project and service path compose",
+			base:     root,
+			projects: map[string]cfg.Project{"myproject": {Path: "apps/myproject"}},
+			service:  cfg.Service{Name: "api", Project: "myproject", Path: "src/api"},
+			want:     filepath.Join(root, "apps", "myproject", "src", "api"),
 		},
 	}
 
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			config := cfg.Config{
-				KrunConfig:   cfg.KrunConfig{KrunSourceConfig: cfg.KrunSourceConfig{Path: testCase.base}},
-				ProjectPaths: testCase.projectPaths,
+				KrunConfig: cfg.KrunConfig{KrunSourceConfig: cfg.KrunSourceConfig{Path: testCase.base}},
+				Projects:   testCase.projects,
 			}
 
 			dir := serviceDir(testCase.service, config)

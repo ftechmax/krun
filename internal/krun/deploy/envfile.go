@@ -108,7 +108,7 @@ func writeDotEnv(dir, contents string) error {
 }
 
 func serviceDir(service cfg.Service, config cfg.Config) string {
-	return filepath.Join(config.Path, config.ProjectPaths[service.Project], service.Path)
+	return filepath.Join(config.Path, config.Projects[service.Project].Path, service.Path)
 }
 
 func findRunningPod(ctx context.Context, client *kube.Client, namespace, serviceName string) (*corev1.Pod, error) {

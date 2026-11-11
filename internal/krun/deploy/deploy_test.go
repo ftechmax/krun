@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -36,19 +37,21 @@ var (
 
 func TestResolveOverlayPath(t *testing.T) {
 	root := t.TempDir()
-	for _, environment := range []string{"local", "development", "production"} {
-		config := cfg.Config{KrunConfig: cfg.KrunConfig{KrunSourceConfig: cfg.KrunSourceConfig{Path: root}}, ProjectPaths: map[string]string{"api": "apps/api"}, Environment: environment}
+	for _, overlay := range []string{"local", "development", "production", "staging", "preview-123"} {
+		config := cfg.Config{KrunConfig: cfg.KrunConfig{KrunSourceConfig: cfg.KrunSourceConfig{Path: root}}, Projects: map[string]cfg.Project{"api": {Path: "apps/api", OverlaysDir: "k8s/overlays/"}}, Overlay: overlay}
 		got, err := resolveOverlayPath(config, "api")
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := filepath.Join(root, "apps", "api", "k8s", "overlays", environment)
+		want := filepath.Join(root, "apps", "api", "k8s", "overlays", overlay)
 		if got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
 	}
-	if _, err := resolveOverlayPath(cfg.Config{Environment: "../production"}, "api"); err == nil {
-		t.Fatal("expected invalid environment to fail")
+	for _, overlay := range []string{"", " ", ".", "..", "../production", `/production`, `..\production`, `C:\overlays\production`, "nested/staging"} {
+		if _, err := resolveOverlayPath(cfg.Config{Overlay: overlay}, "api"); err == nil {
+			t.Errorf("expected invalid overlay %q to fail", overlay)
+		}
 	}
 }
 
@@ -80,6 +83,88 @@ metadata:
 	}
 	if objs[0].GetKind() != "ConfigMap" || objs[1].GetKind() != "Deployment" {
 		t.Fatalf("unexpected kinds: %s, %s", objs[0].GetKind(), objs[1].GetKind())
+	}
+}
+
+func TestHandleConfiguredOverlay(t *testing.T) {
+	for _, overlaysDir := range []string{"", "deploy/overlays", t.TempDir()} {
+		for _, mode := range []string{"deploy", "delete"} {
+			t.Run(overlaysDir+"/"+mode, func(t *testing.T) {
+				root := t.TempDir()
+				projectDir := filepath.Join(root, "apps", "api")
+				mkdirAll(t, projectDir)
+				dir := overlaysDir
+				if dir == "" {
+					dir = "k8s/overlays/"
+				}
+				if !filepath.IsAbs(dir) {
+					dir = filepath.Join(projectDir, dir)
+				}
+				overlay := filepath.Join(dir, "staging")
+				mkdirAll(t, overlay)
+				projectJSON, err := json.Marshal(map[string]any{
+					"overlays_dir": overlaysDir,
+					"services":     []cfg.Service{{Name: "api"}},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeFile(t, filepath.Join(projectDir, "krun.json"), string(projectJSON))
+				writeFile(t, filepath.Join(overlay, "kustomization.yaml"), `
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: staging
+configMapGenerator:
+  - name: app-config
+    literals:
+      - MODE=staging
+generatorOptions:
+  disableNameSuffixHash: true
+`)
+				_, projects, err := cfg.DiscoverServices(root, 2)
+				if err != nil {
+					t.Fatal(err)
+				}
+				config := cfg.Config{
+					KrunConfig: cfg.KrunConfig{KrunSourceConfig: cfg.KrunSourceConfig{Path: root}},
+					Projects:   projects,
+					Overlay:    "staging",
+				}
+				client := newFakeKubeClient(
+					seedConfigMap("local", "app-config", nil),
+					seedConfigMap("staging", "app-config", nil),
+				)
+				fake := client.DynamicClient.(*dynamicfake.FakeDynamicClient)
+				if mode == "deploy" {
+					fake.PrependReactor("patch", "configmaps", func(action k8stesting.Action) (bool, runtime.Object, error) {
+						patch := action.(k8stesting.PatchAction)
+						var obj unstructured.Unstructured
+						if err := json.Unmarshal(patch.GetPatch(), &obj); err != nil {
+							t.Fatal(err)
+						}
+						value, _, _ := unstructured.NestedString(obj.Object, "data", "MODE")
+						if patch.GetNamespace() != "staging" || patch.GetName() != "app-config" || value != "staging" {
+							t.Fatalf("applied unexpected overlay: %s", patch.GetPatch())
+						}
+						return true, &obj, nil
+					})
+				}
+				if _, err := handle(context.Background(), client, config, "api", mode == "delete", false); err != nil {
+					t.Fatal(err)
+				}
+				if len(fake.Actions()) != 1 || fake.Actions()[0].GetVerb() != map[string]string{"deploy": "patch", "delete": "delete"}[mode] {
+					t.Fatalf("unexpected actions: %+v", fake.Actions())
+				}
+				if mode == "delete" {
+					if _, err := client.DynamicClient.Resource(configMapGVR).Namespace("staging").Get(context.Background(), "app-config", metav1.GetOptions{}); !k8serrors.IsNotFound(err) {
+						t.Fatalf("selected overlay resource was not deleted: %v", err)
+					}
+				}
+				if _, err := client.DynamicClient.Resource(configMapGVR).Namespace("local").Get(context.Background(), "app-config", metav1.GetOptions{}); err != nil {
+					t.Fatalf("local overlay resource was affected: %v", err)
+				}
+			})
+		}
 	}
 }
 
@@ -170,7 +255,7 @@ spec:
           image: registry:5000/awesome-api:latest
 `)
 
-	config := cfg.Config{Environment: "local",
+	config := cfg.Config{Overlay: "local",
 		KrunConfig: cfg.KrunConfig{
 			LocalRegistry: "registry:5000",
 		},
@@ -250,7 +335,7 @@ data:
 	})
 	clientset := kubefake.NewSimpleClientset()
 	client.Clientset = clientset
-	config := cfg.Config{Environment: "local", KrunConfig: cfg.KrunConfig{KrunSourceConfig: cfg.KrunSourceConfig{Path: root}}, ProjectPaths: map[string]string{"app": "app"}}
+	config := cfg.Config{Overlay: "local", KrunConfig: cfg.KrunConfig{KrunSourceConfig: cfg.KrunSourceConfig{Path: root}}, Projects: map[string]cfg.Project{"app": {Path: "app", OverlaysDir: "k8s/overlays/"}}}
 
 	if _, err := handle(context.Background(), client, config, "app", false, false); err != nil {
 		t.Fatalf("handle default deploy: %v", err)
@@ -365,11 +450,11 @@ metadata:
   namespace: default
 `)
 
-	config := cfg.Config{Environment: "local",
+	config := cfg.Config{Overlay: "local",
 		KrunConfig: cfg.KrunConfig{
 			KrunSourceConfig: cfg.KrunSourceConfig{Path: root},
 		},
-		ProjectPaths: map[string]string{"awesome": "awesome"},
+		Projects: map[string]cfg.Project{"awesome": {Path: "awesome", OverlaysDir: "k8s/overlays/"}},
 	}
 	client := newFakeKubeClient(
 		seedConfigMap("default", "app-config", map[string]string{"MODE": "local"}),

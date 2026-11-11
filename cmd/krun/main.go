@@ -22,7 +22,7 @@ var (
 )
 
 var kubeConfigPath string
-var environment string
+var overlay string
 
 func main() {
 	rootCmd := &cobra.Command{
@@ -70,18 +70,19 @@ func main() {
 	deployCmd.Flags().Bool("use-remote-registry", false, "Use remote registry for deploy")
 	deployCmd.Flags().Bool("no-restart", false, "Skip rollout restart after apply")
 	deployCmd.Flags().Bool("create-namespace", false, "Create target namespaces if they do not exist")
-	deployCmd.Flags().StringVar(&environment, "environment", "local", "Deployment environment: local, development, production")
+	deployCmd.Flags().StringVar(&overlay, "overlay", "local", "Overlay name under the project's overlays_dir")
 	rootCmd.AddCommand(deployCmd)
 
 	deleteCmd := &cobra.Command{
 		Use:     "delete <project>",
+		Aliases: []string{"remove"},
 		Short:   "Delete a project",
 		Args:    cobra.MinimumNArgs(1),
 		PreRun:  initialize,
 		Run:     handleDelete,
 		Example: "krun delete myproject",
 	}
-	deleteCmd.Flags().StringVar(&environment, "environment", "local", "Deployment environment: local, development, production")
+	deleteCmd.Flags().StringVar(&overlay, "overlay", "local", "Overlay name under the project's overlays_dir")
 	rootCmd.AddCommand(deleteCmd)
 
 	debugCmd := &cobra.Command{
@@ -165,9 +166,9 @@ func initialize(_ *cobra.Command, _ []string) {
 	}
 
 	config = cfg.Config{
-		KrunConfig:  krunConfig,
-		Version:     version,
-		Environment: environment,
+		KrunConfig: krunConfig,
+		Version:    version,
+		Overlay:    overlay,
 	}
 
 	if kubeConfigPath != "" {
@@ -184,13 +185,11 @@ func initialize(_ *cobra.Command, _ []string) {
 
 	config.Registry = config.LocalRegistry
 
-	var projectPaths map[string]string
-	services, projectPaths, err = cfg.DiscoverServices(krunConfig.KrunSourceConfig.Path, krunConfig.KrunSourceConfig.SearchDepth)
+	services, config.Projects, err = cfg.DiscoverServices(krunConfig.KrunSourceConfig.Path, krunConfig.KrunSourceConfig.SearchDepth)
 	if err != nil {
 		utils.Errf("Error discovering services: %s", err)
 		os.Exit(0)
 	}
-	config.ProjectPaths = projectPaths
 }
 
 func handleList(cmd *cobra.Command, args []string) {
@@ -208,7 +207,7 @@ func handleList(cmd *cobra.Command, args []string) {
 
 	fmt.Println("Projects")
 	fmt.Println("--------")
-	for _, project := range slices.Sorted(maps.Keys(config.ProjectPaths)) {
+	for _, project := range slices.Sorted(maps.Keys(config.Projects)) {
 		fmt.Println(project)
 	}
 	fmt.Println("")

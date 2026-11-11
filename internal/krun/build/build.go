@@ -32,7 +32,7 @@ func Build(projectName string, services []cfg.Service, force bool, flush bool, c
 		return fmt.Errorf("start build container: %w", err)
 	}
 
-	localRoot := filepath.Join(config.Path, config.ProjectPaths[projectName])
+	localRoot := filepath.Join(config.Path, config.Projects[projectName].Path)
 
 	needsBuild, err := copySource(client, projectName, localRoot, dockerfilePaths(services))
 	if err != nil {

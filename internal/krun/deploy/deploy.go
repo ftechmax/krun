@@ -94,12 +94,15 @@ func handle(ctx context.Context, client *kube.Client, config cfg.Config, project
 }
 
 func resolveOverlayPath(config cfg.Config, projectName string) (string, error) {
-	switch config.Environment {
-	case "local", "development", "production":
-	default:
-		return "", fmt.Errorf("unknown environment %q: use local, development, or production", config.Environment)
+	if strings.TrimSpace(config.Overlay) == "" || config.Overlay == "." || config.Overlay == ".." || strings.ContainsAny(config.Overlay, `/\`) {
+		return "", fmt.Errorf("invalid overlay name %q: use a single directory name", config.Overlay)
 	}
-	return filepath.Join(config.Path, config.ProjectPaths[projectName], "k8s", "overlays", config.Environment), nil
+	project := config.Projects[projectName]
+	overlaysDir := project.OverlaysDir
+	if !filepath.IsAbs(overlaysDir) {
+		overlaysDir = filepath.Join(config.Path, project.Path, overlaysDir)
+	}
+	return filepath.Join(overlaysDir, config.Overlay), nil
 }
 
 func RenderKustomizeObjects(overlayPath string) ([]*unstructured.Unstructured, error) {

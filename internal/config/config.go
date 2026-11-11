@@ -41,12 +41,18 @@ type KrunConfig struct {
 	RemoteRegistry   string `json:"remote_registry"`
 }
 
+type Project struct {
+	Path        string    `json:"-"`
+	OverlaysDir string    `json:"overlays_dir"`
+	Services    []Service `json:"services"`
+}
+
 type Config struct {
 	KrunConfig
-	KubeConfig   string
-	Environment  string
-	Registry     string
-	ProjectPaths map[string]string
+	KubeConfig string
+	Overlay    string
+	Registry   string
+	Projects   map[string]Project
 	// Version is the krun build version, used to detect a helper or cluster
 	// runtime built from a different version.
 	Version string
@@ -101,9 +107,9 @@ func expandHomePath(path string) string {
 	return path
 }
 
-func DiscoverServices(sourceDir string, searchDepth int) ([]Service, map[string]string, error) {
+func DiscoverServices(sourceDir string, searchDepth int) ([]Service, map[string]Project, error) {
 	var services []Service
-	projectPaths := map[string]string{}
+	projects := map[string]Project{}
 	maxDepth := searchDepth + 1 // Include the krun.json filename in the depth.
 
 	err := filepath.WalkDir(sourceDir, func(path string, d os.DirEntry, err error) error {
@@ -136,10 +142,13 @@ func DiscoverServices(sourceDir string, searchDepth int) ([]Service, map[string]
 			return err
 		}
 
-		var projectServices []Service
-		if err := json.Unmarshal(contents, &projectServices); err != nil {
+		var projectConfig Project
+		if err := json.Unmarshal(contents, &projectConfig); err != nil {
 			fmt.Printf("Warning: skipping invalid krun.json at %s: %v\n", path, err)
 			return nil
+		}
+		if projectConfig.OverlaysDir == "" {
+			projectConfig.OverlaysDir = "k8s/overlays/"
 		}
 
 		projectDir := filepath.Dir(path)
@@ -148,11 +157,9 @@ func DiscoverServices(sourceDir string, searchDepth int) ([]Service, map[string]
 		if err != nil {
 			return err
 		}
-		if len(projectServices) > 0 {
-			projectPaths[project] = filepath.ToSlash(projectRelPath)
-		}
-		for i := range projectServices {
-			service := &projectServices[i]
+		projectConfig.Path = filepath.ToSlash(projectRelPath)
+		for i := range projectConfig.Services {
+			service := &projectConfig.Services[i]
 			service.Project = project
 			service.Name = strings.TrimSpace(service.Name)
 			service.Namespace = strings.TrimSpace(service.Namespace)
@@ -169,7 +176,10 @@ func DiscoverServices(sourceDir string, searchDepth int) ([]Service, map[string]
 				service.InterceptPort = 5000
 			}
 		}
-		services = append(services, projectServices...)
+		if len(projectConfig.Services) > 0 {
+			projects[project] = projectConfig
+		}
+		services = append(services, projectConfig.Services...)
 		return nil
 	})
 
@@ -177,7 +187,7 @@ func DiscoverServices(sourceDir string, searchDepth int) ([]Service, map[string]
 		return nil, nil, err
 	}
 
-	return services, projectPaths, nil
+	return services, projects, nil
 }
 
 // resolve fills the Kubernetes target from explicit fields or cluster DNS.
